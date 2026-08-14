@@ -434,6 +434,73 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
+/** 构建 memory_health 工具：插件运行时状态（HMR 验证用，v0.2.1） */
+function buildHealth(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_health',
+    description: '查看记忆插件运行时状态：各作用域条目数、归档数、启动注入是否启用。',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          total: { type: 'integer', required: true },
+          archiveCount: { type: 'integer', required: true },
+          scopes: { type: 'array', required: true, items: { type: 'string' } },
+          injectEnabled: { type: 'boolean', required: true },
+        },
+      },
+      render: (args, value) => [{
+        type: 'text',
+        text: `记忆插件健康：${value.ok ? '正常' : '异常'}（共 ${value.total} 条 / 归档 ${value.archiveCount}；注入 ${value.injectEnabled ? '开' : '关'}）`,
+      }],
+    },
+    async execute(args, exec) {
+      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
+      let total = 0
+      let archiveCount = 0
+      for (const scope of readScopes) {
+        const stats = deps.store.stats(scope)
+        total += stats.total
+        archiveCount += stats.archiveCount
+      }
+      return {
+        ok: true,
+        total,
+        archiveCount,
+        scopes: readScopes,
+        injectEnabled: config.inject.enabled,
+      }
+    },
+  })
+}
+
+/** 构建 memory_version 工具：返回插件版本（HMR 验证判据） */
+function buildVersion(): ToolDefinition {
+  return defineTool({
+    name: 'memory_version',
+    description: '查看记忆插件版本（HMR 热重载验证用）。',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          version: { type: 'string', required: true },
+          buildAt: { type: 'string', required: true },
+        },
+      },
+      render: (args, value) => [{ type: 'text', text: `dsh-agent-memory ${value.version}（build ${value.buildAt}）` }],
+    },
+    async execute() {
+      return { version: '0.2.6', buildAt: new Date().toISOString().slice(0, 19) }
+    },
+  })
+}
+
 /** 构建 memory_check 工具 */
 function buildCheck(): ToolDefinition {
   return defineTool({
@@ -487,6 +554,8 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildForget(deps),
     buildStats(deps),
     buildCheck(),
+    buildHealth(deps),
+    buildVersion(),
   ]
 }
 

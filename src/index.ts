@@ -83,6 +83,8 @@ function toSummarizerConfig(config: Config): SummarizerConfig {
  * @param config - 插件配置
  */
 export async function apply(ctx: Context, config: Config): Promise<void> {
+  // HMR probe（2026-08-14）：若终端出现本行且时间戳新于 build 时刻 → 热重载生效
+  console.log('[dsh-agent-memory] apply', new Date().toISOString(), '(HMR probe)')
   // 1. 开持久化域（生命周期随插件 dispose）
   const domain = await ctx.storageDomain.open(memoryDomainSpec)
   ctx.effect(() => () => domain.close(), 'agent-memory.domainClose')

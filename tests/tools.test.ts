@@ -77,7 +77,7 @@ async function seed(store: MemoryStore, scope: string, kind: EntryKind, title: s
 
 test('六个工具齐备，名称与契约一致', () => {
   const { byName } = setup()
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_browse', 'memory_check', 'memory_stats', 'recall', 'remember', 'update'])
+  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_browse', 'memory_check', 'memory_health', 'memory_stats', 'memory_version', 'recall', 'remember', 'update'])
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
 })
