@@ -49,6 +49,12 @@ export interface MemoryConfig {
   }
   weeklyTemplate: string
   maxEntries: number
+  /** 启动注入配置（会话首 pre-step 注入记忆速览） */
+  inject: {
+    enabled: boolean
+    maxBytes: number
+    maxEntries: number
+  }
 }
 
 /** 检索查询 */
@@ -81,6 +87,35 @@ export interface RecallResultItem {
 export interface RememberResult {
   id: string
   action: 'created' | 'updated' | 'merged'
+}
+
+/** 记忆浏览查询（memory_browse：按时间线分组翻档案，与 recall 互补） */
+export interface BrowseQuery {
+  kind?: EntryKind[]
+  tags?: string[]
+  since?: string
+  until?: string
+  scope?: string
+  includeArchive?: boolean
+  /** 只看指定层级（week/month/year）；缺省 = 全部层级按时间分组 */
+  level?: TimelineLevel
+  /** 分页（1 起） */
+  page?: number
+  pageSize?: number
+}
+
+/** 浏览分组：一个时间桶下的条目（level 为概要层级 week/month/year；明细组为 null） */
+export interface BrowseGroup {
+  bucket: string
+  label: string
+  level: 'week' | 'month' | 'year' | null
+  items: RecallResultItem[]
+}
+
+/** 记忆浏览返回 */
+export interface BrowseResult {
+  groups: BrowseGroup[]
+  total: number
 }
 
 /** recall 返回（规格 §4：{ results, total }） */

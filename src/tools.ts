@@ -21,6 +21,7 @@ import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import { resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
 import { titleFingerprint } from './store.ts'
+import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries } from './search.ts'
 
 /** 工具依赖：存储 + 配置加载（单测注入 mock 用） */
@@ -343,6 +344,96 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
+/** 构建 memory_browse 工具：按时间线分组浏览记忆档案（与 recall 互补） */
+function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_browse',
+    description: '浏览记忆档案：按时间桶分组翻看记忆（年/月/周/日），支持按层级/类型/标签/时间过滤与分页。与 recall 互补——recall 用于「知道要找什么」，memory_browse 用于「不知道有什么、翻档案发现」。概要通过 archiveRef 关联原始条目，可用 recall 展开。',
+    parameters: {
+      kind: { type: 'array', items: { type: 'string', enum: ['fact', 'knowledge', 'episodic', 'summary'] }, description: '条目类型过滤（任一命中）。' },
+      tags: { type: 'array', items: { type: 'string' }, description: '标签过滤（全部命中）。' },
+      since: { type: 'string', description: '起始时间（YYYY-MM-DD 或 ISO）。' },
+      until: { type: 'string', description: '截止时间（YYYY-MM-DD 或 ISO）。' },
+      level: { type: 'string', enum: ['week', 'month', 'year'], description: '只看该层级概要（如 week=只浏览周概要）。' },
+      scope: { type: 'string', description: '作用域覆盖（global 或 workspaceId）；缺省当前 workspace + global。' },
+      includeArchive: { type: 'boolean', description: '是否包含已归档条目（默认否）。' },
+      page: { type: 'integer', description: '页码（1 起，默认 1）。' },
+      pageSize: { type: 'integer', description: '每页组数（默认 20）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          groups: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                bucket: { type: 'string', required: true },
+                label: { type: 'string', required: true },
+                level: { oneOf: [{ type: 'string', enum: ['week', 'month', 'year'] }, { type: 'null' }], required: true },
+                items: {
+                  type: 'array',
+                  required: true,
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', required: true },
+                      kind: { type: 'string', required: true },
+                      title: { type: 'string', required: true },
+                      tags: { type: 'array', required: true, items: { type: 'string' } },
+                      scope: { type: 'string', required: true },
+                      level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
+                      updatedAt: { type: 'string', required: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          total: { type: 'integer', required: true },
+        },
+      },
+      render: (args, value) => {
+        const lines = value.groups.map((group) => {
+          const levelNote = group.level !== null ? `（${group.level}概要）` : ''
+          const items = group.items.map((item) => `  - [${item.kind}] ${item.title}`).join('\n')
+          return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
+        })
+        return [{
+          type: 'text',
+          text: `记忆档案（共 ${value.total} 组，显示 ${value.groups.length} 组）：\n${lines.join('\n')}`,
+        }]
+      },
+    },
+    async execute(args, exec) {
+      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      const entries = readScopes.flatMap((scope) => deps.store.list(scope, { includeArchive: args.includeArchive ?? false }))
+      const result = browseEntries(entries, {
+        kind: args.kind,
+        tags: args.tags,
+        since: args.since,
+        until: args.until,
+        scope: args.scope,
+        includeArchive: args.includeArchive,
+        level: args.level,
+        page: args.page,
+        pageSize: args.pageSize,
+      })
+      // 结果里补 label
+      return {
+        groups: result.groups.map((group) => ({ ...group, label: bucketLabel(group.bucket) })),
+        total: result.total,
+      }
+    },
+  })
+}
+
 /** 构建 memory_check 工具 */
 function buildCheck(): ToolDefinition {
   return defineTool({
@@ -391,6 +482,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
   return [
     buildRemember(deps),
     buildRecall(deps),
+    buildBrowse(deps),
     buildUpdate(deps),
     buildForget(deps),
     buildStats(deps),

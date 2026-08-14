@@ -10,7 +10,7 @@
  * ISO 字符串字典序即时间序；纯日期输入按日界归一化。
  */
 
-import type { Entry, RecallQuery, RecallResult, RecallResultItem } from './types.ts'
+import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, TimelineLevel } from './types.ts'
 
 /** 检索默认截断条数（未显式给 limit 时） */
 export const DEFAULT_RECALL_LIMIT = 20
@@ -73,10 +73,20 @@ function filterEntries(entries: Entry[], query: RecallQuery): Entry[] {
   })
 }
 
-/** 查询文本分词：小写 + 按空白切分；无有效词返回空数组（按新鲜度排序） */
+/** 中文停用词（轻量检索增强 v0.2：查询去噪，避免虚词全命中拉低精度） */
+const STOP_WORDS = new Set([
+  '的', '了', '吗', '呢', '吧', '啊', '呀', '嘛', '哦', '嗯',
+  '是', '在', '有', '和', '与', '或', '及', '跟', '并', '且',
+  '我', '你', '他', '她', '它', '们', '这', '那', '个', '之',
+  '到', '从', '对', '为', '把', '被', '让', '给', '向', '以',
+  '一个', '一些', '这个', '那个', '什么', '怎么', '为什么', '如何', '哪里',
+  '的', '地', '得', '着', '过', '呢', '吧', '啊',
+])
+
+/** 查询文本分词：小写 + 按空白切分 + 过滤停用词；无有效词返回空数组（按新鲜度排序） */
 function tokenize(query: string | undefined): string[] {
   if (query === undefined) return []
-  return query.toLowerCase().split(/\s+/).filter((token) => token.length > 0)
+  return query.toLowerCase().split(/\s+/).filter((token) => token.length > 0 && !STOP_WORDS.has(token))
 }
 
 /**
@@ -131,3 +141,81 @@ function normalizeUntil(until: string | undefined): string | undefined {
   if (until === undefined) return undefined
   return /^\d{4}-\d{2}-\d{2}$/.test(until) ? until + 'T23:59:59.999Z' : until
 }
+
+// ---------- 记忆浏览（memory_browse，v0.2） ----------
+
+/** 时间桶 → 人类可读标签（year/month/week/day） */
+const LEVEL_LABEL: Record<string, string> = {
+  year: '年',
+  month: '月',
+  week: '周',
+  day: '日',
+}
+
+/** 由 createdAt 生成日桶键（YYYY-MM-DD，本地时区） */
+function dayBucketOf(iso: string): string {
+  const d = new Date(iso)
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${d.getFullYear()}-${m}-${day}`
+}
+
+/** 条目参与浏览分组的时间键：优先自身 bucket（概要层），否则按 createdAt 日桶 */
+function browseBucketOf(entry: Entry): string {
+  if (entry.bucket !== null && entry.bucket.length > 0) return entry.bucket
+  return dayBucketOf(entry.createdAt)
+}
+
+/**
+ * 浏览分组：按时间桶聚合（概要按自身 bucket 分组，明细按 createdAt 日桶），
+ * 组间按时间降序（字典序即时间序），组内按 updatedAt 新→旧。
+ * level 参数存在时只浏览该层级（如只看周概要）；缺省全部层级。
+ * @param entries - 候选条目（调用方合并作用域后传入）
+ * @param query - 浏览条件（kind/tags/since/until/scope/includeArchive/level/分页）
+ * @returns { groups, total }；total 为分页前命中条目数
+ */
+export function browseEntries(entries: Entry[], query: BrowseQuery = {}): BrowseResult {
+  const filtered = entries.filter((entry) => {
+    if (query.kind !== undefined && query.kind.length > 0 && !query.kind.includes(entry.kind)) return false
+    if (query.tags !== undefined && query.tags.length > 0 && !query.tags.every((tag) => entry.tags.includes(tag))) return false
+    if (query.includeArchive !== true && entry.archived) return false
+    if (query.scope !== undefined && entry.scope !== query.scope) return false
+    if (query.since !== undefined && entry.createdAt < query.since) return false
+    if (query.until !== undefined && entry.createdAt > query.until) return false
+    if (query.level !== undefined && entry.level !== query.level) return false
+    return true
+  })
+  const groups = new Map<string, { bucket: string; level: BrowseGroup['level']; items: RecallResultItem[] }>()
+  for (const entry of filtered) {
+    const bucket = browseBucketOf(entry)
+    let group = groups.get(bucket)
+    if (group === undefined) {
+      // 组层级：概要条目按其层级（week/month/year）；明细条目归 null
+      group = { bucket, level: entry.kind === 'summary' ? (entry.level === 'week' || entry.level === 'month' || entry.level === 'year' ? entry.level : null) : null, items: [] }
+      groups.set(bucket, group)
+    }
+    group.items.push(toResultItem(entry, 0))
+  }
+  const sorted = [...groups.values()].sort((a, b) => (a.bucket < b.bucket ? 1 : -1))
+  for (const group of sorted) group.items.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+  const page = Math.max(1, Math.floor(query.page ?? 1))
+  const pageSize = Math.max(1, Math.floor(query.pageSize ?? 20))
+  const start = (page - 1) * pageSize
+  const paged = sorted.slice(start, start + pageSize).map((group) => ({ ...group, label: bucketLabel(group.bucket) }))
+  return { groups: paged, total: sorted.length }
+}
+
+/** 桶键 → 展示标签（如 2026-W33 → 2026 第33周；2026-08 → 2026年8月） */
+export function bucketLabel(bucket: string): string {
+  if (/^\d{4}$/.test(bucket)) return bucket + ' 年'
+  if (/^\d{4}-\d{2}$/.test(bucket)) {
+    const [y, m] = bucket.split('-')
+    return `${y} 年 ${Number(m)} 月`
+  }
+  if (/^\d{4}-W\d{2}$/.test(bucket)) {
+    const [y, w] = bucket.split('-W')
+    return `${y} 第 ${Number(w)} 周`
+  }
+  return bucket
+}
+

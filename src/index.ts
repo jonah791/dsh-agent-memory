@@ -3,7 +3,8 @@
  *
  * 函数插件形态（对齐官方 packages/AGENTS.md 与 dsh-agent-teams）：
  * - name / inject / Config / apply，无 default export
- * - 组装职责：storage-domain 开域 → MemoryStore → TimelineCompressor → 六工具注册
+ * - 组装职责：storage-domain 开域 → MemoryStore → TimelineCompressor → 工具注册
+ *   → 启动注入（记忆速览）→ 压缩即记忆（compaction 联动）
  * - 懒压缩接线：recall/memory_stats 访问时经 compress 钩子补压上一自然单位
  *   （DESIGN.md §五：只压缩 L3 情景；global 不压缩；项目配置驱动）
  */
@@ -16,6 +17,8 @@ import { MemoryStore } from './store.ts'
 import { TimelineCompressor, type SummarizeFn } from './timeline.ts'
 import { summarizeEntries, type SummarizerConfig } from './summarizer.ts'
 import { registerMemoryTools, type MemoryToolDeps } from './tools.ts'
+import { installMemoryInject } from './inject.ts'
+import { installCompactionSink } from './compaction-sink.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import type { Entry } from './types.ts'
 
@@ -101,6 +104,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     await compressor.compressPending(scope)
   }
 
-  // 4. 注册六个记忆工具
+  // 4. 注册七个记忆工具（remember/recall/memory_browse/update/forget/memory_stats/memory_check）
   registerMemoryTools(ctx, { store, loadConfig, compress })
+
+  // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
+  installMemoryInject(ctx, { store, loadConfig })
+
+  // 6. 压缩即记忆（v0.2 通道 C）：compaction 成功 → checkpoint 自动落库
+  installCompactionSink(ctx, { store })
 }

@@ -154,7 +154,11 @@ recall(query, { kind?, tags?, since?, until?, scope?, limit?, includeArchive? })
 - v1：标签过滤 + 关键词/全文匹配，按相关度 + 新鲜度（accessedAt）排序
 - 结果标注层级："这是月概要，原始条目已归档，需要深挖吗？"
 - 时间查询一等公民：since/until 按 bucket 走索引
-- v2 候选：BM25 → 向量语义检索（需 embedding API，另行评估）
+- v2：本地轻量增强（查询归一化/去停用词/同义词小表/子串兜底）——**不做向量 RAG**（主人决策，2026-08-14）：
+  - embedding 依赖重、索引增量维护难、条目多时全量重建成本爆炸
+  - 保持「索引永远可从条目重放重建」——kv 主存 + 派生索引，无外部不可重建依赖
+  - 导航层（memory_browse 时间金字塔钻取）承担「语义索引」角色，可解释、零依赖
+- 记忆浏览工具（v0.2）：memory_browse({ kind?, tags?, since?, until?, level?, page? })——按时间线分组浏览概要层 → 经 archiveRef 钻取原始条目；「不知道有什么」时的发现路径，与 recall（知道找什么）互补
 
 ## 八、工具签名（模型视角，中文 description）
 

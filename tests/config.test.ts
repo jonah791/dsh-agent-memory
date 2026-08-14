@@ -84,6 +84,10 @@ timeline:
   archive: keep
 weekly_template: "每周回顾：{{week}}"
 max_entries: 1234
+inject:
+  enabled: false
+  max_bytes: 1500
+  max_entries: 8
 `
 
 test('完整：全部字段 → 原样生效', () => {
@@ -95,6 +99,7 @@ test('完整：全部字段 → 原样生效', () => {
     timeline: { day: true, week: false, month: true, year: false, archive: 'keep' },
     weeklyTemplate: '每周回顾：{{week}}',
     maxEntries: 1234,
+    inject: { enabled: false, maxBytes: 1500, maxEntries: 8 },
   })
 })
 
@@ -107,6 +112,8 @@ test('完整：文件加载路径（memoryConfigPath + loadMemoryConfig）', asy
   const cfg = await loadMemoryConfig(p)
   assert.equal(cfg.scope, 'global-first')
   assert.equal(cfg.maxEntries, 1234)
+  assert.equal(cfg.inject.enabled, false)
+  assert.equal(cfg.inject.maxBytes, 1500)
 })
 
 test('完整：layers 允许 summary 与空数组', () => {
