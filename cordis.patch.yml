@@ -1,0 +1,20 @@
+# dsh-agent-memory bundle patch: mounts the plugin plus its storage stack
+# (storage hub → json backend → domain facility) into the host composition.
+# The plugin opens the agent_memory domain and registers the six memory tools
+# (remember/recall/update/forget/memory_stats/memory_check).
+- insert:
+    - id: storage
+      name: '@deepseek-ai/dsh-storage'
+
+    - id: storage-json
+      name: '@deepseek-ai/dsh-storage-json'
+      config:
+        root: !!js dshHomePath('storages')
+
+    - id: storage-domain
+      name: '@deepseek-ai/dsh-storage-domain'
+      config:
+        backend: json
+
+    - id: agent-memory
+      name: dsh-agent-memory
