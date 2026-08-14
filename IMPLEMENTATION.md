@@ -1,7 +1,7 @@
 # dsh-agent-memory 实现规格（IMPLEMENTATION.md）
 
 > 配套 [DESIGN.md](DESIGN.md)（设计意图）· 2026-08-14 · 本文件是团队成员唯一依赖的工程契约
-> 状态：**v0.1 MVP 已完成**（T0-T7 全绿，at-test 冒烟 MEMORY_OK）· 更新记录见文末
+> 状态：**v0.1 MVP 完成 + v0.2 增强完成**（166 tests / 165 pass；冒烟 MEMORY_OK → V02_OK）· 更新记录见文末
 > 原则：读不到本文件以外的讨论；一切接口、格式、验收以本文为准；标注「取证」处实现者自行查证源码后定
 
 ## 0. 实现完成状态（2026-08-14）
@@ -159,3 +159,11 @@ memory_check() -> { suggestions: [{ signal, summary }] }   // 通道 B 主动侧
 ## 更新记录
 
 - 2026-08-14 v0.1 完成：全任务交付 + 冒烟 MEMORY_OK；回写取证（storage 挂载链/域名限制/zod/schemastery）；T7 增加懒压缩钩子单测（151 tests）
+
+## v0.2 更新（2026-08-14，主人驱动的设计演进）
+
+- **memory_browse 工具**：按时间桶分组浏览（年/月/周/日），支持 kind/tags/since/until/level 过滤与分页；total=组数；组层级=概要层级或 null（DESIGN.md §七「找回旧记忆」温入口）
+- **轻量检索增强**：中文停用词过滤（tokenize 去噪）——**明确不做向量 RAG**（主人决策：embedding 依赖重、索引增量维护难、重建成本爆炸；保持「索引可从条目重放重建」）
+- **启动注入（inject.ts）**：会话首 pre-step 注入记忆速览（agent-instructions 同款瀑布监听器 + fold）——常驻层（global fact 全量）+ 轮廓层（概要先、近期次之，maxEntries/maxBytes 预算截断）；memory.yml 新增 inject 段（enabled/max_bytes/max_entries，默认 3000/20）
+- **压缩即记忆（compaction-sink.ts，通道 C）**：订阅 session/event firehose——compaction/start→summary→end 状态机，end 无 error → checkpoint 落库（episodic，tags=[compaction]，scope=会话 cwd 的 workspace，fire-and-forget 幂等）；compaction/* 为插件扩展事件类型，运行时类型收窄（官方 SessionEventMap 不含）
+- **工程**：tsconfig lib → ES2023（findLastIndex/toSpliced）；browse/inject/compaction-sink 测试（.ts 用 Node 原生类型剥离，.mjs 不可用 import type）
