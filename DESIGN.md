@@ -136,7 +136,7 @@ max_entries: 2000
 |---|---|---|---|
 | A 显式写入 | 主人 `remember` / agent 自觉 | 任意 | 基础通道，不指望它扛全部 |
 | B 信号沉淀 | 框架检测高价值信号 → 投递轻量提示 → **agent 自主决定** | L1 纠正/偏好、L2 教训、L3 完成 | 开关 auto_sink；提示可忽略 |
-| C 压缩即记忆 | /compact 成功 → checkpoint 摘要自动落库 | L3 情景 | **与 dsh-agent-compact 咬合，零新成本** |
+| C 压缩即记忆 | 压缩成功 → checkpoint 原文**保底存档** + inbox 通知（wakeup=false 排队不唤醒） | L3 情景 | **智能体核心（v0.3）**：提炼/组织由 agent 自主决策，机制只保不丢 |
 | D 周度提炼 | 周压缩时回看本周条目（+可选会话标题） | 周概要 | v1 走 LLM 直调；会话深挖为 v2 |
 
 ### 防失控三机制
@@ -186,13 +186,15 @@ memory_check()                                   // 主动查看待沉淀提示�
 | 会话压缩（dsh-agent-compact） | 单次对话 | 会话膨胀时 | checkpoint（agent 自总结） |
 | 记忆压缩（本插件） | 跨会话经历 | 日→周→月→年 | 层级概要（LLM 直调总结） |
 
-**关键决策**：记忆压缩走 `summarizeWithLlm`（LLM 直调）而非 agent 收件箱——因为输入是「记忆条目」（文本可控、规模小），无需 KV cache 优势，且不打断 agent 当前轮次。通道 C 例外：checkpoint 本就是 agent 自总结产物，直接落库不重复总结。
+**关键决策**：记忆压缩走 `summarizeWithLlm`（LLM 直调）而非 agent 收件箱——因为输入是「记忆条目」（文本可控、规模小），无需 KV cache 优势，且不打断 agent 当前轮次。
+
+**通道 C（v0.3 智能体核心重构，2026-08-15）**：checkpoint 原文保底存档（防丢底稿）+ inbox 通知 `wakeup=false`（排队不唤醒，不打断睡眠/工作）——提炼与否、标签、组织由爱丽丝自主决定（理由记入 source.reason）；不再写哨兵重启（压缩在进程内已完整）。依据「爱丽丝为核心」分工总则（SOUL v4.7）：机制只保证不丢、知道、兜底，不替 agent 做内容决策。
 
 ## 十一、里程碑
 
 - **v0.1 MVP**：四层条目 + kv 存储 + remember/recall/update/forget/stats 工具 + 作用域路由 + 去重合并 + 项目配置骨架
 - **v0.2**：年月周日压缩（LLM 直调 + 冷归档 + 模板）+ 时间查询
-- **v0.3**：通道 C（compaction 联动）+ 通道 B（信号沉淀提示）+ bootstrap
+- **v0.3**：通道 C 智能体核心重构（保底存档+通知，已实现 2026-08-15）；通道 B（信号沉淀提示）+ bootstrap 待实施
 - **v1.0**：全配置项落地 + 文档 + 发布（`dsh-plugin` topic）
 
 ## 十二、开放事项（实现前取证）

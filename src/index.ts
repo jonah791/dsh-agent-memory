@@ -57,7 +57,7 @@ export const memoryDomainSpec = defineDomain({
 // ---------- 插件形态 ----------
 
 export const name = 'agent-memory'
-export const inject = ['storageDomain', 'tools', 'llm'] as const
+export const inject = ['storageDomain', 'tools', 'llm', 'agents'] as const
 
 /** 插件配置：总结路由（空字符串 = 跟随会话当前路由，DESIGN.md §十） */
 export interface Config {

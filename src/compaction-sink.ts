@@ -2,15 +2,20 @@
  * 压缩即记忆（DESIGN.md 通道 C：compaction 联动）
  *
  * 订阅会话事件流（session/event firehose），把每次成功的会话压缩 checkpoint
- * 自动落库为 L3 情景记忆（episodic）：
+ * 保底存档为 L3 情景记忆（episodic）——**智能体核心联动（2026-08-15 主人定调）**：
  * - compaction/start   → 记录事务（按 compactionId）
  * - compaction/summary → 记录摘要文本
- * - compaction/end（无 error）→ checkpoint 落库（scope = 会话 cwd 的 workspace）
- *   ——压缩产物本就是 agent 自总结（dsh-agent-compact），直接复用不重复总结
- * 失败（end 带 error）不落库；落库失败静默（幂等，下次压缩再试）。
+ * - compaction/end（无 error）→ 原文保底落库（scope = 会话 cwd 的 workspace）
+ *   + **inbox 通知**（wakeup=false 排队不唤醒）：把决策权交给爱丽丝——
+ *   提炼与否/如何组织/记忆库健康，由爱丽丝自主决定（理由记入 source.reason）
+ * - **不再写哨兵/不再重启**：压缩在进程内已完整，通知排队零打断；
+ *   爱丽丝在忙 → 当前思维结束后处理；在睡 → 睡眠不被打断，到期自然醒来后处理
+ * 失败（end 带 error）不落库不通知；落库失败静默（幂等，下次压缩再试）。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MemoryStore } from './store.ts'
 import { workspaceIdOf } from './scope.ts'
 
@@ -73,7 +78,22 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
     const cwd = session.header?.cwd
     const scope = cwd === undefined ? 'global' : workspaceIdOf(cwd)
     const title = `会话压缩检查点 ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
-    // fire-and-forget：落库失败静默（压缩幂等，下次压缩再试）
+    // 保底存档（fire-and-forget：失败静默，压缩幂等下次再试）
+    const notify = (entryId: string) => {
+      // 智能体核心：通知排队不唤醒——爱丽丝在忙则当前思维结束后处理，
+      // 在睡则睡眠不被打断，到期自然醒来后处理；决策（提炼/归档/整理）归爱丽丝
+      const agent = ctx.agents?.get(session.id)
+      if (agent === undefined) return
+      const text = '[memory] 会话刚完成一次压缩，checkpoint 原文已存档为条目 ' + entryId
+        + '（scope=' + scope + '）。是否提炼记忆版、如何组织，由你决定。'
+      try {
+        agent.send(
+          createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-agent-memory' } }),
+          'next-turn',
+          false, // wakeup=false：排队不唤醒
+        )
+      } catch { /* 通知失败不阻塞；原文已存档，不会丢 */ }
+    }
     void deps.store.remember({
       kind: 'episodic',
       title,
@@ -83,6 +103,6 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
       level: null,
       bucket: null,
       source: { sessionId: session.id, reason: 'compaction/end' },
-    }).catch(() => {})
+    }).then((result) => { notify(result.id) }).catch(() => { /* 落库失败静默 */ })
   })
 }
