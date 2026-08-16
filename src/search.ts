@@ -190,8 +190,8 @@ export function browseEntries(entries: Entry[], query: BrowseQuery = {}): Browse
     const bucket = browseBucketOf(entry)
     let group = groups.get(bucket)
     if (group === undefined) {
-      // 组层级：概要条目按其层级（week/month/year）；明细条目归 null
-      group = { bucket, level: entry.kind === 'summary' ? (entry.level === 'week' || entry.level === 'month' || entry.level === 'year' ? entry.level : null) : null, items: [] }
+      // 组层级：概要条目按其层级（day/week/month/year）；明细条目归 null
+      group = { bucket, level: entry.kind === 'summary' ? (entry.level === 'day' || entry.level === 'week' || entry.level === 'month' || entry.level === 'year' ? entry.level : null) : null, items: [] }
       groups.set(bucket, group)
     }
     group.items.push(toResultItem(entry, 0))

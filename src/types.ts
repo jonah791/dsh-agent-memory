@@ -108,7 +108,7 @@ export interface BrowseQuery {
 export interface BrowseGroup {
   bucket: string
   label: string
-  level: 'week' | 'month' | 'year' | null
+  level: 'day' | 'week' | 'month' | 'year' | null
   items: RecallResultItem[]
 }
 
