@@ -7,7 +7,7 @@
  * 2. 懒压缩触发：访问记忆时发现「上一自然单位已结束且有未压缩条目」→ 生成待压缩单位；
  *    压缩输入 = 该单位全部非归档原料条目，输出 = summary 条目（level/bucket/archiveRef），
  *    原条目冷归档（archived=true，保留不删，可 includeArchive 深挖）。
- * 3. 层级链：日条目（episodic）→ 周概要 → 月概要 → 年概要；只作用于 L3 情景记忆，
+ * 3. 层级链：日概要（episodic 日条目总结）→ 周概要（7 个日概要再总结）→ 月概要（周概要再总结）→ 年概要（月概要再总结）；只作用于 L3 情景记忆，
  *    L1 事实 / L2 知识永不参与压缩（DESIGN.md §五）。
  *
  * 本模块不触碰 LLM：总结通过 SummarizeFn 注入（summarizer.ts 提供真实实现，
@@ -18,8 +18,8 @@ import type { MemoryConfig } from './types.ts'
 import type { Entry, TimelineLevel } from './types.ts'
 import type { MemoryStore } from './store.ts'
 
-/** 压缩目标层级（日条目不压缩，只作原料） */
-export type CompressionLevel = 'week' | 'month' | 'year'
+/** 压缩目标层级（金字塔：日概要 → 周概要 ← 日概要再总结 → 月概要 ← 周概要再总结 → 年概要 ← 月概要再总结） */
+export type CompressionLevel = 'day' | 'week' | 'month' | 'year'
 
 /** 待压缩单位：目标层级 + 目标时间桶（上一自然单位） */
 export interface PendingCompression {
@@ -65,6 +65,7 @@ export interface CompressUnitResult {
 
 /** 层级显示名（概要标题用） */
 const LEVEL_LABEL: Record<CompressionLevel, string> = {
+  day: '日概要',
   week: '周概要',
   month: '月概要',
   year: '年概要',
@@ -193,18 +194,22 @@ export function bucketBelongsTo(
 
 /**
  * 该条目是否是指定目标层级的压缩原料（非归档）。
- * - week ← episodic 日条目（按条目的日桶归属上周）
- * - month ← week 概要（按其周桶归属上月）
- * - year ← month 概要（按其月桶归属上一年）
+ * 金字塔链：day ← episodic 日条目；week ← day 概要（7 个日概要再总结）；
+ * month ← week 概要；year ← month 概要。
  * fact / knowledge 永不参与（DESIGN.md §五：只作用于 L3 情景记忆）。
  */
 function isSourceFor(entry: Entry, level: CompressionLevel, upperBucket: string): boolean {
   if (entry.archived) return false
   switch (level) {
-    case 'week': {
+    case 'day': {
       if (entry.kind !== 'episodic') return false
       const day = entry.bucket ?? dayBucket(new Date(entry.createdAt))
-      return bucketBelongsTo('day', day, 'week', upperBucket)
+      return bucketBelongsTo('day', day, 'day', upperBucket)
+    }
+    case 'week': {
+      if (entry.kind !== 'summary' || entry.level !== 'day') return false
+      if (entry.bucket === null) return false
+      return bucketBelongsTo('day', entry.bucket, 'week', upperBucket)
     }
     case 'month': {
       if (entry.kind !== 'summary' || entry.level !== 'week') return false
@@ -220,12 +225,15 @@ function isSourceFor(entry: Entry, level: CompressionLevel, upperBucket: string)
 }
 
 /**
- * 懒压缩触发：扫描当前 scope 条目，找出「上一自然单位已结束且有未压缩原料」的待压缩单位。
- * 幂等：目标桶已存在同层级概要 → 不算待压缩（不重复压缩）。
+ * 懒压缩触发：扫描当前 scope 条目，找出「所有已结束自然单位」中「有未压缩原料」的待压缩单位。
+ * - 不只上一单位：凡已结束（range.end <= now）且有原料、无同层概要的桶全部补压——
+ *   历史缺口（如插件上线前的天）也能补齐，保证金字塔完整。
+ * - 幂等：目标桶已存在同层级概要 → 不算待压缩（不重复压缩）。
+ * - 层级顺序 day→week→month→year：compressPending 循环调用，链式原料就绪。
  * @param entries - scope 全量条目（含归档，供幂等检查；通常为 store.list(scope, {includeArchive:true})）
- * @param config - 项目记忆配置（timeline.week/month/year 开关决定哪些层级启用）
+ * @param config - 项目记忆配置（timeline.day/week/month/year 开关决定哪些层级启用）
  * @param now - 当前时刻（测试注入固定时刻）
- * @returns 待压缩单位列表（按 周→月→年 顺序）
+ * @returns 待压缩单位列表（按 日→周→月→年 顺序）
  */
 export function findPendingCompressions(
   entries: readonly Entry[],
@@ -233,17 +241,34 @@ export function findPendingCompressions(
   now: Date = new Date(),
 ): PendingCompression[] {
   const pending: PendingCompression[] = []
-  const levels: CompressionLevel[] = ['week', 'month', 'year']
+  const levels: CompressionLevel[] = ['day', 'week', 'month', 'year']
   for (const level of levels) {
     if (!config.timeline[level]) continue
-    const prev = previousBucketKey(level, now)
-    const hasSources = entries.some((entry) => isSourceFor(entry, level, prev))
-    if (!hasSources) continue
-    const already = entries.some(
-      (entry) => entry.kind === 'summary' && entry.level === level && entry.bucket === prev,
-    )
-    if (already) continue
-    pending.push({ level, bucket: prev })
+    // 候选桶：所有条目的该层级桶 + 上一自然单位。
+    // day 层优先用条目自身 bucket（episodic/日概要落库时即日桶，可能与 createdAt 推算不一致）；
+    // 上层（week/month/year）按 createdAt 推算归属桶（低层 summary 的 bucket 不是本层桶）。
+    const candidates = new Set<string>()
+    for (const entry of entries) {
+      if (level === 'day' && typeof entry.bucket === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.bucket)) {
+        candidates.add(entry.bucket) // 仅日桶格式（episodic/日概要）；周/月/年概要的 bucket 不是日桶
+        continue
+      }
+      const d = new Date(entry.createdAt)
+      if (isFinite(d.getTime())) candidates.add(bucketKey(level, d))
+    }
+    candidates.add(previousBucketKey(level, now))
+    for (const bucket of candidates) {
+      // 只压「已结束」单位：桶范围终点 <= now；当前单位未结束不动（条目仍可能追加）
+      const range = bucketRange(level, bucket)
+      if (range.end.getTime() > now.getTime()) continue
+      const hasSources = entries.some((entry) => isSourceFor(entry, level, bucket))
+      if (!hasSources) continue
+      const already = entries.some(
+        (entry) => entry.kind === 'summary' && entry.level === level && entry.bucket === bucket,
+      )
+      if (already) continue
+      pending.push({ level, bucket })
+    }
   }
   return pending
 }
@@ -322,14 +347,18 @@ ${text}`,
 
   /**
    * 懒压缩入口：扫描待压缩单位并逐个压缩（访问记忆时调用一次）。
-   * 周 → 月 → 年 依次处理；单位间原料不重叠，可安全顺序执行。
+   * 循环直到无待压缩：day 概要生成 → 归档日条目 → 下一轮 week 才能看到 day 概要原料，
+   * 周 → 月 → 年 链式推进；每轮至少压一个单位否则退出（幂等有界）。
    */
   async compressPending(scope: string, now: Date = new Date()): Promise<CompressUnitResult[]> {
-    const all = this.store.list(scope, { includeArchive: true })
-    const pending = findPendingCompressions(all, this.config, now)
     const results: CompressUnitResult[] = []
-    for (const p of pending) {
-      results.push(await this.compressUnit(scope, p.level, p.bucket))
+    for (;;) {
+      const all = this.store.list(scope, { includeArchive: true })
+      const pending = findPendingCompressions(all, this.config, now)
+      if (pending.length === 0) break
+      for (const p of pending) {
+        results.push(await this.compressUnit(scope, p.level, p.bucket))
+      }
     }
     return results
   }

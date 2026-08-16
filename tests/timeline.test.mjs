@@ -1,9 +1,9 @@
 /**
  * 时间压缩线离线单测（T6 验收）：覆盖
  * - bucket 算法边界：周一 / 跨年 W01 / 年初归上年 W53 / 跨月跨年
- * - 懒压缩触发 findPendingCompressions：上周原料 / 幂等 / L1-L2 隔离 / 配置开关
+ * - 懒压缩触发 findPendingCompressions：已结束日/周原料 / 幂等 / L1-L2 隔离 / 配置开关
  * - 压缩执行 compressUnit：产物字段（level/bucket/archiveRef/标题/正文）/ 归档标记 / 跳过分支
- * - 层级链：episodic → 周概要 → 月概要 → 年概要
+ * - 层级链：episodic → 日概要 → 周概要 → 月概要 → 年概要（金字塔逐层再总结）
  * - compressPending 懒压缩入口一次处理多单位
  * 运行：pnpm test（先 build 再 node --test）
  */
@@ -191,11 +191,23 @@ describe('bucketBelongsTo 上下级归属', () => {
 })
 
 describe('findPendingCompressions 懒压缩触发', () => {
-  test('上一自然周有未压缩 episodic → 待压缩 week', () => {
+  test('已结束日有未压缩 episodic → 待压缩 day；今天不动', () => {
     const { store } = seeded([
-      entry({ id: 'a', bucket: '2026-08-05' }), // W32
+      entry({ id: 'a', bucket: '2026-08-05' }),
       entry({ id: 'b', bucket: '2026-08-06' }),
-      entry({ id: 'c', bucket: '2026-08-14' }), // 本周 W33，不属上一周
+      entry({ id: 'c', bucket: '2026-08-14' }), // 今天，未结束
+    ])
+    const pending = findPendingCompressions(store.list('workspace-a', { includeArchive: true }), DEFAULT_CONFIG, NOW)
+    assert.deepEqual(pending, [
+      { level: 'day', bucket: '2026-08-05' },
+      { level: 'day', bucket: '2026-08-06' },
+    ])
+  })
+
+  test('上周有未压缩 day 概要 → 待压缩 week', () => {
+    const { store } = seeded([
+      entry({ id: 'd1', kind: 'summary', level: 'day', bucket: '2026-08-05', title: '日概要 2026-08-05' }), // W32
+      entry({ id: 'd2', kind: 'summary', level: 'day', bucket: '2026-08-14', title: '日概要 2026-08-14' }), // 本周 W33
     ])
     const pending = findPendingCompressions(store.list('workspace-a', { includeArchive: true }), DEFAULT_CONFIG, NOW)
     assert.deepEqual(pending, [{ level: 'week', bucket: '2026-W32' }])
@@ -226,10 +238,11 @@ describe('findPendingCompressions 懒压缩触发', () => {
     assert.deepEqual(pending, [])
   })
 
-  test('目标桶已有同层级概要 → 幂等不重复', () => {
+  test('目标桶已有同层级概要 → 幂等不重复（链完整则无事可做）', () => {
     const { store } = seeded([
       entry({ id: 'a', bucket: '2026-08-05' }),
-      entry({ id: 's', kind: 'summary', level: 'week', bucket: '2026-W32', title: '周概要 2026-W32' }),
+      entry({ id: 'd', kind: 'summary', level: 'day', bucket: '2026-08-05', title: '日概要 2026-08-05' }),
+      entry({ id: 'w', kind: 'summary', level: 'week', bucket: '2026-W32', title: '周概要 2026-W32' }),
     ])
     const pending = findPendingCompressions(store.list('workspace-a', { includeArchive: true }), DEFAULT_CONFIG, NOW)
     assert.deepEqual(pending, [])
@@ -247,15 +260,16 @@ describe('findPendingCompressions 懒压缩触发', () => {
     const { store } = seeded([entry({ id: 'a', bucket: '2026-08-05' })])
     const config = {
       ...DEFAULT_CONFIG,
-      timeline: { ...DEFAULT_CONFIG.timeline, week: false },
+      timeline: { ...DEFAULT_CONFIG.timeline, day: false },
     }
     const pending = findPendingCompressions(store.list('workspace-a', { includeArchive: true }), config, NOW)
     assert.deepEqual(pending, [])
   })
 
-  test('多个层级同时待压缩（周+月+年）', () => {
+  test('多个层级同时待压缩（周+月+年；同日已有日概要则 day 幂等跳过）', () => {
     const { store } = seeded([
       entry({ id: 'a', bucket: '2026-08-05' }),
+      entry({ id: 'd', kind: 'summary', level: 'day', bucket: '2026-08-05', title: '日概要 2026-08-05' }),
       entry({ id: 'w', kind: 'summary', level: 'week', bucket: '2026-W30', title: '周概要 2026-W30' }),
       entry({ id: 'm', kind: 'summary', level: 'month', bucket: '2025-06', title: '月概要 2025-06' }),
     ])
@@ -283,17 +297,17 @@ describe('TimelineCompressor.compressUnit 压缩执行', () => {
     return new TimelineCompressor(store, config, fakeSummarize(captured))
   }
 
-  test('周压缩：产物字段完整 + 原料归档 + archiveRef 引用', async () => {
+  test('日压缩：产物字段完整 + 原料归档 + archiveRef 引用', async () => {
     const ids = ['a', 'b']
     for (const id of ids) {
       kv.map.set(memoryKey('workspace-a', 'episodic', id), entry({ id, bucket: '2026-08-05' }))
     }
-    // 无关条目：本周 + fact + knowledge 不应成为原料
+    // 无关条目：其他日 + fact + knowledge 不应成为原料
     kv.map.set(memoryKey('workspace-a', 'episodic', 'c'), entry({ id: 'c', bucket: '2026-08-14' }))
     kv.map.set(memoryKey('workspace-a', 'fact', 'f'), entry({ id: 'f', kind: 'fact', key: 'k1', bucket: '2026-08-05' }))
     kv.map.set(memoryKey('workspace-a', 'knowledge', 'k'), entry({ id: 'k', kind: 'knowledge', bucket: '2026-08-05' }))
 
-    const result = await compressor().compressUnit('workspace-a', 'week', '2026-W32')
+    const result = await compressor().compressUnit('workspace-a', 'day', '2026-08-05')
 
     assert.equal(result.skipped, false)
     assert.equal(result.reason, 'compressed')
@@ -302,22 +316,22 @@ describe('TimelineCompressor.compressUnit 压缩执行', () => {
 
     // 总结入参：原料只含 episodic 两条
     assert.equal(captured.length, 1)
-    assert.equal(captured[0].level, 'week')
-    assert.equal(captured[0].bucket, '2026-W32')
+    assert.equal(captured[0].level, 'day')
+    assert.equal(captured[0].bucket, '2026-08-05')
     assert.equal(captured[0].entries.length, 2)
-    assert.equal(captured[0].range.label, '2026-W32（2026-08-03 ~ 2026-08-09）')
+    assert.equal(captured[0].range.label, '2026-08-05')
     assert.equal(captured[0].weeklyTemplate, '')
 
     // summary 条目字段
     const summary = store.get('workspace-a', result.summary.id)
     assert.equal(summary.kind, 'summary')
-    assert.equal(summary.level, 'week')
-    assert.equal(summary.bucket, '2026-W32')
+    assert.equal(summary.level, 'day')
+    assert.equal(summary.bucket, '2026-08-05')
     assert.deepEqual(summary.archiveRef, ['a', 'b'])
-    assert.ok(summary.title.includes('周概要'))
-    assert.ok(summary.title.includes('2026-W32'))
+    assert.ok(summary.title.includes('日概要'))
+    assert.ok(summary.title.includes('2026-08-05'))
     assert.ok(summary.body.includes('来源 2 条'))
-    assert.ok(summary.body.includes('这是week概要正文'))
+    assert.ok(summary.body.includes('这是day概要正文'))
     assert.equal(summary.archived, false)
 
     // 原料冷归档：archived=true 且保留（includeArchive 可见），活跃检索不可见
@@ -335,6 +349,31 @@ describe('TimelineCompressor.compressUnit 压缩执行', () => {
       store.list('workspace-a', { includeArchive: true }).map((e) => e.id).sort(),
       [result.summary.id, 'a', 'b', 'c', 'f', 'k'].sort(),
     )
+  })
+
+  test('周压缩链：原料为上周 day 概要，产物归档 day 概要', async () => {
+    kv.map.set(memoryKey('workspace-a', 'summary', 'd1'), entry({
+      id: 'd1', kind: 'summary', level: 'day', bucket: '2026-08-05', title: '日概要 2026-08-05',
+    }))
+    kv.map.set(memoryKey('workspace-a', 'summary', 'd2'), entry({
+      id: 'd2', kind: 'summary', level: 'day', bucket: '2026-08-06', title: '日概要 2026-08-06',
+    }))
+    kv.map.set(memoryKey('workspace-a', 'summary', 'd3'), entry({
+      id: 'd3', kind: 'summary', level: 'day', bucket: '2026-08-14', title: '日概要 2026-08-14', // 本周，不在上周
+    }))
+
+    const result = await compressor().compressUnit('workspace-a', 'week', '2026-W32')
+
+    assert.equal(result.reason, 'compressed')
+    assert.deepEqual(result.archivedIds, ['d1', 'd2'])
+    assert.equal(captured[0].level, 'week')
+    assert.equal(captured[0].entries.length, 2)
+    const summary = store.get('workspace-a', result.summary.id)
+    assert.equal(summary.level, 'week')
+    assert.equal(summary.bucket, '2026-W32')
+    assert.deepEqual(summary.archiveRef, ['d1', 'd2'])
+    assert.equal(store.get('workspace-a', 'd1').archived, true)
+    assert.equal(store.get('workspace-a', 'd3').archived, false) // 本周概要不动
   })
 
   test('无原料 → 跳过 no-sources', async () => {
@@ -404,23 +443,23 @@ describe('TimelineCompressor.compressUnit 压缩执行', () => {
   })
 
   test('weeklyTemplate 从配置透传进总结入参', async () => {
-    kv.map.set(memoryKey('workspace-a', 'episodic', 'a'), entry({ id: 'a', bucket: '2026-08-05' }))
+    kv.map.set(memoryKey('workspace-a', 'summary', 'd'), entry({ id: 'd', kind: 'summary', level: 'day', bucket: '2026-08-05', title: '日概要 2026-08-05' }))
     const config = { ...DEFAULT_CONFIG, weeklyTemplate: '总结本周进展与数据，如有未完成事项请单列' }
     await compressor(config).compressUnit('workspace-a', 'week', '2026-W32')
     assert.equal(captured[0].weeklyTemplate, '总结本周进展与数据，如有未完成事项请单列')
   })
 
   test('总结产出为空 → fail loud 抛错且不落库', async () => {
-    kv.map.set(memoryKey('workspace-a', 'episodic', 'a'), entry({ id: 'a', bucket: '2026-08-05' }))
+    kv.map.set(memoryKey('workspace-a', 'summary', 'd'), entry({ id: 'd', kind: 'summary', level: 'day', bucket: '2026-08-05', title: '日概要 2026-08-05' }))
     const c = new TimelineCompressor(store, DEFAULT_CONFIG, async () => '   ')
     await assert.rejects(() => c.compressUnit('workspace-a', 'week', '2026-W32'), /总结产出为空/)
     assert.equal(kv.size, 1) // 未新增 summary
-    assert.equal(store.get('workspace-a', 'a').archived, false) // 原料未归档
+    assert.equal(store.get('workspace-a', 'd').archived, false) // 原料未归档
   })
 })
 
 describe('TimelineCompressor.compressPending 懒压缩入口', () => {
-  test('一次处理全部待压缩单位（周+月+年），产物齐备', async () => {
+  test('一次处理全部待压缩单位（日+周+月+年），链式产物齐备', async () => {
     const kv = new MemoryKv()
     const store = new MemoryStore(kv)
     const captured = []
@@ -434,22 +473,27 @@ describe('TimelineCompressor.compressPending 懒压缩入口', () => {
     const c = new TimelineCompressor(store, DEFAULT_CONFIG, fakeSummarize(captured))
     const results = await c.compressPending('workspace-a', NOW)
 
-    assert.equal(results.length, 3)
+    // 链式：轮1 压 day（episodic → 日概要并归档 a）+ month/year（原料是种子概要，轮1 就绪）；
+    // 轮2 才见日概要 → 压 week（周原料依赖日概要产物）。层级集合齐备即链式完整。
+    assert.equal(results.length, 4)
     for (const r of results) {
       assert.equal(r.skipped, false)
       assert.equal(r.reason, 'compressed')
     }
-    assert.deepEqual(results.map((r) => r.summary.level), ['week', 'month', 'year'])
+    assert.deepEqual(results.map((r) => r.summary.level).sort(), ['day', 'month', 'week', 'year'])
 
     // 压缩后不再有待压缩单位（幂等闭环）
     const again = await c.compressPending('workspace-a', NOW)
     assert.equal(again.length, 0)
 
-    // 三层概要都在（非归档 = 新生成的 3 个），原料全部归档
+    // 四层概要都在；日概要在周压缩后归档，非归档 = 新生成的周/月/年
     const all = store.list('workspace-a', { includeArchive: true })
     const summaries = all.filter((e) => e.kind === 'summary')
-    assert.equal(summaries.length, 5) // 3 新 + 2 种子（w/m 已归档但仍为 summary）
+    assert.equal(summaries.length, 6) // 4 新 + 2 种子（w/m 已归档但仍为 summary）
+    assert.deepEqual(summaries.filter((e) => e.archived).map((e) => e.level).sort(), ['day', 'month', 'week'])
     assert.deepEqual(summaries.filter((e) => !e.archived).map((e) => e.level).sort(), ['month', 'week', 'year'])
-    assert.deepEqual(all.filter((e) => e.archived).map((e) => e.id).sort(), ['a', 'm', 'w'])
+    const archivedIds = all.filter((e) => e.archived).map((e) => e.id)
+    assert.equal(archivedIds.length, 4) // a + 日概要 + w + m
+    for (const id of ['a', 'w', 'm']) assert.ok(archivedIds.includes(id))
   })
 })

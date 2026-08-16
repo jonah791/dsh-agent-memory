@@ -45,6 +45,7 @@ const DEFAULT_MAX_TOKENS = 2000
 
 /** 层级显示名（提示词用，与 timeline.ts 的 LEVEL_LABEL 保持同文案） */
 const LEVEL_LABEL: Record<CompressionLevel, string> = {
+  day: '日概要',
   week: '周概要',
   month: '月概要',
   year: '年概要',

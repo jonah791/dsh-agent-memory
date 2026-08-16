@@ -6,10 +6,11 @@
  * - compaction/start   → 记录事务（按 compactionId）
  * - compaction/summary → 记录摘要文本
  * - compaction/end（无 error）→ 原文保底落库（scope = 会话 cwd 的 workspace）
- *   + **inbox 通知**（wakeup=false 排队不唤醒）：把决策权交给爱丽丝——
- *   提炼与否/如何组织/记忆库健康，由爱丽丝自主决定（理由记入 source.reason）
- * - **不再写哨兵/不再重启**：压缩在进程内已完整，通知排队零打断；
- *   爱丽丝在忙 → 当前思维结束后处理；在睡 → 睡眠不被打断，到期自然醒来后处理
+ *   + **inbox 通知（wakeup=true 自动送达）**：压缩完成即唤醒送达，把决策权交给
+ *   爱丽丝——提炼与否/如何组织/记忆库健康，由爱丽丝自主决定（理由记入 source.reason）
+ * - **不再写哨兵/不再重启**：压缩在进程内已完整，零打断当前思维（忙时排队等
+ *   当前 turn 结束，空闲立即处理）；压缩时 agent 必醒着（活跃期决策发起），
+ *   不存在睡眠被打断的场景（2026-08-16 主人定调：完成即送达，不等主人下一条消息）
  * 失败（end 带 error）不落库不通知；落库失败静默（幂等，下次压缩再试）。
  */
 
@@ -80,8 +81,9 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
     const title = `会话压缩检查点 ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
     // 保底存档（fire-and-forget：失败静默，压缩幂等下次再试）
     const notify = (entryId: string) => {
-      // 智能体核心：通知排队不唤醒——爱丽丝在忙则当前思维结束后处理，
-      // 在睡则睡眠不被打断，到期自然醒来后处理；决策（提炼/归档/整理）归爱丽丝
+      // 智能体核心（2026-08-16 主人定调：压缩完成自动送达）：wakeup=true——
+      // 空闲立即唤醒处理；忙则当前思维结束后处理（压缩时 agent 必醒着，无睡眠打断）；
+      // 决策（提炼/归档/整理）归爱丽丝
       const agent = ctx.agents?.get(session.id)
       if (agent === undefined) return
       const text = '[memory] 会话刚完成一次压缩，checkpoint 原文已存档为条目 ' + entryId
@@ -90,7 +92,7 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
         agent.send(
           createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-agent-memory' } }),
           'next-turn',
-          false, // wakeup=false：排队不唤醒
+          true, // wakeup=true：压缩完成即自动送达（主人 2026-08-16：不等主人下一条消息）
         )
       } catch { /* 通知失败不阻塞；原文已存档，不会丢 */ }
     }

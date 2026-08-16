@@ -56,9 +56,9 @@ test('压缩成功 → 原文保底落库 + inbox 通知（wakeup=false 排队�
     assert.deepEqual(r.tags, ['compaction'])
     assert.ok(r.title.startsWith('会话压缩检查点'))
     assert.ok(r.body.includes('本周完成了记忆插件'))
-    // 通知：排队不唤醒，消息携带条目 id，决策权留给爱丽丝
+    // 通知：完成即送达（wakeup=true），消息携带条目 id，决策权留给爱丽丝
     assert.equal(sent.length, 1)
-    assert.equal(sent[0]!.wakeup, false)
+    assert.equal(sent[0]!.wakeup, true)
     assert.equal(sent[0]!.target, 'next-turn')
     assert.ok(sent[0]!.text.includes('entry-1'))
     assert.ok(sent[0]!.text.includes('由你决定'))
