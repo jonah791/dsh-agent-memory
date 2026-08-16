@@ -354,7 +354,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       tags: { type: 'array', items: { type: 'string' }, description: '标签过滤（全部命中）。' },
       since: { type: 'string', description: '起始时间（YYYY-MM-DD 或 ISO）。' },
       until: { type: 'string', description: '截止时间（YYYY-MM-DD 或 ISO）。' },
-      level: { type: 'string', enum: ['week', 'month', 'year'], description: '只看该层级概要（如 week=只浏览周概要）。' },
+      level: { type: 'string', enum: ['day', 'week', 'month', 'year'], description: '只看该层级概要（如 day=只看日概要，week=只看周概要）。' },
       scope: { type: 'string', description: '作用域覆盖（global 或 workspaceId）；缺省当前 workspace + global。' },
       includeArchive: { type: 'boolean', description: '是否包含已归档条目（默认否）。' },
       page: { type: 'integer', description: '页码（1 起，默认 1）。' },
@@ -374,7 +374,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               properties: {
                 bucket: { type: 'string', required: true },
                 label: { type: 'string', required: true },
-                level: { oneOf: [{ type: 'string', enum: ['week', 'month', 'year'] }, { type: 'null' }], required: true },
+                level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
                 items: {
                   type: 'array',
                   required: true,
