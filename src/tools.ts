@@ -391,6 +391,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
                       level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
                       updatedAt: { type: 'string', required: true },
                       score: { type: 'number', required: true },
+                      archived: { type: 'boolean', required: true },
                     },
                   },
                 },
