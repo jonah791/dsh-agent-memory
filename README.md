@@ -78,6 +78,10 @@ node node_modules/typescript/lib/tsc.js -p tsconfig.json && node --test
 
 - [dsh-agent-compact](https://github.com/jonah791/dsh-agent-compact) — Agent 驱动会话压缩（通道 C 的咬合方）
 
+## 相关
+
+- [我的数字生命爱丽丝 — 插件生态中心（架构总览）](https://github.com/jonah791/alice-digital-life)
+
 ## License
 
 MIT
