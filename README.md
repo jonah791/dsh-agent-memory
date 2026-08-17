@@ -4,6 +4,17 @@
 
 > 状态：v0.3（智能体核心联动已落地）。DSH 为预览版（0.1.0-rc），无兼容承诺。
 
+
+## 安装
+
+```bash
+cd <你的 self-plugins 目录>
+git clone https://github.com/jonah791/dsh-agent-memory.git
+cd dsh-agent-memory
+pnpm install
+pnpm build
+```
+
 ## 设计总纲
 
 **程序系统只是工具和框架，重要的决策与行为由智能体自己决定。**
@@ -66,3 +77,7 @@ node node_modules/typescript/lib/tsc.js -p tsconfig.json && node --test
 ## 关联项目
 
 - [dsh-agent-compact](https://github.com/jonah791/dsh-agent-compact) — Agent 驱动会话压缩（通道 C 的咬合方）
+
+## License
+
+MIT
