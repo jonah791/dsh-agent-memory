@@ -1,3 +1,13 @@
+<!--
+  DSH 插件生态公约声明（plugin-ecosystem-convention · 组合优先/声明清晰/兼容优先）
+  purpose: 
+  inject: 'storageDomain','tools','llm','agents'
+  tools: memory_*,recall,remember,update,forget
+  runtime: host-only
+  envDeps: 无（纯逻辑/标准 Node）
+  boundary: 无特殊授权边界
+  compat: cordis ^4.0.1 / dsh-tools ^0.1.0-rc.6
+-->
 # dsh-agent-memory — DSH 的 Agent 驱动长期记忆插件
 
 **为 DeepSeek Harness (DSH) 打造的智能体驱动长期记忆插件。** 跨会话的经历库：主人偏好、项目知识、决策理由、学习沉淀——结构化写入、可检索读取、可整理压缩。

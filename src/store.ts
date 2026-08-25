@@ -105,6 +105,13 @@ export class MemoryStore {
     return undefined
   }
 
+  /** 枚举存储中出现的所有 scope（周期补压等无 exec 上下文路径用；含 global） */
+  scopes(): string[] {
+    const set = new Set<string>()
+    for (const [, entry] of this.kv.entries()) set.add(entry.scope)
+    return [...set]
+  }
+
   /** 当前 scope 全量条目（快照拷贝，防止外部误改存储对象；可含归档） */
   list(scope: string, opts: { includeArchive?: boolean } = {}): Entry[] {
     const out: Entry[] = []

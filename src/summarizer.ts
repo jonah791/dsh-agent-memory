@@ -40,8 +40,8 @@ export interface MemorySummaryResult {
   usage?: TokenUsage
 }
 
-/** 输出 token 缺省上限 */
-const DEFAULT_MAX_TOKENS = 2000
+/** 输出 token 缺省上限（v0.3 从 2000 提到 8000：历史缺口补压原料量大，2000 常触发 MAX_TOKENS fail-closed） */
+const DEFAULT_MAX_TOKENS = 8000
 
 /** 层级显示名（提示词用，与 timeline.ts 的 LEVEL_LABEL 保持同文案） */
 const LEVEL_LABEL: Record<CompressionLevel, string> = {
@@ -99,8 +99,9 @@ export async function summarizeEntries(
   input: SummarizeInput,
   agent?: Agent,
   signal?: AbortSignal,
+  fallbackTarget?: { provider: string; model: string },
 ): Promise<MemorySummaryResult> {
-  const target = resolveTarget(config, agent)
+  const target = resolveTarget(config, agent, fallbackTarget)
   const prompt = buildSummaryPrompt(input)
 
   const assembler = new BlockAssembler()
@@ -139,8 +140,12 @@ export async function summarizeEntries(
 
 // ---------- 内部辅助 ----------
 
-/** 路由解析：显式配置 → 会话路由 → fail loud */
-function resolveTarget(config: SummarizerConfig, agent?: Agent): { provider: string; model: string } {
+/** 路由解析：显式配置 → 会话路由 → fallbackTarget（周期任务等无 agent 上下文用）→ fail loud */
+function resolveTarget(
+  config: SummarizerConfig,
+  agent?: Agent,
+  fallbackTarget?: { provider: string; model: string },
+): { provider: string; model: string } {
   if (config.provider.length > 0 && config.model.length > 0) {
     return { provider: config.provider, model: config.model }
   }
@@ -148,8 +153,11 @@ function resolveTarget(config: SummarizerConfig, agent?: Agent): { provider: str
   if (header !== undefined && header.provider.length > 0 && header.model.length > 0) {
     return { provider: header.provider, model: header.model }
   }
+  if (fallbackTarget !== undefined && fallbackTarget.provider.length > 0 && fallbackTarget.model.length > 0) {
+    return { provider: fallbackTarget.provider, model: fallbackTarget.model }
+  }
   throw new Error(
-    '记忆压缩：缺少 provider/model —— 请设置 summarizer.provider/model，或在有会话请求路由（requestHeader）的上下文中触发',
+    '记忆压缩：缺少 provider/model —— 请设置 summarizer.provider/model、在有会话请求路由（requestHeader）的上下文中触发，或提供 fallbackTarget',
   )
 }
 

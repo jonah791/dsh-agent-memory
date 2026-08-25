@@ -10,6 +10,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import z from '@deepseek-ai/schemastery'
 import { z as zod } from 'zod'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
@@ -19,6 +20,7 @@ import { summarizeEntries, type SummarizerConfig } from './summarizer.ts'
 import { registerMemoryTools, type MemoryToolDeps } from './tools.ts'
 import { installMemoryInject } from './inject.ts'
 import { installCompactionSink } from './compaction-sink.ts'
+import { installPeriodicCompress } from './periodic.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import type { Entry } from './types.ts'
 
@@ -59,17 +61,23 @@ export const memoryDomainSpec = defineDomain({
 export const name = 'agent-memory'
 export const inject = ['storageDomain', 'tools', 'llm', 'agents'] as const
 
-/** 插件配置：总结路由（空字符串 = 跟随会话当前路由，DESIGN.md §十） */
+/** 插件配置：总结路由（空字符串 = 跟随会话当前路由，DESIGN.md §十）+ 周期补压参数（v0.3） */
 export interface Config {
   provider?: string
   model?: string
   maxTokens?: number
+  /** 周期补压间隔（分钟；0=禁用；缺省 360=6 小时） */
+  compressIntervalMinutes?: number
+  /** 启动延迟首跑（秒；补历史缺口；缺省 30） */
+  compressInitialDelaySeconds?: number
 }
 
 export const Config: z<Config> = z.object({
   provider: z.string().default(''),
   model: z.string().default(''),
   maxTokens: z.number(), // schemastery object 字段默认可选（interface 保持 maxTokens?: number）
+  compressIntervalMinutes: z.number().default(360),
+  compressInitialDelaySeconds: z.number().default(30),
 })
 
 /** summarize 直调配置（由插件配置转写） */
@@ -93,9 +101,35 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // 2. 配置加载：每个 workspace 自己的 .dsh/memory.yml（DESIGN.md §四）
   const loadConfig = async (workspaceRoot: string) => loadMemoryConfig(memoryConfigPath(workspaceRoot))
 
+  // v0.3 周期补压路由：实时解析活跃会话的当前模型路由（原本设计——跟随会话 requestHeader，
+  // 即「由主会话模型总结」，非默认/别的模型）；lastRoute 为懒压缩捕获的最近会话路由补充。
+  let lastRoute: { provider: string; model: string } | undefined
+
+  /** 实时从活跃会话（ctx.agents.list）解析当前模型路由——与懒压缩的 requestHeader 同源 */
+  function resolveActiveRoute(): { provider: string; model: string } | undefined {
+    try {
+      for (const agent of ctx.agents.list()) {
+        const header = agent.session.requestHeader()?.config
+        if (header !== undefined && header.provider.length > 0 && header.model.length > 0) {
+          return { provider: header.provider, model: header.model }
+        }
+      }
+    } catch {
+      // agents 服务不可用：忽略，交由上层路由链处理
+    }
+    return undefined
+  }
+
   // 3. 懒压缩钩子：访问记忆时补压上一自然单位（fire-and-forget，幂等；失败静默下次重试）
   const compress: MemoryToolDeps['compress'] = async (scope, agent) => {
     if (scope === 'global') return // DESIGN.md §五：global 层不启用时间压缩
+    // 捕获会话路由缓存（periodic 无 agent 上下文时回退用）
+    if (agent !== undefined) {
+      const header = agent.session.requestHeader()?.config
+      if (header !== undefined && header.provider.length > 0 && header.model.length > 0) {
+        lastRoute = { provider: header.provider, model: header.model }
+      }
+    }
     const cfg = await loadConfig(scope)
     if (!cfg.timeline.week && !cfg.timeline.month && !cfg.timeline.year) return
     const summarize: SummarizeFn = async (input) => {
@@ -114,4 +148,32 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   // 6. 压缩即记忆（v0.2 通道 C）：compaction 成功 → checkpoint 自动落库
   installCompactionSink(ctx, { store })
+
+  // 7. 周期补压（v0.3，主人 2026-08-21 定调）：可靠触发时间桶压缩，不依赖「访问记忆才触发」。
+  //    路由：config 显式 → resolveActiveRoute（活跃会话当前路由，同 requestHeader 原本设计）→ lastRoute 缓存
+  const compressIntervalMs = (config.compressIntervalMinutes ?? 360) * 60_000
+  const initialDelayMs = (config.compressInitialDelaySeconds ?? 30) * 1000
+  if (compressIntervalMs > 0) {
+    installPeriodicCompress(ctx, {
+      store,
+      loadConfig,
+      summarize: (input) => {
+        const route = resolveActiveRoute() ?? lastRoute
+        if (route !== undefined) {
+          console.log(`[dsh-agent-memory] 周期补压路由 ${route.provider}/${route.model}`)
+        }
+        return summarizeEntries(
+          ctx,
+          toSummarizerConfig(config),
+          input,
+          undefined,
+          undefined,
+          route,
+        ).then((result) => result.body)
+      },
+    }, {
+      intervalMs: compressIntervalMs,
+      initialDelayMs,
+    })
+  }
 }

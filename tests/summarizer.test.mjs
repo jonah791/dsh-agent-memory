@@ -98,7 +98,7 @@ describe('summarizeEntries 直调全路径', () => {
     assert.equal(result.body, '本周完成了重构与缓存修复。')
     assert.equal(result.provider, 'deepseek')
     assert.equal(result.model, 'deepseek-chat')
-    assert.equal(result.maxTokens, 2000)
+    assert.equal(result.maxTokens, 8000)
     assert.deepEqual(result.usage, { inputTokens: 100, outputTokens: 20 })
   })
 
