@@ -22,7 +22,7 @@ import { resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
 import { titleFingerprint } from './store.ts'
 import { browseEntries, bucketLabel } from './search.ts'
-import { recallEntries, relatedOf } from './search.ts'
+import { recallEntries, relatedOf, relateClosure } from './search.ts'
 
 /** 工具依赖：存储 + 配置加载（单测注入 mock 用） */
 export interface MemoryToolDeps {
@@ -459,10 +459,11 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
 function buildRelate(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_relate',
-    description: '联想导航：按 id 找到一条记忆并展开它的关联网络（related 链：共享标签/标题/正文关联的邻居记忆，关联强度降序）。用于从已知记忆沿关系行走——「这条记忆还连着谁」。返回目标条目摘要 + 关联链（共享标签数/关联强度）。',
+    description: '联想导航：按 id 找到一条记忆并展开它的关联网络（related 链：共享标签/标题/正文关联的邻居记忆，关联强度降序）。depth=1（默认）单跳；depth>1 沿关系网 BFS 多跳探索记忆社区（hop 标注层级）。用于从已知记忆沿关系行走——「这条记忆还连着谁」。返回目标条目摘要 + 关联链（hop/共享标签数/关联强度）。',
     parameters: {
       id: { type: 'string', required: true, description: '目标记忆条目 id（来自 recall/remember/memory_browse）。' },
-      limit: { type: 'integer', description: '关联条数上限（缺省 3）。' },
+      limit: { type: 'integer', description: '每跳关联条数上限（缺省 3）。' },
+      depth: { type: 'integer', description: 'BFS 跳数（缺省 1=单跳；2-3 多跳探索记忆社区）。' },
       scope: { type: 'string', description: '作用域覆盖（global 或 workspaceId）；缺省当前 workspace + global。' },
       includeArchive: { type: 'boolean', description: '是否包含已归档条目（默认否）。' },
     },
@@ -495,6 +496,7 @@ function buildRelate(deps: MemoryToolDeps): ToolDefinition {
                 scope: { type: 'string', required: true },
                 sharedTags: { type: 'number', required: true },
                 strength: { type: 'number', required: true },
+                hop: { type: 'number', required: true },
               },
             },
           },
@@ -506,7 +508,10 @@ function buildRelate(deps: MemoryToolDeps): ToolDefinition {
         const t = v.target
         const rel = v.related ?? []
         if (rel.length === 0) return [{ type: 'text', text: `联想导航：${t.title}（${t.id}）无关联邻居。` }]
-        const lines = rel.map((r) => `- [${r.kind}@${r.scope} 关联强度${r.strength}] ${r.title}`)
+        const lines = rel.map((r) => {
+          const hopNote = r.hop !== undefined && r.hop > 1 ? `[${r.hop}跳] ` : ''
+          return `- ${hopNote}[${r.kind}@${r.scope} 关联强度${r.strength}] ${r.title}`
+        })
         return [{ type: 'text', text: `联想导航：${t.title}（${t.id}）→ ${rel.length} 条关联：\n` + lines.join('\n') }]
       },
     },
@@ -517,7 +522,11 @@ function buildRelate(deps: MemoryToolDeps): ToolDefinition {
       const entries = readScopes.flatMap((scope) => deps.store.list(scope, { includeArchive }))
       const target = findEntry(deps.store, readScopes, args.id)
       if (target === undefined) return { ok: false, error: `未找到 id="${args.id}" 的记忆条目（当前检索作用域内）` }
-      const related = relatedOf(entries, target, args.limit ?? 3, includeArchive)
+      const depth = args.depth ?? 1
+      const limitPerHop = args.limit ?? 3
+      const related = depth > 1
+        ? relateClosure(entries, target, depth, limitPerHop, includeArchive)
+        : relatedOf(entries, target, limitPerHop, includeArchive).map((r) => ({ ...r, hop: 1 }))
       return {
         ok: true,
         target: { id: target.id, kind: target.kind, title: target.title, scope: target.scope },
@@ -589,7 +598,7 @@ function buildVersion(): ToolDefinition {
       render: (args, value) => [{ type: 'text', text: `dsh-agent-memory ${value.version}（build ${value.buildAt}）` }],
     },
     async execute() {
-      return { version: '0.2.1', buildAt: new Date().toISOString().slice(0, 19) }
+      return { version: '0.2.2', buildAt: new Date().toISOString().slice(0, 19) }
     },
   })
 }

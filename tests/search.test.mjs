@@ -6,7 +6,7 @@
 
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { recallEntries, DEFAULT_RECALL_LIMIT } from '../lib/search.js'
+import { recallEntries, relateClosure, DEFAULT_RECALL_LIMIT } from '../lib/search.js'
 
 /** 构造一条测试条目（id 即 identity，时间可控） */
 function entry(id, overrides = {}) {
@@ -336,5 +336,63 @@ describe('recallEntries · 联想层（related 关联链）', () => {
     const entries = [entry('solo', { title: '独狼条目', tags: ['unique'] })]
     const result = recallEntries(entries, { query: '独狼' })
     assert.deepEqual(result.results[0].related, [])
+  })
+})
+
+describe('relateClosure · 多跳联想闭包（BFS 记忆图）', () => {
+  test('depth=1 单跳：等价 relatedOf，hop=1', () => {
+    const entries = [
+      entry('a', { title: '插件开发', tags: ['dsh'] }),
+      entry('b', { title: '插件安装', tags: ['dsh'] }),
+      entry('c', { title: '完全无关', tags: ['other'] }),
+    ]
+    const result = relateClosure(entries, entries[0], 1)
+    assert.deepEqual(result.map((r) => r.id), ['b'])
+    assert.equal(result[0].hop, 1)
+  })
+
+  test('depth=2 多跳：沿关系扩展，hop 标注层级', () => {
+    // a(dsh) → b(dsh+ops) → c(ops)：b 是 a 的 1 跳邻居，c 通过 b 是 2 跳
+    const entries = [
+      entry('a', { title: '插件开发', tags: ['dsh'] }),
+      entry('b', { title: '插件部署', tags: ['dsh', 'ops'] }),
+      entry('c', { title: '运维手册', tags: ['ops'] }),
+      entry('d', { title: '完全无关', tags: ['other'] }),
+    ]
+    const result = relateClosure(entries, entries[0], 2)
+    const b = result.find((r) => r.id === 'b')
+    const c = result.find((r) => r.id === 'c')
+    assert.ok(b, 'b 应进闭包')
+    assert.equal(b.hop, 1)
+    assert.ok(c, 'c 应经 b 扩展进闭包')
+    assert.equal(c.hop, 2)
+    assert.ok(!result.some((r) => r.id === 'd'), '无关条目不进闭包')
+  })
+
+  test('防环：visited 去重，不重复收录', () => {
+    // a↔b 强双向关联，depth=3 也不重复
+    const entries = [
+      entry('a', { title: '主题 A', tags: ['t'] }),
+      entry('b', { title: '主题 A 变体', tags: ['t'] }),
+    ]
+    const result = relateClosure(entries, entries[0], 3)
+    const ids = result.map((r) => r.id)
+    assert.equal(new Set(ids).size, ids.length, '不应有重复 id')
+  })
+
+  test('排序：hop 升序，同 hop 内 strength 降序', () => {
+    const entries = [
+      entry('a', { title: '插件开发', tags: ['dsh', 'plugin'] }),
+      entry('b1', { title: '插件安装', tags: ['dsh'] }),
+      entry('b2', { title: '插件开发 指南', tags: ['dsh', 'plugin'] }),
+      entry('c', { title: '部署运维', tags: ['dsh', 'ops'] }),
+    ]
+    const result = relateClosure(entries, entries[0], 2, 3)
+    for (let i = 1; i < result.length; i++) {
+      assert.ok(result[i].hop >= result[i - 1].hop, 'hop 应非降序')
+      if (result[i].hop === result[i - 1].hop) {
+        assert.ok(result[i].strength <= result[i - 1].strength, '同 hop 内 strength 应降序')
+      }
+    }
   })
 })

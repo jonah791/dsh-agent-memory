@@ -72,6 +72,54 @@ export function relatedOf(entries: Entry[], target: Entry, limit = 3, includeArc
   return out.slice(0, limit)
 }
 
+/** 联想闭包条目（多跳联想导航：带层级与来源路径） */
+export interface RelatedClosureItem extends RelatedItem {
+  /** BFS 跳数（1 = 直接关联） */
+  hop: number
+}
+
+/**
+ * 联想闭包（v0.4）：从目标条目 BFS 多跳展开联想社区（记忆图行走）。
+ * 沿 relatedOf 的关联边走，逐层扩展（hop 递增）；去重（visited 防环）、
+ * 排除自身；每跳取关联强度 top limitPerHop。用于「沿关系网探索记忆社区」。
+ * @param entries - 候选条目（全量）
+ * @param target - 起点条目
+ * @param depth - 最大跳数（1 = 单跳，与 relatedOf 等价）
+ * @param limitPerHop - 每跳最多展开的邻居数（控制扇出）
+ * @param includeArchive - 是否包含归档
+ * @returns 按 (hop, strength 降序) 排序的闭包条目
+ */
+export function relateClosure(
+  entries: Entry[],
+  target: Entry,
+  depth = 1,
+  limitPerHop = 3,
+  includeArchive = false,
+): RelatedClosureItem[] {
+  const visited = new Set<string>([target.id])
+  const queue: Entry[] = [target]
+  const out: RelatedClosureItem[] = []
+  for (let hop = 1; hop <= depth && queue.length > 0; hop++) {
+    const next: Entry[] = []
+    for (const current of queue) {
+      const neighbors = relatedOf(entries, current, limitPerHop, includeArchive)
+      for (const n of neighbors) {
+        if (visited.has(n.id)) continue
+        visited.add(n.id)
+        const entry = entries.find((e) => e.id === n.id)
+        if (entry === undefined) continue
+        out.push({ ...n, hop })
+        next.push(entry)
+      }
+    }
+    queue.length = 0
+    queue.push(...next)
+  }
+  // 先按 hop 升序，同 hop 内按 strength 降序（BFS 层次优先）
+  out.sort((a, b) => (a.hop !== b.hop ? a.hop - b.hop : b.strength - a.strength))
+  return out
+}
+
 /**
  * recall 主入口：过滤 → 打分 → 排序 → 截断 → 联想（为结果附加相关链）。
  * @param entries - 候选条目（通常为当前 scope 与 global 合并后的全量）

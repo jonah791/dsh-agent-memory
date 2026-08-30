@@ -66,6 +66,10 @@ recall 命中条目时，每个结果附带 `related` 关联链——联想强�
 
 `memory_relate` 让联想可主动导航：给定一条记忆 id，展开它的关联邻居（共享标签/2-gram 重叠，强度降序）——从「联想检索」到「联想导航」，记忆成为可沿关系行走的网络（AGI 记忆形态：不是数据库，是关联图）。
 
+### 联想闭包（v0.4：BFS 多跳记忆社区）
+
+`memory_relate` 新增 `depth` 参数（默认 1=单跳；>1 走 BFS 多跳）：沿关联边逐层扩展联想社区——hop 标注层级、visited 防环、每跳 limit 控制扇出。从「单点导航」升级为「社区探索」（记忆图 BFS，因果留痕维度深化）。
+
 ### 压缩即记忆（通道 C，与 dsh-agent-compact 联动）
 
 会话压缩完成 → checkpoint 原文**保底存档**（episodic）+ inbox 通知（`wakeup=false` 排队不唤醒）——提炼与否、如何组织由 agent 自主决策，理由记入 `source.reason`。压缩在进程内已完整，不再写哨兵重启。
