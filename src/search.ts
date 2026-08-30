@@ -44,7 +44,7 @@ function ngrams(text: string): string[] {
  * 仅考虑有实质关联（strength>0）的条目；排除自身与归档（除非 includeArchive）。
  * @returns 按 strength 降序、取前 limit 条
  */
-function relatedOf(entries: Entry[], target: Entry, limit = 3, includeArchive = false): RelatedItem[] {
+export function relatedOf(entries: Entry[], target: Entry, limit = 3, includeArchive = false): RelatedItem[] {
   const targetTitleGrams = ngrams(target.title)
   const out: RelatedItem[] = []
   for (const other of entries) {

@@ -75,11 +75,48 @@ async function seed(store: MemoryStore, scope: string, kind: EntryKind, title: s
 
 // ---------- 工具集合形状 ----------
 
-test('六个工具齐备，名称与契约一致', () => {
+test('工具齐备，名称与契约一致', () => {
   const { byName } = setup()
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_browse', 'memory_check', 'memory_health', 'memory_stats', 'memory_version', 'recall', 'remember', 'update'])
+  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_browse', 'memory_check', 'memory_health', 'memory_relate', 'memory_stats', 'memory_version', 'recall', 'remember', 'update'])
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
+})
+
+// ---------- memory_relate（联想导航） ----------
+
+test('memory_relate：按 id 展开关联网络（共享标签邻居降序）', async () => {
+  const { byName, store, exec } = setup()
+  const target = await seed(store, WID, 'knowledge', '插件开发要点', ['dsh', 'plugin'])
+  await seed(store, WID, 'knowledge', '插件安装', ['dsh'])
+  await seed(store, WID, 'knowledge', '插件陷阱', ['dsh', 'plugin'])
+  await seed(store, WID, 'knowledge', '完全无关', ['other'])
+
+  const result = await byName.get('memory_relate')!.execute({ id: target.id }, exec)
+  assert.equal(result.ok, true)
+  assert.equal(result.target.id, target.id)
+  // 共享标签邻居进链（2 个），无关不进
+  assert.ok(result.related.length >= 2)
+  assert.ok(!result.related.some((r: any) => r.title === '完全无关'))
+  // 关联强度降序：插件陷阱（2 共享标签）> 插件安装（1 共享标签）
+  const strengths = result.related.map((r: any) => r.strength)
+  assert.ok(strengths.every((s: number, i: number) => i === 0 || s <= strengths[i - 1]))
+  const traps = result.related.find((r: any) => r.title === '插件陷阱')
+  assert.equal(traps.sharedTags, 2)
+})
+
+test('memory_relate：未找到 id → ok=false + error', async () => {
+  const { byName, exec } = setup()
+  const result = await byName.get('memory_relate')!.execute({ id: 'missing-id' }, exec)
+  assert.equal(result.ok, false)
+  assert.ok(result.error.includes('未找到'))
+})
+
+test('memory_relate：limit 截断关联条数', async () => {
+  const { byName, store, exec } = setup()
+  const target = await seed(store, WID, 'knowledge', '目标', ['dsh'])
+  for (let i = 0; i < 5; i++) await seed(store, WID, 'knowledge', `关联${i}`, ['dsh'])
+  const result = await byName.get('memory_relate')!.execute({ id: target.id, limit: 2 }, exec)
+  assert.ok(result.related.length <= 2)
 })
 
 // ---------- remember ----------
