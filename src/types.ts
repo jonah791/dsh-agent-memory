@@ -81,6 +81,20 @@ export interface RecallResultItem {
   score: number
   archived: boolean
   updatedAt: string
+  /** 联想层（v0.3）：相关条目链（共享标签/标题/正文关联），关联强度降序 */
+  related?: RelatedItem[]
+}
+
+/** 联想条目（关联记忆：同标签/标题/正文关联，因果留痕维度） */
+export interface RelatedItem {
+  id: string
+  kind: EntryKind
+  title: string
+  scope: string
+  /** 共享标签数 */
+  sharedTags: number
+  /** 关联强度（共享标签×3 + 标题重叠×2 + 正文重叠×1） */
+  strength: number
 }
 
 /** remember 返回 */

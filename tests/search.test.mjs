@@ -283,3 +283,58 @@ describe('recallEntries · 结果形态', () => {
     assert.deepEqual(e.tags, ['a', 'b'])
   })
 })
+
+describe('recallEntries · 联想层（related 关联链）', () => {
+  test('共享标签 → 关联链生成，按 strength 降序', () => {
+    const entries = [
+      entry('target', { title: '插件开发要点', tags: ['dsh', 'plugin'] }),
+      entry('rel-a', { title: '插件安装', tags: ['dsh'] }),
+      entry('rel-b', { title: '插件陷阱', tags: ['dsh', 'plugin'] }),
+      entry('unrelated', { title: '完全无关', tags: ['other'] }),
+    ]
+    const result = recallEntries(entries, { query: '插件' })
+    const target = result.results.find((r) => r.id === 'target')
+    assert.ok(target, '目标条目应命中')
+    assert.ok(target.related, '命中条目应带 related')
+    assert.ok(target.related.length >= 2, '共享标签条目应进关联链')
+    // 无关条目不进链
+    assert.ok(!target.related.some((r) => r.id === 'unrelated'))
+    // strength 降序：rel-b(2 共享标签=6) > rel-a(1 共享标签=3)
+    assert.ok(target.related[0].strength >= target.related[target.related.length - 1].strength)
+    assert.equal(target.related.find((r) => r.id === 'rel-b').sharedTags, 2)
+    assert.equal(target.related.find((r) => r.id === 'rel-a').sharedTags, 1)
+  })
+
+  test('标题 token 重叠产生弱关联（正文重叠×1）', () => {
+    const entries = [
+      entry('t1', { title: '上下文管理 纪律', body: '判断三问' }),
+      entry('t2', { title: '上下文 剪枝', body: '剪枝纪律 判断三问' }),
+    ]
+    const result = recallEntries(entries, { query: '上下文' })
+    const first = result.results.find((r) => r.id === 't1')
+    // t2 与 t1 标题重叠「上下文」→ 关联强度 ≥2
+    const rel = first.related?.find((r) => r.id === 't2')
+    assert.ok(rel, '标题重叠条目应进关联链')
+    assert.ok(rel.strength >= 2)
+  })
+
+  test('排除自身；归档条目不进链（除非 includeArchive）', () => {
+    const entries = [
+      entry('target', { title: '插件开发', tags: ['dsh'] }),
+      entry('arch', { title: '旧插件知识', tags: ['dsh'], archived: true }),
+    ]
+    const normal = recallEntries(entries, { query: '插件' })
+    const target = normal.results.find((r) => r.id === 'target')
+    assert.ok(!target.related.some((r) => r.id === 'target'), '不应关联自身')
+    assert.ok(!target.related.some((r) => r.id === 'arch'), '归档条目默认不进链')
+    const withArchive = recallEntries(entries, { query: '插件', includeArchive: true })
+    const target2 = withArchive.results.find((r) => r.id === 'target')
+    assert.ok(target2.related.some((r) => r.id === 'arch'), 'includeArchive 时归档可进链')
+  })
+
+  test('无关联条目 → related 为空数组', () => {
+    const entries = [entry('solo', { title: '独狼条目', tags: ['unique'] })]
+    const result = recallEntries(entries, { query: '独狼' })
+    assert.deepEqual(result.results[0].related, [])
+  })
+})

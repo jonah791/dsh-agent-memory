@@ -10,7 +10,7 @@
  * ISO 字符串字典序即时间序；纯日期输入按日界归一化。
  */
 
-import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, TimelineLevel } from './types.ts'
+import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RelatedItem, TimelineLevel } from './types.ts'
 
 /** 检索默认截断条数（未显式给 limit 时） */
 export const DEFAULT_RECALL_LIMIT = 20
@@ -23,8 +23,57 @@ const SCORE_BODY = 1
 /** snippet 最大长度（字符） */
 const SNIPPET_MAX = 140
 
+/** 文本清洗：小写 + 去空白（n-gram 前） */
+function cleanForGram(text: string): string {
+  return text.toLowerCase().replace(/\s+/g, '')
+}
+
+/** 字符 2-gram：中文/英文通用子串特征（「上下文管理」→ 上下/下文/文管/管理） */
+function ngrams(text: string): string[] {
+  const clean = cleanForGram(text)
+  if (clean.length < 2) return clean.length === 1 ? [clean] : []
+  const out: string[] = []
+  for (let i = 0; i < clean.length - 1; i++) out.push(clean.slice(i, i + 2))
+  return out
+}
+
 /**
- * recall 主入口：过滤 → 打分 → 排序 → 截断。
+ * 联想层（v0.3）：为单个命中条目计算相关条目链（因果留痕维度）。
+ * 关联强度 = 共享标签数×3 + 标题 2-gram 重叠×2 + 正文 2-gram 重叠×1。
+ * 用「目标标题的 2-gram 是否出现在对方标题/正文」判定——中文无空格分词也自然工作。
+ * 仅考虑有实质关联（strength>0）的条目；排除自身与归档（除非 includeArchive）。
+ * @returns 按 strength 降序、取前 limit 条
+ */
+function relatedOf(entries: Entry[], target: Entry, limit = 3, includeArchive = false): RelatedItem[] {
+  const targetTitleGrams = ngrams(target.title)
+  const out: RelatedItem[] = []
+  for (const other of entries) {
+    if (other.id === target.id) continue
+    if (!includeArchive && other.archived) continue
+    let sharedTags = 0
+    for (const tag of other.tags) {
+      if (target.tags.includes(tag)) sharedTags += 1
+    }
+    // 目标标题 2-gram 出现在对方标题/正文的次数 = 子串关联
+    let titleOverlap = 0
+    let bodyOverlap = 0
+    const otherTitle = cleanForGram(other.title)
+    const otherBody = cleanForGram(other.body)
+    for (const g of targetTitleGrams) {
+      if (otherTitle.includes(g)) titleOverlap += 1
+      else if (otherBody.includes(g)) bodyOverlap += 1
+    }
+    const strength = sharedTags * 3 + titleOverlap * 2 + bodyOverlap * 1
+    if (strength > 0) {
+      out.push({ id: other.id, kind: other.kind, title: other.title, scope: other.scope, sharedTags, strength })
+    }
+  }
+  out.sort((a, b) => b.strength - a.strength)
+  return out.slice(0, limit)
+}
+
+/**
+ * recall 主入口：过滤 → 打分 → 排序 → 截断 → 联想（为结果附加相关链）。
  * @param entries - 候选条目（通常为当前 scope 与 global 合并后的全量）
  * @param query - 检索条件（全字段可选；query 文本为空时按新鲜度排序）
  * @returns { results, total }；total 为过滤后截断前的命中数
@@ -48,7 +97,13 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
     return a.entry.updatedAt < b.entry.updatedAt ? 1 : -1
   })
   const limit = query.limit === undefined ? DEFAULT_RECALL_LIMIT : Math.max(0, Math.floor(query.limit))
-  const results = scored.slice(0, limit).map(({ entry, score }) => toResultItem(entry, score))
+  const includeArchive = query.includeArchive ?? false
+  const results = scored.slice(0, limit).map(({ entry, score }) => {
+    const item = toResultItem(entry, score)
+    // 联想层：每个命中条目附相关链（仅在结果项上附加，不改变 total 语义）
+    item.related = relatedOf(entries, entry, 3, includeArchive)
+    return item
+  })
   return { results, total: scored.length }
 }
 

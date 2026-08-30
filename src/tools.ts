@@ -151,7 +151,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
 function buildRecall(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'recall',
-    description: '检索记忆。按关键词/层级/标签/时间过滤，按相关度（标签命中 > 标题命中 > 正文命中）与新鲜度排序；结果标注来源作用域（global 或 workspaceId）与压缩层级（周概要/月概要等）。缺省检索当前项目 + global（全局记忆永远附加，来源在 scope 字段标注）。',
+    description: '检索记忆。按关键词/层级/标签/时间过滤，按相关度（标签命中 > 标题命中 > 正文命中）与新鲜度排序；每个结果附带「相关链」（related：共享标签/标题/正文关联的记忆，因果留痕维度）。结果标注来源作用域（global 或 workspaceId）与压缩层级（周概要/月概要等）。缺省检索当前项目 + global（全局记忆永远附加，来源在 scope 字段标注）。',
     parameters: {
       query: { type: 'string', description: '检索关键词（多个词空格分隔，任一命中即计分；省略则按新鲜度排序）。' },
       kind: { type: 'array', items: { type: 'string', enum: ['fact', 'knowledge', 'episodic', 'summary'] }, description: '层级过滤（任一命中）。' },
@@ -185,6 +185,21 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
                 score: { type: 'number', required: true },
                 archived: { type: 'boolean', required: true },
                 updatedAt: { type: 'string', required: true },
+                related: {
+                  type: 'array',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', required: true },
+                      kind: { type: 'string', required: true },
+                      title: { type: 'string', required: true },
+                      scope: { type: 'string', required: true },
+                      sharedTags: { type: 'number', required: true },
+                      strength: { type: 'number', required: true },
+                    },
+                  },
+                },
               },
             },
           },
@@ -193,7 +208,10 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       render: (args, value) => {
         const lines = value.results.map((item) => {
           const levelNote = item.level !== null ? `（${item.level}概要）` : ''
-          return `- [${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}`
+          const relatedNote = item.related !== undefined && item.related.length > 0
+            ? ' → 关联: ' + item.related.map((r) => r.title).join(' / ')
+            : ''
+          return `- [${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}${relatedNote}`
         })
         return [{
           type: 'text',
