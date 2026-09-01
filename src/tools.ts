@@ -13,6 +13,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
+import { readFileSync, statSync } from 'node:fs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -580,7 +581,9 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
-/** 构建 memory_version 工具：返回插件版本（HMR 验证判据） */
+/** 构建 memory_version 工具：返回插件版本（HMR 验证判据）。
+ *  2026-09-01 修正：原实现 version 硬编码 + buildAt 实为「调用时刻」——验证判据说谎
+ *  （v0.2.3 部署时仍报 0.2.2）。现 version 动态读 package.json，buildAt 取产物 mtime（真实构建时刻）。 */
 function buildVersion(): ToolDefinition {
   return defineTool({
     name: 'memory_version',
@@ -598,7 +601,16 @@ function buildVersion(): ToolDefinition {
       render: (args, value) => [{ type: 'text', text: `dsh-agent-memory ${value.version}（build ${value.buildAt}）` }],
     },
     async execute() {
-      return { version: '0.2.2', buildAt: new Date().toISOString().slice(0, 19) }
+      let version = 'unknown'
+      let buildAt = 'unknown'
+      try {
+        const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version?: string }
+        if (typeof pkg.version === 'string') version = pkg.version
+      } catch { /* 不可读时如实报 unknown */ }
+      try {
+        buildAt = new Date(statSync(new URL(import.meta.url)).mtimeMs).toISOString().slice(0, 19)
+      } catch { /* 同上 */ }
+      return { version, buildAt }
     },
   })
 }
