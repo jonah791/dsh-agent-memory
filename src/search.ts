@@ -142,7 +142,12 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
       return a.entry.accessedAt < b.entry.accessedAt ? 1 : -1
     }
     // 同刻稳定排序：updatedAt 新→旧兜底
-    return a.entry.updatedAt < b.entry.updatedAt ? 1 : -1
+    if (a.entry.updatedAt !== b.entry.updatedAt) {
+      return a.entry.updatedAt < b.entry.updatedAt ? 1 : -1
+    }
+    // 全平局返回 0（保持稳定排序/插入序）——2026-09-01 修复：
+    // 原实现相等时返回 -1，违反比较器契约，导致全等条目顺序被打乱
+    return 0
   })
   const limit = query.limit === undefined ? DEFAULT_RECALL_LIMIT : Math.max(0, Math.floor(query.limit))
   const includeArchive = query.includeArchive ?? false
@@ -189,7 +194,31 @@ const STOP_WORDS = new Set([
 /** 查询文本分词：小写 + 按空白切分 + 过滤停用词；无有效词返回空数组（按新鲜度排序） */
 function tokenize(query: string | undefined): string[] {
   if (query === undefined) return []
-  return query.toLowerCase().split(/\s+/).filter((token) => token.length > 0 && !STOP_WORDS.has(token))
+  const raw = query.toLowerCase().split(/\s+/).filter((token) => token.length > 0 && !STOP_WORDS.has(token))
+  const tokens: string[] = []
+  for (const token of raw) {
+    tokens.push(token) // 保留原词（英文词 / 精确短语）
+    for (const bigram of cjkBigrams(token)) {
+      if (!STOP_WORDS.has(bigram) && !tokens.includes(bigram)) tokens.push(bigram)
+    }
+  }
+  return tokens
+}
+
+/**
+ * 中文 2-gram 抽取：无空格分词的 CJK 连续段按字符 bigram 展开，
+ * 让「整句 query」也能命中标题/正文中的子串特征（中文检索增强 2026-09-01，
+ * 与 relatedOf 的 ngrams 同哲学）。英文段不展开（保持词边界）。
+ * @param token - 单个分词（可能混含中英）
+ * @returns 覆盖中文相邻字符对的 bigram 列表
+ */
+function cjkBigrams(token: string): string[] {
+  const out: string[] = []
+  for (let i = 0; i < token.length - 1; i++) {
+    const pair = token.slice(i, i + 2)
+    if (/[\u4e00-\u9fff]/.test(pair)) out.push(pair)
+  }
+  return out
 }
 
 /**

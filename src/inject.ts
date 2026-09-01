@@ -126,7 +126,7 @@ export function installMemoryInject(ctx: Context, deps: MemoryInjectDeps): void 
       source: { kind: 'plugin', plugin: 'dsh-agent-memory' },
     })
     injected.add(agent.session.id)
-    const lastClaimedIndex = decision.messages.findLastIndex((m) => messages.includes(m))
-    return { kind: 'enter', messages: decision.messages.toSpliced(lastClaimedIndex + 1, 0, message) }
+    // 尾部追加（缓存友好）：动态注入统一放在批次末尾，避免插在历史中部破坏前缀缓存。
+    return { kind: 'enter', messages: [...decision.messages, message] }
   })
 }

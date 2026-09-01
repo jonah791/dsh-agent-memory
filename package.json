@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-memory",
-  "version": "0.2.2",
-  "description": "Agent-driven long-term memory for DeepSeek Harness: scoped memory (global + per-workspace), layered entries (fact/knowledge/episodic), time-bucket compaction (day→week→month→year), associative recall (related chains) + memory_relate navigation (multi-hop BFS closure), agent-decided content.",
+  "version": "0.2.3",
+  "description": "Agent-driven long-term memory for DeepSeek Harness: scoped memory (global + per-workspace), layered entries (fact/knowledge/episodic), time-bucket compaction (day→week→month→year), associative recall (related chains) + memory_relate navigation (multi-hop BFS closure), auto recall injection on user messages (CJK bigram search, tail append), agent-decided content.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

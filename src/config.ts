@@ -28,10 +28,14 @@ const TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
   'weekly_template',
   'max_entries',
   'inject',
+  'auto_inject',
 ])
 
 /** inject 块内合法键 */
 const INJECT_KEYS: ReadonlySet<string> = new Set(['enabled', 'max_bytes', 'max_entries'])
+
+/** auto_inject 块内合法键 */
+const AUTO_INJECT_KEYS: ReadonlySet<string> = new Set(['enabled', 'max_bytes', 'max_entries'])
 
 /** timeline 块内合法键 */
 const TIMELINE_KEYS: ReadonlySet<string> = new Set(['day', 'week', 'month', 'year', 'archive'])
@@ -54,6 +58,11 @@ export const DEFAULT_CONFIG: MemoryConfig = deepFreeze({
     enabled: true,
     maxBytes: 3000,
     maxEntries: 20,
+  },
+  autoInject: {
+    enabled: true,
+    maxBytes: 1500,
+    maxEntries: 3,
   },
 })
 
@@ -103,6 +112,21 @@ export function resolveMemoryConfig(raw: unknown): MemoryConfig {
     weeklyTemplate: stringOrDefault(raw.weekly_template, DEFAULT_CONFIG.weeklyTemplate, 'weekly_template'),
     maxEntries: positiveIntOrDefault(raw.max_entries, DEFAULT_CONFIG.maxEntries, 'max_entries'),
     inject: injectOrDefault(raw.inject),
+    autoInject: autoInjectOrDefault(raw.auto_inject),
+  })
+}
+
+/** auto_inject 块：字段级缺省 + 未知键拒绝 */
+function autoInjectOrDefault(value: unknown): MemoryConfig['autoInject'] {
+  if (value === undefined || value === null) return DEFAULT_CONFIG.autoInject
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError('memory.yml: auto_inject 必须是映射（enabled/max_bytes/max_entries）')
+  }
+  assertNoUnknownKeys(value, AUTO_INJECT_KEYS, 'memory.yml.auto_inject')
+  return deepFreeze({
+    enabled: booleanOrDefault(value.enabled, DEFAULT_CONFIG.autoInject.enabled, 'auto_inject.enabled'),
+    maxBytes: positiveIntOrDefault(value.max_bytes, DEFAULT_CONFIG.autoInject.maxBytes, 'auto_inject.max_bytes'),
+    maxEntries: positiveIntOrDefault(value.max_entries, DEFAULT_CONFIG.autoInject.maxEntries, 'auto_inject.max_entries'),
   })
 }
 

@@ -100,6 +100,8 @@ test('完整：全部字段 → 原样生效', () => {
     weeklyTemplate: '每周回顾：{{week}}',
     maxEntries: 1234,
     inject: { enabled: false, maxBytes: 1500, maxEntries: 8 },
+    // auto_inject 未在 YAML 指定 → 走缺省（L3 2026-09-01）
+    autoInject: { enabled: true, maxBytes: 1500, maxEntries: 3 },
   })
 })
 

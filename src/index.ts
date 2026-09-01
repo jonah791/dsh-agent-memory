@@ -19,6 +19,7 @@ import { TimelineCompressor, type SummarizeFn } from './timeline.ts'
 import { summarizeEntries, type SummarizerConfig } from './summarizer.ts'
 import { registerMemoryTools, type MemoryToolDeps } from './tools.ts'
 import { installMemoryInject } from './inject.ts'
+import { installAutoRecallInject } from './auto-inject.ts'
 import { installCompactionSink } from './compaction-sink.ts'
 import { installPeriodicCompress } from './periodic.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
@@ -145,6 +146,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })
+
+  // 5b. 自动 recall 注入（L3 2026-09-01）：每条新主人消息注入 top 命中（尾追加，缓存友好）
+  installAutoRecallInject(ctx, { store, loadConfig })
 
   // 6. 压缩即记忆（v0.2 通道 C）：compaction 成功 → checkpoint 自动落库
   installCompactionSink(ctx, { store })

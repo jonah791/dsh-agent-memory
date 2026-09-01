@@ -55,6 +55,12 @@ export interface MemoryConfig {
     maxBytes: number
     maxEntries: number
   }
+  /** 自动 recall 注入配置（每条新主人消息注入 top 命中，L3 2026-09-01） */
+  autoInject: {
+    enabled: boolean
+    maxEntries: number
+    maxBytes: number
+  }
 }
 
 /** 检索查询 */

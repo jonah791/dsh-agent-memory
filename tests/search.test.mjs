@@ -132,7 +132,8 @@ describe('recallEntries · 相关度排序（标签>标题>正文）', () => {
     ]
     const result = recallEntries(entries, { query: '插件开发' })
     assert.deepEqual(result.results.map((r) => r.id), ['zh'])
-    assert.equal(result.results[0].score, 2)
+    // 2026-09-01 CJK bigram 增强后：'插件开发' → 插件开发(整段+2) + 插件(+2标题/+1正文) + 件开(+2) + 开发(+2) = 9
+    assert.equal(result.results[0].score, 9)
   })
 })
 
