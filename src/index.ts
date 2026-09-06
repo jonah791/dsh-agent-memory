@@ -62,6 +62,29 @@ export const memoryDomainSpec = defineDomain({
 export const name = 'agent-memory'
 export const inject = ['storageDomain', 'tools', 'llm', 'agents'] as const
 
+/** 记忆回流服务（2026-09-06 审查改进）：其他插件（emotion/taskboard/evolution-core/skill-forge）注入消费，
+ *  把运行态状态/结论回流主记忆库——记忆库成为唯一时间线，插件 JSON 只是运行态。 */
+export interface MemoryApiService {
+  /**
+   * 写一条记忆（与 remember 工具同语义：L1 key 覆盖 / L2/L3 title 指纹合并 / 无命中新建）。
+   * 回流默认 global scope（跨项目生命周期结论）；scope 可覆盖。
+   * 返回 { id, action } 或 { error }——调用方应容错（服务不可用/写入失败静默跳过，不阻塞业务）。
+   */
+  remember(input: {
+    text: string
+    kind?: 'fact' | 'knowledge' | 'episodic'
+    tags?: string[]
+    key?: string
+    scope?: string
+  }): Promise<{ id?: string; action?: string; error?: string }>
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    memoryApi: MemoryApiService
+  }
+}
+
 /** 插件配置：总结路由（空字符串 = 跟随会话当前路由，DESIGN.md §十）+ 周期补压参数（v0.3） */
 export interface Config {
   provider?: string
@@ -98,6 +121,27 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const domain = await ctx.storageDomain.open(memoryDomainSpec)
   ctx.effect(() => () => domain.close(), 'agent-memory.domainClose')
   const store = new MemoryStore(domain.table('entries'))
+
+  // 记忆回流服务提供（2026-09-06）：供 emotion/taskboard/evolution-core/skill-forge 注入消费。
+  // 复用 store.remember（L1 key 覆盖 / L2/L3 指纹合并），容错返回 error 不抛。
+  ctx.provide('memoryApi', {
+    async remember(input: { text: string; kind?: 'fact' | 'knowledge' | 'episodic'; tags?: string[]; key?: string; scope?: string }) {
+      try {
+        const text = (input.text ?? '').trim()
+        if (text.length === 0) return { error: 'text 不能为空' }
+        const kind = input.kind ?? 'knowledge'
+        const scope = input.scope ?? 'global'
+        const body = text
+        const firstLine = body.split(/\r?\n/).find((line) => line.trim().length > 0) ?? body
+        const base = firstLine.trim()
+        const title = base.length > 80 ? base.slice(0, 79) + '…' : base
+        const r = await store.remember({ kind, key: input.key, title, body, tags: input.tags ?? [], scope, level: null, bucket: null })
+        return { id: r.id, action: r.action }
+      } catch (err) {
+        return { error: 'memoryApi.remember 失败: ' + String(err) }
+      }
+    },
+  })
 
   // 2. 配置加载：每个 workspace 自己的 .dsh/memory.yml（DESIGN.md §四）
   const loadConfig = async (workspaceRoot: string) => loadMemoryConfig(memoryConfigPath(workspaceRoot))

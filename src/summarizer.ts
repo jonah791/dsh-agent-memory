@@ -40,8 +40,9 @@ export interface MemorySummaryResult {
   usage?: TokenUsage
 }
 
-/** 输出 token 缺省上限（v0.3 从 2000 提到 8000：历史缺口补压原料量大，2000 常触发 MAX_TOKENS fail-closed） */
-const DEFAULT_MAX_TOKENS = 8000
+/** 输出 token 缺省上限（v0.3 从 2000 提到 8000：历史缺口补压原料量大，2000 常触发 MAX_TOKENS fail-closed；
+ *  v0.4 2026-09-04 主人指示拉高：周补压原料仍超 8000（今日大量记忆），提到 16000——当前模型 contextWindow 100 万，16k 输出安全） */
+const DEFAULT_MAX_TOKENS = 16000
 
 /** 层级显示名（提示词用，与 timeline.ts 的 LEVEL_LABEL 保持同文案） */
 const LEVEL_LABEL: Record<CompressionLevel, string> = {
