@@ -10,6 +10,12 @@
 -->
 # dsh-agent-memory — DSH 的 Agent 驱动长期记忆插件
 
+
+<p align="center">
+  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.2.3-blue" alt="version"></a>
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
+</p>
 **为 DeepSeek Harness (DSH) 打造的智能体驱动长期记忆插件。** 跨会话的经历库：主人偏好、项目知识、决策理由、学习沉淀——结构化写入、可检索读取、可整理压缩。
 
 > 状态：v0.3（智能体核心联动已落地）。DSH 为预览版（0.1.0-rc），无兼容承诺。
