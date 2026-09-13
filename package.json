@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-memory",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Agent-driven long-term memory for DeepSeek Harness: scoped memory (global + per-workspace), layered entries (fact/knowledge/episodic), time-bucket compaction (day→week→month→year), associative recall (related chains) + memory_relate navigation (multi-hop BFS closure), auto recall injection on user messages (CJK bigram search, tail append), agent-decided content.",
   "type": "module",
   "main": "lib/index.js",
@@ -33,7 +33,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsc -p tsconfig.json && node --test \"tests/*.test.mjs\""
+    "test": "tsc -p tsconfig.json && node --test \"tests/*.test.mjs\"",
+    "test:ts": "tsc -p tsconfig.json && node --test \"tests/*.test.ts\"",
+    "test:all": "tsc -p tsconfig.json && node --test \"tests/*.test.mjs\" \"tests/*.test.ts\""
   },
   "dependencies": {
     "yaml": "^2.9.0",

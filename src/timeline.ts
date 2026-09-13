@@ -17,9 +17,19 @@
 import type { MemoryConfig } from './types.ts'
 import type { Entry, TimelineLevel } from './types.ts'
 import type { MemoryStore } from './store.ts'
+import { withKeyLock } from './lock.ts'
 
 /** 压缩目标层级（金字塔：日概要 → 周概要 ← 日概要再总结 → 月概要 ← 周概要再总结 → 年概要 ← 月概要再总结） */
 export type CompressionLevel = 'day' | 'week' | 'month' | 'year'
+
+/**
+ * 压缩单元互斥键（**唯一真源**）：任何需要串行化的调用点都从这里取，
+ * 禁止各自拼字符串——键漂移 = 锁静默失效（两把不同的锁保护同一份资源）。
+ * 粒度 = scope + 层级 + 桶：不同桶可并行压缩，同桶必须串行。
+ */
+export function compressUnitKey(scope: string, level: CompressionLevel, bucket: string): string {
+  return `agent-memory:compress-unit:${scope}:${level}:${bucket}`
+}
 
 /** 待压缩单位：目标层级 + 目标时间桶（上一自然单位） */
 export interface PendingCompression {
@@ -287,10 +297,24 @@ export class TimelineCompressor {
   ) {}
 
   /**
-   * 压缩指定单位：收集原料 → LLM 总结 → 写 summary 条目（含 archiveRef）→ 原料冷归档。
-   * 幂等：目标桶已有同层级概要 → 跳过；无原料 → 跳过。
+   * 压缩指定单位（**并发安全入口**）：按 (scope, level, bucket) 串行执行。
+   *
+   * 为什么必须加锁（2026-09-13 生产事故）：两个入口各建一个本类实例——懒压缩钩子（访问记忆时）
+   * 与周期补压（定时轮询）。下面的临界区「查已有概要 → await LLM 总结 → 写入」中间横着一次
+   * LLM 往返，第二个调用者能穿过同一道检查 → 同一桶写出两份概要（生产库实测 4 对重复日桶，
+   * 每对代价 = 一次重复的 LLM 调用 + 一份重复归档）。锁语义与边界见 lock.ts。
    */
   async compressUnit(scope: string, level: CompressionLevel, bucket: string): Promise<CompressUnitResult> {
+    return withKeyLock(compressUnitKey(scope, level, bucket), () =>
+      this.compressUnitLocked(scope, level, bucket),
+    )
+  }
+
+  /**
+   * 压缩指定单位的临界区实现（调用者已持锁）：收集原料 → LLM 总结 → 写 summary 条目（含 archiveRef）→ 原料冷归档。
+   * 幂等：目标桶已有同层级概要 → 跳过；无原料 → 跳过。
+   */
+  private async compressUnitLocked(scope: string, level: CompressionLevel, bucket: string): Promise<CompressUnitResult> {
     const all = this.store.list(scope, { includeArchive: true })
 
     // 幂等：该桶已有同层级概要
@@ -316,6 +340,16 @@ export class TimelineCompressor {
     })
     if (text.trim().length === 0) {
       throw new Error(`时间压缩失败：${level} ${bucket} 总结产出为空`)
+    }
+
+    // 写前复核（2026-09-13）：进程内锁已经串行化，但多实例共享同一 DSH_HOME 时（并行会话是常态工况），
+    // 另一进程可能在这段 LLM 往返期间已写入本桶概要——重复概要一旦落库只能人工去重，
+    // 故**写入之前**再读一次（必须早于下面的 remember，写在之后就会命中自己刚写的那份、
+    // 导致原料永不归档）；已存在即让位，不写不归档（幂等优先于「我这份更好」）。
+    const fresh = this.store.list(scope, { includeArchive: true })
+    const raced = fresh.find((e) => e.kind === 'summary' && e.level === level && e.bucket === bucket)
+    if (raced !== undefined) {
+      return { summary: raced, archivedIds: [], skipped: true, reason: 'already-summarized' }
     }
 
     // 概要条目：标题 = 层级 + 时间范围；正文 = 自动元数据头 + LLM 正文；archiveRef = 原料 id

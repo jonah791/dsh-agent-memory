@@ -497,3 +497,75 @@ describe('TimelineCompressor.compressPending 懒压缩入口', () => {
     for (const id of ['a', 'w', 'm']) assert.ok(archivedIds.includes(id))
   })
 })
+
+describe('并发幂等（2026-09-13 修复：重复概要桶）', () => {
+  /**
+   * 生产事故形状：懒压缩钩子（访问记忆时）与周期补压（定时轮询）**各建一个 TimelineCompressor**，
+   * 二者并发跑同一桶时，「查已有概要 → await LLM 总结 → 写入」的中间等待让第二个调用者穿过检查
+   * → 同一桶两份概要（生产库实测 4 对重复日桶，2026-08-24 / 08-26 / 08-30 / 09-10）。
+   */
+  test('两实例并发压同一桶 → LLM 只调一次、只写一份概要、原料只归档一次', async () => {
+    const kv = new MemoryKv()
+    const store = new MemoryStore(kv)
+    for (const id of ['a', 'b']) {
+      kv.map.set(memoryKey('workspace-a', 'episodic', id), entry({ id, bucket: '2026-08-05' }))
+    }
+
+    let calls = 0
+    const summarize = async () => {
+      calls++
+      await new Promise((resolve) => setImmediate(resolve)) // 模拟 LLM 往返（竞态窗口就在这里）
+      return '概要正文'
+    }
+    // 两个实例 = 生产形状（不是同一个实例自己串行，否则测不出锁的作用）
+    const c1 = new TimelineCompressor(store, DEFAULT_CONFIG, summarize)
+    const c2 = new TimelineCompressor(store, DEFAULT_CONFIG, summarize)
+
+    const [r1, r2] = await Promise.all([
+      c1.compressUnit('workspace-a', 'day', '2026-08-05'),
+      c2.compressUnit('workspace-a', 'day', '2026-08-05'),
+    ])
+
+    assert.deepEqual([r1.reason, r2.reason].sort(), ['already-summarized', 'compressed'])
+    assert.equal(calls, 1, 'LLM 只应被调用一次——重复桶的代价首先是一次重复的总结调用')
+
+    const all = store.list('workspace-a', { includeArchive: true })
+    const summaries = all.filter((e) => e.kind === 'summary' && e.level === 'day' && e.bucket === '2026-08-05')
+    assert.equal(summaries.length, 1, '同一 (scope, level, bucket) 只能存在一份概要')
+    assert.deepEqual(all.filter((e) => e.archived).map((e) => e.id).sort(), ['a', 'b'], '原料只归档一次')
+    assert.deepEqual(summaries[0].archiveRef.sort(), ['a', 'b'])
+  })
+
+  test('写前复核：总结期间他方已写入同桶概要 → 让位不重复写（跨进程形状）', async () => {
+    const kv = new MemoryKv()
+    const store = new MemoryStore(kv)
+    kv.map.set(memoryKey('workspace-a', 'episodic', 'a'), entry({ id: 'a', bucket: '2026-08-05' }))
+
+    // 模拟「另一个进程在本次 LLM 往返期间已完成压缩」（进程内锁覆盖不到的场景）
+    const external = entry({
+      id: 'ext',
+      kind: 'summary',
+      level: 'day',
+      bucket: '2026-08-05',
+      title: '日概要 2026-08-05',
+    })
+    const summarize = async () => {
+      kv.map.set(memoryKey('workspace-a', 'summary', external.id), { ...external })
+      return '我这份总结'
+    }
+
+    const c = new TimelineCompressor(store, DEFAULT_CONFIG, summarize)
+    const result = await c.compressUnit('workspace-a', 'day', '2026-08-05')
+
+    assert.equal(result.skipped, true)
+    assert.equal(result.reason, 'already-summarized')
+    assert.equal(result.summary.id, 'ext', '让位给已存在的那份（幂等优先于「我这份更好」）')
+    assert.deepEqual(result.archivedIds, [], '不得重复归档原料')
+    assert.equal(store.get('workspace-a', 'a').archived, false, '原料保持未归档，交给他方流程收尾')
+    assert.equal(
+      store.list('workspace-a', { includeArchive: true }).filter((e) => e.kind === 'summary').length,
+      1,
+      '全库仍只有一份同桶概要',
+    )
+  })
+})

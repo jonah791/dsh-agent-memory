@@ -12,7 +12,7 @@
 
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.2.3-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.2.4-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
 </p>
@@ -78,7 +78,7 @@ recall 命中条目时，每个结果附带 `related` 关联链——联想强�
 
 ### 压缩即记忆（通道 C，与 dsh-agent-compact 联动）
 
-会话压缩完成 → checkpoint 原文**保底存档**（episodic）+ inbox 通知（`wakeup=false` 排队不唤醒）——提炼与否、如何组织由 agent 自主决策，理由记入 `source.reason`。压缩在进程内已完整，不再写哨兵重启。
+会话压缩完成 → checkpoint 原文**保底存档**（episodic）+ inbox 通知（`wakeup=true` **完成即送达**，不等主人下一条消息——2026-08-16 主人定调，为权威语义）——提炼与否、如何组织由 agent 自主决策，理由记入 `source.reason`。压缩在进程内已完整，不再写哨兵重启。
 
 ## 组合
 
@@ -93,10 +93,14 @@ recall 命中条目时，每个结果附带 `related` 关联链——联想强�
 ## 测试
 
 ```sh
-node node_modules/typescript/lib/tsc.js -p tsconfig.json && node --test
+pnpm test          # 构建 + 125 用例（tests/*.test.mjs，node ≥ 22 任意平台）
+pnpm run test:ts   # 构建 + 76 用例（tests/*.test.ts，需 node ≥ 24：原生类型剥离）
+pnpm run test:all  # 构建 + 全量 201 用例（200 通过 / 1 跳过）
 ```
 
-165+ tests / 0 fail。
+125 + 76 = 201 tests / 0 fail（`.ts` 套件含 1 个 skip）。
+
+> 2026-09-13 起 `.ts` 套件纳入 npm 脚本：此前 5 个 `.ts` 测试文件（76 用例）**不在 `npm test` 内**，跑绿只证明 `.mjs` 那一半——记账缺口已闭合（`test:ts` / `test:all`）。
 
 ## 设计文档
 

@@ -1,5 +1,5 @@
 /**
- * v0.3 测试：压缩即记忆（智能体核心）——保底存档 + inbox 通知（排队不唤醒），无哨兵。
+ * v0.3 测试：压缩即记忆（智能体核心）——保底存档 + inbox 通知（`wakeup=true` 完成即送达），无哨兵。
  */
 
 import { test } from 'node:test'
@@ -42,7 +42,7 @@ function harness() {
   return { store, fire, sent }
 }
 
-test('压缩成功 → 原文保底落库 + inbox 通知（wakeup=false 排队不唤醒）', () => {
+test('压缩成功 → 原文保底落库 + inbox 通知（wakeup=true 完成即送达）', () => {
   const { store, fire, sent } = harness()
   fire({ type: 'compaction/start', data: { compactionId: 'c1', sourceCommandId: 'cmd-1' } })
   fire({ type: 'compaction/summary', data: { compactionId: 'c1', summary: [{ type: 'text', text: '## 摘要\n本周完成了记忆插件。' }] } })
