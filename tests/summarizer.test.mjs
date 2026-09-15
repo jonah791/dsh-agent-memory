@@ -89,6 +89,19 @@ describe('buildSummaryPrompt 提示词构建', () => {
     const prompt = buildSummaryPrompt(makeInput({ weeklyTemplate: '   ' }))
     assert.ok(!prompt.includes('周记模板'))
   })
+
+  test('长度上限（v0.8.1）：缺省 6000 字，且显式劝阻搬运原文', () => {
+    const prompt = buildSummaryPrompt(makeInput())
+    assert.ok(prompt.includes('正文不超过 6000 字'))
+    assert.ok(prompt.includes('导航层'))
+    assert.ok(prompt.includes('不要逐字搬运原文'))
+  })
+
+  test('长度上限可覆盖（第二参数）', () => {
+    const prompt = buildSummaryPrompt(makeInput(), 2500)
+    assert.ok(prompt.includes('正文不超过 2500 字'))
+    assert.ok(!prompt.includes('正文不超过 6000 字'))
+  })
 })
 
 describe('summarizeEntries 直调全路径', () => {
@@ -208,5 +221,57 @@ describe('summarizeEntries 直调全路径', () => {
       () => summarizeEntries(ctx, { provider: 'deepseek', model: 'deepseek-chat' }, makeInput(), undefined, controller.signal),
       /signal aborted/,
     )
+  })
+})
+
+describe('sessionId 透传（v0.8.1 · 网关类 provider 的 x-opencode-session 头）', () => {
+  /** 捕获 GenerateOptions 的 fake ctx（断言「发出去的请求带什么」） */
+  function capturingCtx(chunks, capture) {
+    return {
+      llm: {
+        stream: async function* (options) {
+          capture.push(options)
+          for (const c of chunks) yield c
+        },
+      },
+    }
+  }
+
+  test('有 agent ⇒ 自动带 agent.session.id（懒压缩路径）', async () => {
+    const capture = []
+    const ctx = capturingCtx(textStream('概要'), capture)
+    const agent = {
+      session: {
+        id: 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+        requestHeader: () => ({ config: { provider: 'p', model: 'm' } }),
+      },
+    }
+    await summarizeEntries(ctx, { provider: '', model: '' }, makeInput(), agent)
+    assert.equal(capture[0].sessionId, 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee')
+  })
+
+  test('无 agent ⇒ 显式 sessionId 参数生效（周期补压路径）', async () => {
+    const capture = []
+    const ctx = capturingCtx(textStream('概要'), capture)
+    await summarizeEntries(
+      ctx, { provider: 'p', model: 'm' }, makeInput(), undefined, undefined, undefined, 'session-periodic',
+    )
+    assert.equal(capture[0].sessionId, 'session-periodic')
+  })
+
+  test('零回归：两者皆无 ⇒ options 里**不含** sessionId 键（形状与 v0.8.0 一致）', async () => {
+    const capture = []
+    const ctx = capturingCtx(textStream('概要'), capture)
+    await summarizeEntries(ctx, { provider: 'p', model: 'm' }, makeInput())
+    assert.equal('sessionId' in capture[0], false)
+  })
+
+  test('agent 缺 session.id 也不崩，且不加键', async () => {
+    const capture = []
+    const ctx = capturingCtx(textStream('概要'), capture)
+    const agent = { session: { requestHeader: () => ({ config: { provider: 'p', model: 'm' } }) } }
+    const result = await summarizeEntries(ctx, { provider: '', model: '' }, makeInput(), agent)
+    assert.equal(result.provider, 'p')
+    assert.equal('sessionId' in capture[0], false)
   })
 })

@@ -194,15 +194,17 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
 
   // v0.3 周期补压路由：实时解析活跃会话的当前模型路由（原本设计——跟随会话 requestHeader，
   // 即「由主会话模型总结」，非默认/别的模型）；lastRoute 为懒压缩捕获的最近会话路由补充。
-  let lastRoute: { provider: string; model: string } | undefined
+  // v0.8.1：路由必须与**会话 id** 同源取出——网关类 provider（opencode.ai）要求 `x-opencode-session`
+  // 头，而该头只能由 `GenerateOptions.sessionId` 触发注入（机制见 summarizer.ts 注释）。
+  let lastRoute: { provider: string; model: string; sessionId?: Agent['session']['id'] } | undefined
 
-  /** 实时从活跃会话（ctx.agents.list）解析当前模型路由——与懒压缩的 requestHeader 同源 */
-  function resolveActiveRoute(): { provider: string; model: string } | undefined {
+  /** 实时从活跃会话（ctx.agents.list）解析当前模型路由 **+ 会话 id**——与懒压缩的 requestHeader 同源 */
+  function resolveActiveRoute(): { provider: string; model: string; sessionId?: Agent['session']['id'] } | undefined {
     try {
       for (const agent of ctx.agents.list()) {
         const header = agent.session.requestHeader()?.config
         if (header !== undefined && header.provider.length > 0 && header.model.length > 0) {
-          return { provider: header.provider, model: header.model }
+          return { provider: header.provider, model: header.model, sessionId: agent.session.id }
         }
       }
     } catch {
@@ -218,7 +220,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     if (agent !== undefined) {
       const header = agent.session.requestHeader()?.config
       if (header !== undefined && header.provider.length > 0 && header.model.length > 0) {
-        lastRoute = { provider: header.provider, model: header.model }
+        lastRoute = { provider: header.provider, model: header.model, sessionId: agent.session.id }
       }
     }
     const cfg = await loadConfig(scope)
@@ -256,6 +258,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         if (route !== undefined) {
           console.log(`[dsh-agent-memory] 周期补压路由 ${route.provider}/${route.model}`)
         }
+        // v0.8.1：把**会话 id** 一并交给总结器（网关类 provider 靠它注入 `x-opencode-session` 头）
         return summarizeEntries(
           ctx,
           toSummarizerConfig(config),
@@ -263,6 +266,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
           undefined,
           undefined,
           route,
+          route?.sessionId,
         ).then((result) => result.body)
       },
       traceFactory: (cfg) => makeCompressTrace(cfg, 'periodic'),
