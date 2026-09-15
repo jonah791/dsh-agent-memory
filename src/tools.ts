@@ -617,9 +617,9 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
           roleReason: { type: 'string', required: true },
         },
       },
-      render: (args, value) => [{
+      render: (_args, value) => [{
         type: 'text',
-        text: `记忆插件健康：${value.ok ? '正常' : '异常'}（共 ${value.total} 条 / 归档 ${value.archiveCount}；注入 ${value.injectEnabled ? '开' : '关'}）`,
+        text: `记忆插件健康：${value.ok ? '正常' : '异常'}（共 ${value.total} 条 / 归档 ${value.archiveCount}；注入 ${value.injectEnabled ? '开' : '关'}）｜角色 ${value.role}（${value.rolesEnabled ? '角色维度已启用' : '角色维度未启用→零过滤'}；判据：${value.roleReason}）`,
       }],
     },
     async execute(args, exec) {
