@@ -14,10 +14,10 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 27 项：25 项已实测 / 1 项待线上验收 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
+| 状态 | **implemented**（验收 30 项：29 项已实测 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
 | 版本 | v0.3（文档）· 对应插件 v0.5.0（`package.json`）——v0.5 新增**角色维度**（多智能体工作台模式：归属 + 准入） |
 | 实现落点 | `self-plugins/dsh-agent-memory/src/`（15 个模块，见 §8） |
-| 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`<workspace>/.dsh/memory.yml`（当前 E:\alice 不存在 → 全默认）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
+| 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
 | 作者 / 日期 | 爱丽丝 · 2026-09-13 |
 | 相关规则 | AGENTS.md §5.20（语义文档系统）；§5.8（记忆检索纪律） |
 
@@ -269,10 +269,11 @@
 | A26 | 兼容性：**无 `roles` 段的 v0.4 形状配置**不崩、零过滤（历史字面量活样本）、`memory_health` 如实报 `rolesEnabled=false` | `tests/role.test.mjs`「A26 …（v0.4 行为回归）」「A26 历史配置字面量…」；`tests/tools.test.ts` 的 `BASE_CONFIG` 即无 roles 段的活样本，全套仍绿 | ✔ 已实测 |
 | A27 | 写路径盖章：启用 roles → 盖调用者角色 + 记 `author`；未启用且未显式指定 → **不盖章（共享记忆）** | `tests/role.test.mjs`「A27 工具层写路径盖章…」 | ✔ 已实测 |
 | A28 | `roles` 段的配置解析：缺省/完整/非法（未知键、空角色名、非字符串预设映射）fail loud | `tests/config.test.ts`「roles：缺省段…」「roles：完整段…」+ 4 条非法用例 | ✔ 已实测 |
-| A29 | 生产会话按角色取数：主会话（`session-<uuid>`）→ `main`；子代理/队员（裸 uuid）→ `derived`；启用 roles 后注入面与工具面同一视野 | 待线上验收：以 `memory_health.role` 在主会话与一个真实子代理会话中各测一次 | **待线上验收** |
-| A30 | 旧客户端/旧配置并存下，其他插件经 `ctx.memoryApi.remember` 写入仍为共享记忆（不被静默划入某隔间） | 代码路径：`index.ts` 的 `memoryApi` 不传 `role`；待线上复核（下次插件回流时核对 `author`/`role` 字段） | **待线上复核** |
+| A29 | 生产会话按角色取数：主会话（`session-<uuid>`）→ `main`；派生会话（子代理 / 队员）→ 派生角色；启用 roles 后注入面与工具面同一视野 | ✔ **线上实测**（2026-09-15 17:4x，插件 v0.5.0 + `E:\alice\.dsh\memory.yml` 已启用）：主会话 `memory_health` → `角色 main（角色维度已启用；判据：人类会话（session-<uuid>））`；**真实子代理会话**（subagent `7756cf92`，`delegationDepth=1`）→ `角色 worker（角色维度已启用；判据：派生会话（delegationDepth=1））`；两次 `memory_version` 均报 `0.5.0（build 2026-09-15T09:43:04）` | ✔ 已实测 |
+| A30 | 其他插件经 `ctx.memoryApi.remember` 写入仍为共享记忆（不被静默划入某隔间） | 代码路径：`index.ts` 的 `memoryApi` 不传 `role`（`author` 亦不伪造）；待线上复核（下次插件回流时核对 `role` 字段缺省） | **待线上复核** |
 
-> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=30, proven=28, pending=2`。
+> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=30, proven=29, pending=1`。
+> A29 旁注（诚实）：`by_preset` 预设映射分支本次**未在线上观测到**（该子代理会话头未带 `agentPreset`，走的是派生缺省）——该分支由 A20 单测覆盖。
 
 ## 8 · 与实现的关系
 
