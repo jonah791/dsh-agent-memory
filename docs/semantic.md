@@ -14,7 +14,7 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 43 项：41 项已实测 / 1 项待线上验收 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
+| 状态 | **implemented**（验收 44 项：43 项已实测 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
 | 版本 | v0.4（文档）· 对应插件 v0.6.0（`package.json`）——v0.5 角色维度（归属 + 准入）；v0.6 价值体检器（只读提案 + 侧车用量轨迹） |
 | 实现落点 | `self-plugins/dsh-agent-memory/src/`（17 个模块，见 §8） |
 | 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
@@ -329,9 +329,10 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | A40 | 用量项：有轨迹时命中多的分更高；无轨迹 ⇒ `usage=0` 且 `usageSource='none'`（公式不失真，只少一项证据） | `tests/audit.test.mjs`「A40 用量项…」 | ✔ 已实测 |
 | A41 | `audit` 配置：缺省走先验、覆盖生效、非法 fail-loud（未知键 / 负权重 / 字符串天数 / 小数 max_bytes） | `tests/audit.test.mjs`「A41 audit 配置…」「A41b 无 audit 段的历史配置…」 | ✔ 已实测 |
 | A42 | 工具面 11 个（新增 `memory_audit`），描述含「只读」承诺 | `tests/audit.test.mjs`「A42 工具面…」；`tests/tools.test.ts`「工具齐备，名称与契约一致」 | ✔ 已实测 |
-| A43 | **线上**：`recall` / auto-recall 在真实 `DSH_HOME` 落 `<DSH_HOME>/memory-access-trace.jsonl`，体检读到该轨迹（`usageSource='trace'`） | 待线上验收：跑一次真实 recall 后 `memory_audit` 应报 `usageSource='trace'` | **待线上验收** |
+| A43 | **线上**：`recall` / auto-recall 在真实 `DSH_HOME` 落 `<DSH_HOME>/memory-access-trace.jsonl`，体检读到该轨迹（`usageSource='trace'`） | ✔ **线上实测**（2026-09-15 18:2x，v0.6.0 重启后）：自动注入触发即落盘 `{"atMs":1789467668040,"source":"auto","role":"main","ids":[3 个 id]}`（178 字节）；`memory_audit` 报「用量信号：侧车轨迹」 | ✔ 已实测 |
+| A44 | **索引范围**：引用/标签复用/重复簇按「视野内全量（含归档）」统计，分类仍按本次集合；集合外的承重原料必须如实报出（「看不见」≠「没有」） | `tests/audit.test.mjs`「A44 索引范围…」；线上实证：默认视图报 `承重 0 条` **并**给注脚「另有 177 条承重原料不在本次集合内」，`includeArchive: true` 后报 `承重 177 条` | ✔ 已实测 |
 
-> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=30, proven=29, pending=1`。
+> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=44, proven=43, pending=1`。
 > A29 旁注（诚实）：`by_preset` 预设映射分支本次**未在线上观测到**（该子代理会话头未带 `agentPreset`，走的是派生缺省）——该分支由 A20 单测覆盖。
 > **A25/A23 的线上量化对账（2026-09-15 17:5x · 真实生产库 676 条）**：主脑视角 `recall` → `命中 496`；`role='ghost'`（`read: []`, `include_global: false`）→ `命中 384`。差额 **112 = 111（global 作用域被 `include_global: false` 收窄）+ 1（唯一带 `role='main'` 的条目被 `read: []` 拒绝）**，逐项对得上。库内实测：盖章 `role` 共 1 条（`974a5e6b`，`author = {sessionId: 'session-a5375716…', delegationDepth: 0, preset: 'alice-v2'}`），其余 **675 条为共享**（迁移安全的实证）。
 

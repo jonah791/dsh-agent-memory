@@ -66,6 +66,13 @@ const RECENCY_SCALE_DAYS = 30
 export interface AuditInput {
   /** 候选条目（调用方已按视野过滤——体检是读路径，必须过角色准入） */
   entries: readonly Entry[]
+  /**
+   * 索引作用域（缺省 = entries）：**引用/标签复用/重复簇的统计范围**。
+   * 为什么单独给：承重原料（被概要 archiveRef 引用者）大多是**已归档**的原料——
+   * 若索引只看本次集合（默认不含归档），会显示「承重 0 条」，把「看不见」误读成「没有」。
+   * 索引仍由调用方按视野过滤后传入（不过角色视野 ⇒ 隔离失效）。
+   */
+  indexEntries?: readonly Entry[]
   /** 配置（audit 段；缺省 DEFAULT_AUDIT_CONFIG） */
   config?: AuditConfig
   /** 逻辑轨迹索引：id → 命中次数/最后命中（缺省 = 无轨迹，usage 恒 0） */
@@ -303,10 +310,12 @@ export function auditMemory(input: AuditInput): AuditResult {
   const query = input.query ?? {}
   const nowMs = input.now ?? Date.now()
   const entries = [...input.entries]
+  // 索引作用域（缺省 = 本次集合）：引用 / 标签复用 / 重复簇都按它算
+  const indexScope = input.indexEntries === undefined ? entries : [...input.indexEntries]
 
-  const refs = referenceIndex(entries)
-  const tagReuse = tagReuseIndex(entries)
-  const dups = duplicateClusters(entries)
+  const refs = referenceIndex(indexScope)
+  const tagReuse = tagReuseIndex(indexScope)
+  const dups = duplicateClusters(indexScope)
 
   const byBucket = emptyBuckets()
   const charsByBucket = emptyBuckets()
@@ -394,6 +403,26 @@ export function auditMemory(input: AuditInput): AuditResult {
       : '用量信号：来自侧车轨迹。',
     '提案 ≠ 裁决：本工具只读，不归档不删除；动记忆数据请显式发起（属须请示类）。',
   ]
+
+  // 「看不见」≠「没有」：索引里承重、但不在本次集合内的条目要如实报出来
+  // （典型：被概要吸收的原料已归档 ⇒ 默认视图下 referenced 显示 0，容易被误读成「没有承重原料」）
+  if (indexScope.length > entries.length) {
+    const auditedIds = new Set(entries.map((entry) => entry.id))
+    let referencedOutside = 0
+    let outsideChars = 0
+    for (const entry of indexScope) {
+      if (auditedIds.has(entry.id)) continue
+      if ((refs.get(entry.id) ?? 0) > 0) {
+        referencedOutside += 1
+        outsideChars += charsOf(entry)
+      }
+    }
+    if (referencedOutside > 0) {
+      notes.push(
+        `另有 ${referencedOutside} 条承重原料不在本次集合内（${outsideChars} 字符，多为已被概要吸收的归档原料）——要看它们请加 includeArchive: true。`,
+      )
+    }
+  }
 
   return {
     summary: {

@@ -817,6 +817,12 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
           lines.push(`（另有 ${value.candidates.length - 10} 条候选，见结构化返回）`)
         }
         lines.push('提案 ≠ 裁决：本工具不归档不删除；要做请显式调用 forget（动记忆数据属须请示类）。')
+        if (value.notes.length > 0) {
+          // 把「看不见 ≠ 没有」这类读数注脚带出来（默认视图下承重为 0 时尤其重要）
+          for (const note of value.notes) {
+            if (note.startsWith('另有')) lines.push(note)
+          }
+        }
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
@@ -824,11 +830,15 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
       const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
       const includeArchive = args.includeArchive ?? false
-      // 视野一致（硬约束 ②）：体检是读路径，提案只含调用者视野内的条目
-      const { entries } = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
+      // 视野一致（硬约束 ②）：体检是读路径，提案只含调用者视野内的条目。
+      // 索引范围 = 视野内全量（含归档；否则承重原料不可见，会被误读成「没有承重」）；
+      // 分类范围 = 本次集合（默认剔归档，可由 includeArchive 放开）。
+      const { entries: universe } = gatherReadable(deps, { readScopes, includeArchive: true, view, explicitScope: args.scope })
+      const entries = includeArchive ? universe : universe.filter((entry) => !entry.archived)
       const usage = deps.readAccess === undefined ? undefined : await deps.readAccess()
       return auditMemory({
         entries,
+        indexEntries: universe,
         ...(config.audit !== undefined ? { config: config.audit } : {}),
         ...(usage !== undefined ? { usage } : {}),
         query: { topN: args.topN, minChars: args.minChars, includeArchive },

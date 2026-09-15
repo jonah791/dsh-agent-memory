@@ -388,3 +388,25 @@ test('A31b memory_audit 不写轨迹、不改条目（与 recall 的区别）', 
   await audit.execute({}, exec)
   assert.equal(recorded, 0, '体检自身不是「读到某条记忆」，不应污染用量轨迹')
 })
+
+// ---------- A44 索引范围：「看不见」≠「没有」 ----------
+
+test('A44 索引范围：默认视图不含归档 ⇒ 如实报出「另有 N 条承重原料不在集合内」', async () => {
+  const { kv, byName, exec } = setup()
+  const raw = aged(30, { id: 'raw', title: '归档原料', body: 'x'.repeat(300), archived: true })
+  const summaryEntry = entry({ id: 'sum', kind: 'summary', title: '日概要', level: 'day', bucket: '2026-08-01', archiveRef: ['raw'] })
+  seedRaw(kv, [raw, summaryEntry])
+
+  const defaultView = await byName.get('memory_audit').execute({}, exec)
+  assert.equal(defaultView.summary.total, 1, '默认视图不含归档')
+  assert.equal(defaultView.summary.referenced, 0, '集合内确实没有承重条目')
+  assert.ok(
+    defaultView.notes.some((n) => n.startsWith('另有 1 条承重原料')),
+    '必须如实报出集合之外（已归档）的承重原料——否则「承重 0」会被误读成「没有承重原料」',
+  )
+
+  const withArchive = await byName.get('memory_audit').execute({ includeArchive: true }, exec)
+  assert.equal(withArchive.summary.total, 2)
+  assert.equal(withArchive.summary.referenced, 1)
+  assert.ok(!withArchive.notes.some((n) => n.startsWith('另有')), '全量视图下不该再报「另有」')
+})
