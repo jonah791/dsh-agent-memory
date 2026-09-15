@@ -55,6 +55,7 @@ const AUDIT_KEYS: ReadonlySet<string> = new Set([
   'demote_min_chars',
   'access_trace',
   'proposal_log',
+  'compress_trace',
 ])
 
 /** audit.weights 内合法键（与 AuditWeights 逐字一致） */
@@ -449,7 +450,22 @@ function auditOrDefault(value: unknown): AuditConfig {
     demoteMinChars: nonNegativeIntOrDefault(value.demote_min_chars, DEFAULT_AUDIT_CONFIG.demoteMinChars, 'audit.demote_min_chars'),
     accessTrace: accessTraceOrDefault(value.access_trace),
     proposalLog: proposalLogOrDefault(value.proposal_log),
+    compressTrace: compressTraceOrDefault(value.compress_trace),
   })
+}
+
+/** audit.compress_trace：压缩流水线轨迹开关与轮转阈值（v0.8 证据层） */
+function compressTraceOrDefault(value: unknown): AuditConfig['compressTrace'] {
+  const base = DEFAULT_AUDIT_CONFIG.compressTrace
+  if (value === undefined || value === null) return { ...base }
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError('memory.yml: audit.compress_trace 必须是映射（enabled/max_bytes）')
+  }
+  assertNoUnknownKeys(value, ACCESS_TRACE_KEYS, 'memory.yml.audit.compress_trace')
+  return {
+    enabled: booleanOrDefault(value.enabled, base.enabled, 'audit.compress_trace.enabled'),
+    maxBytes: nonNegativeIntOrDefault(value.max_bytes, base.maxBytes, 'audit.compress_trace.max_bytes'),
+  }
 }
 
 /** audit.proposal_log：提案日志开关与轮转阈值（v0.7 · 让提案有历史） */

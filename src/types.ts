@@ -196,6 +196,8 @@ export interface AuditConfig {
   accessTrace: { enabled: boolean; maxBytes: number }
   /** 提案日志（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join） */
   proposalLog: { enabled: boolean; maxBytes: number }
+  /** 压缩流水线轨迹（v0.8：让「为什么这个桶没压」有证据——scan 判定分布 + 逐桶样本） */
+  compressTrace: { enabled: boolean; maxBytes: number }
 }
 
 /** 加权查询词项（v0.7 上下文重心：注入查询 = 加权词项集合，而非单条消息字面） */

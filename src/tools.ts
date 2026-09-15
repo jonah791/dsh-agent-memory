@@ -23,6 +23,8 @@ import { resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
 import { statsOf, titleFingerprint } from './store.ts'
 import type { AccessSummary } from './access-trace.ts'
+import type { CompressSummary } from './compress-trace.ts'
+import { formatSkipped } from './compress-trace.ts'
 import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
@@ -47,6 +49,11 @@ export interface MemoryToolDeps {
   readAccessSummary?: () => Promise<AccessSummary | undefined>
   /** 提案日志写入（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join；吞错） */
   recordProposal?: (record: unknown) => Promise<boolean> | void
+  /**
+   * 压缩流水线轨迹汇总（v0.8 §5.12：五问里 ③「断在哪一段」的答案面）。
+   * 缺省不报——工具层只展示，不判定。
+   */
+  readCompressSummary?: () => Promise<CompressSummary | undefined>
 }
 
 /** 缺省配置加载器：读取 .dsh/memory.yml，缺失走默认，非法 fail loud */
@@ -657,11 +664,18 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
           recallCalls: { type: 'integer', required: true },
           distinctHits: { type: 'integer', required: true },
           lastAccessAt: { type: 'string', required: true },
+          compressScans: { type: 'integer', required: true },
+          compressUnits: { type: 'integer', required: true },
+          compressErrors: { type: 'integer', required: true },
+          compressPendingLast: { type: 'integer', required: true },
+          compressSkippedText: { type: 'string', required: true },
+          compressSampleText: { type: 'string', required: true },
+          compressLastAt: { type: 'string', required: true },
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `记忆插件健康：${value.ok ? '正常' : '异常'}（共 ${value.total} 条 / 归档 ${value.archiveCount}；注入 ${value.injectEnabled ? '开' : '关'}）｜角色 ${value.role}（${value.rolesEnabled ? '角色维度已启用' : '角色维度未启用→零过滤'}；判据：${value.roleReason}）｜命中率信号：注入 ${value.autoCalls} 次 / 主动检索 ${value.recallCalls} 次 / 命中条目 ${value.distinctHits} 条${value.lastAccessAt.length > 0 ? `（最近 ${value.lastAccessAt}）` : ''}`,
+        text: `记忆插件健康：${value.ok ? '正常' : '异常'}（共 ${value.total} 条 / 归档 ${value.archiveCount}；注入 ${value.injectEnabled ? '开' : '关'}）｜角色 ${value.role}（${value.rolesEnabled ? '角色维度已启用' : '角色维度未启用→零过滤'}；判据：${value.roleReason}）｜命中率信号：注入 ${value.autoCalls} 次 / 主动检索 ${value.recallCalls} 次 / 命中条目 ${value.distinctHits} 条${value.lastAccessAt.length > 0 ? `（最近 ${value.lastAccessAt}）` : ''}｜压缩流水线：扫描 ${value.compressScans} 次 / 压缩 ${value.compressUnits} 单元 / 最近待压 ${value.compressPendingLast}${value.compressErrors > 0 ? ` / 错误 ${value.compressErrors}` : ''}${value.compressLastAt.length > 0 ? `（最近 ${value.compressLastAt}）` : ''}｜非待压判定：${value.compressSkippedText}${value.compressSampleText.length > 0 ? `\n候选样本（非待压）：${value.compressSampleText}` : ''}`,
       }],
     },
     async execute(args, exec) {
@@ -673,6 +687,13 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
       const summary: AccessSummary | undefined = deps.readAccessSummary === undefined
         ? undefined
         : await deps.readAccessSummary()
+      // 压缩流水线（v0.8 §5.12）：最近一轮扫描的判定分布 + 非待压样本（=「为什么这个桶没压」）
+      const compress: CompressSummary | undefined = deps.readCompressSummary === undefined
+        ? undefined
+        : await deps.readCompressSummary()
+      const sample = (compress?.sampleLast ?? [])
+        .filter((line) => !line.endsWith(' pending'))
+        .slice(0, 8)
       return {
         ok: true,
         total: stats.total,
@@ -687,6 +708,15 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
         distinctHits: summary?.distinctIds ?? 0,
         lastAccessAt: summary !== undefined && summary.lastAtMs > 0
           ? new Date(summary.lastAtMs).toISOString().slice(0, 19)
+          : '',
+        compressScans: compress?.scans ?? 0,
+        compressUnits: compress?.units ?? 0,
+        compressErrors: compress?.errors ?? 0,
+        compressPendingLast: compress?.pendingLast ?? 0,
+        compressSkippedText: formatSkipped(compress?.skippedLast ?? {}),
+        compressSampleText: sample.join(' · '),
+        compressLastAt: compress !== undefined && compress.lastAtMs > 0
+          ? new Date(compress.lastAtMs).toISOString().slice(0, 19)
           : '',
       }
     },

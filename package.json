@@ -1,7 +1,7 @@
 {
   "name": "dsh-agent-memory",
-  "version": "0.7.0",
-  "description": "Agent-driven long-term memory for DeepSeek Harness: scoped memory (global + per-workspace), layered entries (fact/knowledge/episodic), **role dimension for multi-agent workbench** (role-stamped writes + role-policy retrieval admission), **value auditor** (read-only memory_audit + proposal log), **context-centroid injection** (auto-recall query = weighted recent-turns terms, not just the last message + hit-rate metrics), time-bucket compaction (day→week→month→year), associative recall (related chains) + memory_relate navigation, auto recall injection (CJK bigram search, tail append), agent-decided content.",
+  "version": "0.8.0",
+  "description": "Agent-driven long-term memory for DeepSeek Harness: scoped memory (global + per-workspace), layered entries (fact/knowledge/episodic), **role dimension for multi-agent workbench** (role-stamped writes + role-policy retrieval admission), **value auditor** (read-only memory_audit + proposal log), **context-centroid injection** (auto-recall query = weighted recent-turns terms, not just the last message + hit-rate metrics), **compaction-pipeline evidence layer** (per-bucket verdicts `not-ended`/`no-sources`/`already-summarized`/`pending` + `<DSH_HOME>/memory-compress-trace.jsonl` + memory_health readout), time-bucket compaction (day→week→month→year), associative recall (related chains) + memory_relate navigation, auto recall injection (CJK bigram search, tail append), agent-decided content.",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

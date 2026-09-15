@@ -14,10 +14,10 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 54 项：53 项已实测 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
-| 版本 | v0.5（文档）· 对应插件 v0.7.0（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志 |
-| 实现落点 | `self-plugins/dsh-agent-memory/src/`（18 个模块，见 §8） |
-| 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
+| 状态 | **implemented**（验收 63 项：见 §7 汇总行；`pending>0` 故**不得**标 verified） |
+| 版本 | v0.6（文档）· 对应插件 v0.8.0（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；**v0.8 压缩流水线证据层**（`explainCompressions` 逐桶判定 + `memory-compress-trace.jsonl` 侧车 + `memory_health` 读数） |
+| 实现落点 | `self-plugins/dsh-agent-memory/src/`（19 个模块，见 §8） |
+| 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>侧车：`${DSH_HOME}/memory-access-trace.jsonl`（v0.6 用量）、`${DSH_HOME}/memory-audit-proposals.jsonl`（v0.7 提案）、**`${DSH_HOME}/memory-compress-trace.jsonl`（v0.8 压缩流水线）**<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
 | 作者 / 日期 | 爱丽丝 · 2026-09-13 |
 | 相关规则 | AGENTS.md §5.20（语义文档系统）；§5.8（记忆检索纪律） |
 
@@ -129,7 +129,7 @@
 
 优先级：**显式参数 > 配置模式 > 无 cwd 降级**。
 
-### 5.4 工具面（10 个，均 `defineTool` 注册）
+### 5.4 工具面（11 个，均 `defineTool` 注册）
 
 | 工具 | 语义要点 |
 |------|---------|
@@ -140,7 +140,8 @@
 | `memory_browse` | 时间金字塔浏览（层级/时间/标签过滤 + 分页），「不知道有什么」时的发现路径 |
 | `memory_relate` | 按 id 展开关联网络；`depth>1` 走 BFS 多跳闭包（`hop` 标注、visited 防环） |
 | `memory_stats` | 各层/桶/归档计数（跨 scope 聚合） |
-| `memory_health` | 运行时概览：条目总数/归档数/读 scopes/注入开关 |
+| `memory_audit` | **只读提案器**（v0.6 §5.9）：KEEP / DEMOTE / ARCHIVE / REVIEW 四档 + 证据行 + 层级聚合；**不归档、不删除、不刷 `accessedAt`**；读路径一样过角色视野 |
+| `memory_health` | 运行时概览：条目/归档数、读 scopes、注入开关、**角色与判据**（v0.5）、**命中率信号**（v0.7：注入次数/主动检索/去重命中/最近时刻）、**压缩流水线读数**（v0.8 §5.12：扫描轮数/压缩单元数/最近待压数/非待压判定分布/候选样本） |
 | `memory_version` | 版本 + 构建时刻（**动态**读 `package.json` 与产物 mtime） |
 | `memory_check` | 「待沉淀建议」；**当前恒返回空数组**（通道 B 未接线，§8） |
 
@@ -172,14 +173,15 @@
 
 | 调用方 | 调用点（文件:符号） | 时机 |
 |-------|------------------|------|
-| 插件装配 | `src/index.ts: apply()` | 开域 `agent_memory` → `MemoryStore` → `ctx.provide('memoryApi')` → 注册 10 工具 → 三个 install → 周期补压 |
+| 插件装配 | `src/index.ts: apply()` | 开域 `agent_memory` → `MemoryStore` → `ctx.provide('memoryApi')` → 注册 11 工具 → 三个 install → 周期补压 |
 | agent-loop | `src/inject.ts: installMemoryInject`（订阅 `agent/pre-step`） | 每会话第 1 个 step |
 | agent-loop | `src/auto-inject.ts: installAutoRecallInject`（订阅 `agent/pre-step`） | 每条新主人消息 |
 | 会话事件流 | `src/compaction-sink.ts: installCompactionSink`（订阅 `session/event`） | `compaction/start` / `compaction/summary` / `compaction/end` |
 | 定时器 | `src/periodic.ts: installPeriodicCompress` | 首跑 30s；此后每 360 分钟；随 dispose 清定时器 |
-| 工具执行内 | `src/tools.ts:228`（recall）、`src/tools.ts:350`（memory_stats）→ `deps.compress` | 访问记忆时补压（fire-and-forget） |
+| 工具执行内 | `src/tools.ts`（recall / memory_stats）→ `deps.compress` | 访问记忆时补压（fire-and-forget） |
 | 其他插件 | `ctx.memoryApi.remember()` 消费方：emotion / taskboard / evolution-core / skill-forge | 运行态结论回流（默认 `global`） |
-| 模型 | 10 个工具（§5.4） | agent 自主调用 |
+| 装配（v0.8 证据层） | `src/index.ts: makeCompressTrace(cfg, trigger)` | 懒压缩与周期补压**两条路径各自注入 sink**；sink 补齐 `atMs`/`trigger` 后落 `<DSH_HOME>/memory-compress-trace.jsonl`（吞错） |
+| 模型 | 11 个工具（§5.4） | agent 自主调用 |
 
 **写入真源唯一**：上表所有路径最终都调 `MemoryStore.remember / update / forget / put`。
 
@@ -294,6 +296,39 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 
 **与 A31 的关系（必须说清）**：`memory_audit` 仍是**只读工具**——不写记忆库、不刷新 `accessedAt`；写的是**侧车观测文件**（§5.22 观测层：吞错、不阻塞主流程）。A31 的判据是「存储文件内容 + `accessedAt` 不变」，本契约不与之冲突；新增验收见 A50。
 
+### 5.12 压缩流水线证据层（v0.8 · 让「为什么这个桶没压」可判）
+
+**动机（2026-09-15 实测暴露）**：跨条目巡检发现库级结构异常——`日概要 2026-09-13` / `日概要 2026-09-14` / `周概要 2026-W37` **全库 grep 无**（原料存在、单位已结束，§5.6 明写「含历史缺口回填」），而**根因不可判**：本流水线此前只有 `console.log` / `console.error`，宿主 logger **不落盘**（AGENTS.md §5.22 规则 1）⇒ 五问里的 ③「断在哪一段」答不了。按 §5.22「先补证据层，再修业务逻辑」，v0.8 只补证据，**不改压缩行为**。
+
+**① 判定命名化（`timeline.ts: explainCompressions`，判据单一真源）**
+
+| 判定 | 含义（= 原有 `continue` 短路顺序，逐条命名） |
+|------|--------------------------------------------|
+| `not-ended` | 单位未结束（`range.end > now`）——条目仍可能追加 |
+| `no-sources` | 无**非归档**原料（归档条目不参与压缩） |
+| `already-summarized` | 已有同层概要（幂等，不重复压） |
+| `pending` | 待压缩 |
+
+- `findPendingCompressions` = `explainCompressions(...).filter(pending)` 的**投影**——禁止两处各自维护一套判定（§5.22 判据单一真源）。
+- 语义等价性由既有 A10/A11/A12 用例 +A56 同源断言共同保证（重构不改行为）。
+
+**② 侧车轨迹（`<DSH_HOME>/memory-compress-trace.jsonl`）**
+
+| phase | 何时写 | 关键字段 |
+|-------|--------|---------|
+| `scan` | 每轮 `compressPending` 的**首轮**（后续轮是链式推进的中间态，会掩盖全貌） | `candidates`（候选桶数）/ `pending` / `skipped`（**非待压**判定分布）/ `sample`（逐桶 `<level> <bucket> <decision>`，上限 `MAX_SAMPLE=40`） |
+| `unit` | 每个压缩单元 | `level` / `bucket` / `reason` / `archived`（归档条数）/ `chars` / `durMs` |
+| `end` | 每轮收尾 | `units`（本轮 compressed 数）/ `totalMs` |
+| `error` | 单元抛错（**先落证再原样上抛**，不改控制流） | `level` / `bucket` / `message` / `durMs` |
+
+每条记录由装配层补齐 `atMs` + `trigger`（`lazy` = 访问记忆时补压 / `periodic` = 周期补压）——压缩器**不需要知道谁触发了它**。
+
+**③ 只读读数面**：`memory_health` 增报「压缩流水线」段（扫描轮数 / 压缩单元数 / 最近待压数 / 非待压判定分布 / 非待压候选样本前 8 条）——**五问一条命令可答**（§5.22 规则 2）。
+
+**纪律（对齐 §5.22）**：观测**绝不反噬主流程**——落盘走通用 `appendJsonl`（只追加 / 吞错返回 `false` / 超限轮转 `.1`）；`sample` 截断；sink 缺省不给 ⇒ **行为零差异**（A59 断言压缩结果逐字段一致）；开关 `audit.compress_trace`（缺省开，1 MB 轮转）按**每个 workspace 自己的** `memory.yml` 生效。
+
+**反定位**：不解释语义（不判断「这条该不该进概要」）｜不做压缩质量的自动裁决（那是 §10 U9 的口径问题）｜不落盘正文（只落 id/计数/耗时/判定）。
+
 ## 6 · 边界与信任
 
 - **能力 ≠ 沙箱**：本能力不隔离、不鉴权、不加密；能读到存储文件的人都可改记忆。
@@ -377,8 +412,17 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | A52 | `audit.proposal_log` 配置：缺省开（1 MB 轮转）、可关、未知键/负值 fail-loud | `tests/centroid.test.mjs`「A52 audit.proposal_log 配置…」 | ✔ 已实测 |
 | A53 | **线上**：重启后下一条真实主人消息的注入块包含「与对话历史话题相关」的条目（对照上一轮纯字面路径的注入），且 `memory_health` 的注入计数增长 | ✔ **线上实测**（2026-09-15 19:0x · v0.7.0 重启后）：`memory_health` →「命中率信号：注入 6 次 / 主动检索 0 次 / 命中条目 12 条（最近 2026-09-15T11:02:04）」；轨迹 7 条 `source:'auto'`；注入相关度由字面路径 16/13 升到 **32/26**（重心权重生效） | ✔ 已实测 |
 | A54 | **线上**：`<DSH_HOME>/memory-audit-proposals.jsonl` 出现 `audit` 记录（跑体检后）；随后 `forget/update` 应出现可 join 的 `action` 记录 | ✔ **线上实测**（19:02）：646 B / 1 行，`{"kind":"audit","role":"main","weights":{…},"summary":{"total":498,"chars":687974,…},"candidates":[…]}`——形状与 §5.11 一致 | ✔ 已实测 |
+| A55 | 逐桶判定四档命名，且优先级 = 短路顺序（`not-ended` → `no-sources` → `already-summarized` → `pending`） | `tests/compress-pipeline.test.mjs`「四种判定各有其桶，且优先级 = 短路顺序」 | ✔ 已实测 |
+| A56 | **判据单一真源**：`findPendingCompressions` ≡ `explainCompressions(...)` 的 pending 投影（含顺序） | `tests/compress-pipeline.test.mjs`「判据单一真源…」 | ✔ 已实测 |
+| A57 | 首轮 `scan` 落「候选数 / 待压数 / **非待压**判定分布 / 逐桶样本」，`skipped` 不含 `pending`，样本受 `MAX_SAMPLE` 约束 | `tests/compress-pipeline.test.mjs`「首轮 scan 落…」 | ✔ 已实测 |
+| A58 | 每个压缩单元落 `unit`（reason / 归档数 / 正文字符数 / 耗时）；收尾落 `end`（units / totalMs）；事件序列 = `1 + N + 1` | `tests/compress-pipeline.test.mjs`（同上用例的事件序列断言） | ✔ 已实测 |
+| A59 | **零回归**：不给 sink ⇒ 压缩结果逐字段与给 sink 时一致、库规模一致（观测不改行为） | `tests/compress-pipeline.test.mjs`「零回归硬约束…」 | ✔ 已实测 |
+| A60 | 单元抛错 ⇒ 先落 `error` 轨迹（level / bucket / message / durMs）**再原样上抛**（只加观测，不改控制流；§5.24：兜底必须留证） | `tests/compress-pipeline.test.mjs`「总结抛错 ⇒ 落 error 轨迹后原样上抛」 | ✔ 已实测 |
+| A61 | 侧车落盘纪律：只追加、坏行/异形行跳过不抛、超 `maxBytes` 轮转 `.1`、样本截断、**不可写路径 ⇒ 返回 `false` 且不抛**（尸体样本） | `tests/compress-trace.test.mjs` 4 用例（含尸体样本与轮转） | ✔ 已实测 |
+| A62 | `audit.compress_trace` 配置：缺省开（1 MB）、可关、`max_bytes=0` = 不轮转、非法（未知键 / 非布尔 / 负值 / 非映射）fail-loud | `tests/compress-trace.test.mjs`「audit.compress_trace 配置（A62）」3 用例 | ✔ 已实测 |
+| A63 | **线上**：重启后 `<DSH_HOME>/memory-compress-trace.jsonl` 出现 `scan` / `unit` / `end` 记录，且 `memory_health` 报出压缩流水线读数（五问一条命令可答） | 待本轮重启后读数（v0.8.0 部署） | **待线上验收** |
 
-> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=54, proven=53, pending=1`（A30 待线上复核）。
+> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=63, proven=61, pending=2`（A30 待线上复核；A63 待线上验收）。
 > **A53 的诚实旁注**：重心把「话题相关性」做上去了（相关度翻倍、命中与本次会话主题一致），但**唤醒消息本身该不该注入**仍存疑——`[守护] web 已重启` 触发注入时给到的仍是运维类条目。两条可查方向：① 唤醒类消息是否应触发注入（它是系统事件、不是对话）；② 需要「命中质量」而非「命中数量」的度量（现指标只数条数与次数）。**均未决**，见 §10 U9。
 > A29 旁注（诚实）：`by_preset` 预设映射分支本次**未在线上观测到**（该子代理会话头未带 `agentPreset`，走的是派生缺省）——该分支由 A20 单测覆盖。
 > **A25/A23 的线上量化对账（2026-09-15 17:5x · 真实生产库 676 条）**：主脑视角 `recall` → `命中 496`；`role='ghost'`（`read: []`, `include_global: false`）→ `命中 384`。差额 **112 = 111（global 作用域被 `include_global: false` 收窄）+ 1（唯一带 `role='main'` 的条目被 `read: []` 拒绝）**，逐项对得上。库内实测：盖章 `role` 共 1 条（`974a5e6b`，`author = {sessionId: 'session-a5375716…', delegationDepth: 0, preset: 'alice-v2'}`），其余 **675 条为共享**（迁移安全的实证）。
@@ -395,16 +439,17 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | `src/inject.ts` | 启动注入（速览组装 + `pre-step` 挂载） |
 | `src/auto-inject.ts` | auto-recall（触发面判定 + 摘要组装 + 挂载） |
 | `src/summarizer.ts` | 总结提示词 + LLM 直调（`DEFAULT_MAX_TOKENS = 16000`） |
-| `src/timeline.ts` | 桶算法 + `findPendingCompressions` + `TimelineCompressor`（压缩执行/幂等/冷归档）+ `compressUnitKey`（互斥键唯一真源） |
+| `src/timeline.ts` | 桶算法 + **`explainCompressions`（逐桶判定，v0.8 判据单一真源）** + `findPendingCompressions`（其 pending 投影）+ `TimelineCompressor`（压缩执行/幂等/冷归档 + **轨迹发射**）+ `compressUnitKey`（互斥键唯一真源） |
 | `src/lock.ts` | 按键串行锁 `withKeyLock`（进程内、跨实例共享；排队语义 + 异常不毒化链） |
-| `src/periodic.ts` | 周期补压定时器 |
+| `src/periodic.ts` | 周期补压定时器（v0.8 起接受 `traceFactory`，按各 workspace 配置决定是否落轨迹） |
 | `src/compaction-sink.ts` | 压缩即记忆（`session/event` → 保底落库 + 通知） |
-| `src/tools.ts` | 10 个工具定义 + 懒压缩钩子接线 |
-| `src/index.ts` | 装配：开域 / `memoryApi` / 注册工具 / 三个 install / 周期补压装配 |
+| `src/tools.ts` | 11 个工具定义（含 `memory_audit`；`memory_health` 三段读数：角色 / 命中率 / **压缩流水线**）+ 懒压缩钩子接线 |
+| `src/index.ts` | 装配：开域 / `memoryApi` / 注册 11 工具 / 三个 install / 周期补压装配 / **`makeCompressTrace`（v0.8 侧车 sink 工厂）** |
 | `src/role.ts` | **v0.5 角色维度**（纯函数）：会话身份判据 / 角色推导 / 策略解析 / 四条准入判据 / 视野组装 / 读作用域收窄 |
 | `src/audit.ts` | **v0.6 价值体检器**（纯函数）：引用索引（承重）/ 标签复用 / 近重复簇 / 评分（七项）/ 四档裁决（REVIEW→KEEP→ARCHIVE→DEMOTE）/ 分组聚合；只读，不改条目 |
 | `src/access-trace.ts` | **v0.6 侧车用量轨迹**：追加（JSONL）/ 坏行跳过 / 按体积轮转 / 吞错；`parseAccessTrace` 纯函数离线可测。**v0.7 增**：`appendJsonl`（通用侧车写入，单一实现）、`summarizeAccessRecords`（命中率度量口径）、`appendProposalRecord`（提案日志） |
 | `src/centroid.ts` | **v0.7 上下文重心**（纯函数）：多轮衰减 + 锚点加成 + 词项去重封顶；`recentTurnTexts` 从消息批次挑素材（排除工具结果与插件注入）。复用 `search.ts: tokenizeQuery`（分词单一真源） |
+| `src/compress-trace.ts` | **v0.8 压缩流水线证据层**：轨迹记录形状（`scan`/`unit`/`end`/`error`）/ `appendCompressTrace`（复用 `appendJsonl`：只追加 + 吞错 + 轮转）/ `summarizeCompressTrace`（**最近一次扫描**口径，坏行跳过）/ `formatSkipped`（纯函数，离线可测） |
 
 **未实现 / 未验证部分（显式标注）**：
 
@@ -458,6 +503,12 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
     - **关键设计取舍**：① **零回归是硬约束**——不给重心就逐字节走原路径（A47 断言同一输出）；② **分词单一真源**——重心直接复用 `search.ts: tokenizeQuery`，不另写一份停用词表（§5.22 判据单一真源）；③ **只读不破**——提案日志是侧车观测文件，`memory_audit` 仍不写记忆库、不刷 `accessedAt`（A50 显式断言）。
     - **自证反例**：本次改动的动机来自实测反例（重启唤醒消息注入了三条与当轮意图无关的记忆）；A46 把该反例翻过来写成判据——**反例进测试，才算真的修了**。
 
+11. **2026-09-15 · v0.8 压缩流水线证据层（跨条目巡检先于修业务逻辑）**
+    - **触发事实（不是猜测）**：跨条目巡检（`memory_stats` + `memory_browse` 含归档）发现——`日概要 2026-09-13` / `日概要 2026-09-14` / `周概要 2026-W37` **全库 grep 无**；而这两天的 episodic 原料充足、单位早已结束，§5.6 又明写「含历史缺口回填」。⇒ 声明与事实背离。
+    - **为什么先补证据而不是先修**：本流水线只有 `console.log` / `console.error`，宿主 logger 不落盘 ⇒ **根因不可判**（是没扫到？扫到了判 no-sources？压了没写？写了被吞？三种可能都解释得通）。§5.22 的规则顺序是「先补证据层，再修业务逻辑」——**跳过证据直接猜修，等于把猜测留在生产里**。
+    - **关键设计取舍**：① **判定命名化 + 单一真源**——把原来那串 `continue` 命名成 `not-ended` / `no-sources` / `already-summarized` / `pending`，并让 `findPendingCompressions` 只做投影（禁止两处各维护一套判定）；② **只记首轮 scan**（后续轮是链式推进的中间态，会掩盖全貌）；③ **触发器不进压缩器**——`atMs`/`trigger` 由装配层补齐，压缩器只交事件；④ **零回归**（不给 sink 则行为零差异，A59 断言）；⑤ **先量后定**——本轮只改观测面，**没有**顺手改压缩业务逻辑（根因未定前不动）。
+    - **顺带修正的双平台夹具缺陷**：`role` / `audit` / `centroid` 三处夹具把派生值写死（`const WID = 'c:/Users/Alice/proj'`），而 POSIX 下 `resolve()` 语义不同 ⇒ **12 个 A 测试在 node 22/WSL 侧静默红**（Windows 侧绿）。改为 `workspaceIdOf(CWD)` 派生后：mjs 套件 WSL 侧 **179/179**、Windows 侧 `test:all` **261（260 pass + 1 skip）**。教训：**夹具里的派生值必须调用被测的派生函数**，硬编码 = 换平台就静默失真。
+
 ## 10 · 未决问题
 
 - **U1 ~~端到端幂等如何补~~ → 已解决（2026-09-13）**：采纳方案 ① 的**强化版**——不是 scope 级单飞，而是按 (scope, level, bucket) 串行（粒度更细、并行度更高；scope 级会把该 scope 全部桶串行化）+ 写前复核兜跨进程。**遗留（需主人裁决）**：库中 4 对历史重复桶是否去重（`forget` 软归档其中一份即可，但动记忆数据属须请示类）。
@@ -469,3 +520,6 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 - **U7 存量条目的隔间归属（需主人裁决）**：674 条存量条目全部为共享记忆——这对迁移安全是优点，对幽灵隔间是缺点（幽灵可读到全部历史）。选项：① 保持共享（靠独立 `DSH_HOME` 做真隔离）；② 一次性把某批 tag 的条目回填 `role`（= 批量改记忆数据，属须请示类）。倾向 ①。
 - **U8 记忆生命周期与价值体检（MAGE 借鉴的下一步）**：~~① 只读体检器（按 ν(x) 排序输出「GC 候选/应降级/应保留」）~~ → **已交付 v0.6**（`memory_audit` + 侧车用量轨迹，见 §5.9）。**仍缺**：② **双时态**（`validFrom/validTo`）+ `supersedes`/`invalidates` 链（现在只有布尔 `archived`，删除不留失效证据）；③ **事件超边层**（多主体共同产出的事件作为一等条目——v0.5 的 `role` 只解决分区，不解决「谁+什么动作+哪份证据共同产出了这个结论」）；④ 权重校准（需要「提案被采纳/否决 + 事后是否后悔」的样本）。
 - **U9 注入的「该不该」与「好不好」（v0.7 线上观察）**：重心化解决了「按什么查」（相关性翻倍），但暴露两个新问题：① **唤醒类消息是否该触发注入**——`[守护] web 已重启` 是系统事件，不是对话，给它注入运维历史条目价值存疑（现触发面为 GUI/telegram 主人消息，唤醒消息走在同一条路上）；② 现指标只数**条数与次数**（注入 6 次 / 命中 12 条），**没有质量口径**（"这次注入有用吗"）。倾向：先加一个**可选的判定信号**——注入是否被后续动作引用（如注入后我是否 `recall`/`update` 了其中某条），再谈是否排除唤醒触发。**未决，需主人视角**。
+- **U10 压缩缺口（2026-09-15 实测 · 待证据层读数定根因）**：库内实测缺 `日概要 2026-09-13`、`日概要 2026-09-14`、`周概要 2026-W37`（全库 grep 无，含归档）；而这两天 episodic 原料充足、单位已结束两天，§5.6 声明「含历史缺口回填」。**候选解释（未定）**：① 那些天的 episodic 全部已归档 ⇒ `no-sources`；② 总结抛错（LLM 路由/超时）⇒ 每 6 小时重试同样失败；③ 候选桶根本没被扫到。v0.8 证据层落地后，`scan` 记录的 `skipped` + `sample` 直接给出答案（**读一次轨迹即可判定**）。**根因未定前不改业务逻辑**。
+- **U11 侧车开关有两处未接线（诚实声明）**：`audit.access_trace.enabled` 与 `audit.proposal_log.enabled` 会被解析、写进配置对象，但 `index.ts` 的 writer 直接调 `appendAccessTrace` / `appendProposalRecord`，**不读该开关** ⇒ 设 `enabled: false` 目前**不生效**（文档曾承诺「可关」，属声明与实现背离）。v0.8 只把 `compress_trace` 接通到各 workspace 配置（`makeCompressTrace` 读 `cfg.audit.compressTrace`）；另两处需要把 config 传进 writer 签名（独立小重构），**未做**。倾向：与下一次触碰 `tools.ts` 的改动合并处理，避免为开关单独动一次组合。
+- **U12 ~~夹具硬编码派生值~~ → 已解决（2026-09-15）**：`role.test.mjs` / `audit.test.mjs` / `centroid.test.mjs` 三处把 `WID` 写死为 `'c:/Users/Alice/proj'`，而 POSIX 下 `resolve()` 语义不同 ⇒ 作用域不匹配、12 个 A 测试在 node 22/WSL 侧静默红（**Windows 侧一直绿，所以长期未被发现**）。改为调用 `workspaceIdOf(CWD)` 派生后双平台同源：WSL mjs **179/179**、Windows `test:all` **261（260 pass + 1 skip）**。**遗留**：`.ts` 套件在 node 22 仍不可跑（需 node ≥24，见 U2）——已在脚本旁注明前提。

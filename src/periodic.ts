@@ -19,12 +19,18 @@ import type { Context } from '@deepseek-ai/cordis'
 import { GLOBAL_SCOPE } from './scope.ts'
 import type { MemoryStore } from './store.ts'
 import { TimelineCompressor, type SummarizeFn } from './timeline.ts'
+import type { CompressTraceSink } from './compress-trace.ts'
 import type { MemoryConfig } from './types.ts'
 
 export interface PeriodicCompressDeps {
   store: MemoryStore
   loadConfig: (workspaceRoot: string) => Promise<MemoryConfig>
   summarize: SummarizeFn
+  /**
+   * 压缩轨迹接收器工厂（v0.8）：按**该 workspace 自己的** cfg 决定是否落轨迹
+   * （`audit.compress_trace.enabled=false` ⇒ 返回 undefined）。不提供即完全不落轨迹。
+   */
+  traceFactory?: (cfg: MemoryConfig) => CompressTraceSink | undefined
 }
 
 export interface PeriodicCompressOptions {
@@ -50,7 +56,7 @@ export function installPeriodicCompress(
         const cfg = await deps.loadConfig(scope)
         const timelineEnabled = cfg.timeline.day || cfg.timeline.week || cfg.timeline.month || cfg.timeline.year
         if (!timelineEnabled) continue
-        const compressor = new TimelineCompressor(deps.store, cfg, deps.summarize)
+        const compressor = new TimelineCompressor(deps.store, cfg, deps.summarize, deps.traceFactory?.(cfg))
         const results = await compressor.compressPending(scope)
         const done = results.filter((r) => r.reason === 'compressed')
         if (done.length > 0) {

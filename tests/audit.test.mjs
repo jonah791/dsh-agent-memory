@@ -26,6 +26,7 @@ import {
 } from '../lib/audit.js'
 import { appendAccessTrace, parseAccessTrace, shouldRotate } from '../lib/access-trace.js'
 import { DEFAULT_CONFIG, MemoryConfigError, parseMemoryConfig } from '../lib/config.js'
+import { workspaceIdOf } from '../lib/scope.js'
 
 // ---------- 测试基建 ----------
 
@@ -51,8 +52,10 @@ class MemoryKv {
   }
 }
 
+// ⚠ 双平台夹具纪律（技能 dsh-plugin-testability）：`WID` 由**被测的派生函数**算出，
+// 不硬编码——POSIX（WSL）下 `resolve()` 语义不同，硬编码会让作用域不匹配、整组用例静默 0 命中。
 const CWD = 'C:\\Users\\Alice\\proj'
-const WID = 'c:/Users/Alice/proj'
+const WID = workspaceIdOf(CWD)
 const NOW = Date.parse('2026-09-15T12:00:00.000Z')
 const DAY = 86_400_000
 

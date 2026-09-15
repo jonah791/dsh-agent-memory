@@ -59,6 +59,8 @@ export const DEFAULT_AUDIT_CONFIG: AuditConfig = Object.freeze({
   accessTrace: Object.freeze({ enabled: true, maxBytes: 2_000_000 }),
   /** 提案日志（v0.7）：让提案有历史——audit 候选 + forget/update 动作同文件可 join */
   proposalLog: Object.freeze({ enabled: true, maxBytes: 1_000_000 }),
+  /** 压缩流水线轨迹（v0.8）：让「为什么这个桶没压」有证据（判定分布 + 逐桶样本） */
+  compressTrace: Object.freeze({ enabled: true, maxBytes: 1_000_000 }),
 })
 
 /** 复述衰减的基准稳定度（天）——MAGE 用 30 天半衰期 */

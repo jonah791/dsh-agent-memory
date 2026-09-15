@@ -18,6 +18,7 @@ import type { MemoryConfig } from './types.ts'
 import type { Entry, TimelineLevel } from './types.ts'
 import type { MemoryStore } from './store.ts'
 import { withKeyLock } from './lock.ts'
+import type { CompressTraceEvent, CompressTraceSink } from './compress-trace.ts'
 
 /** 压缩目标层级（金字塔：日概要 → 周概要 ← 日概要再总结 → 月概要 ← 周概要再总结 → 年概要 ← 月概要再总结） */
 export type CompressionLevel = 'day' | 'week' | 'month' | 'year'
@@ -235,28 +236,45 @@ function isSourceFor(entry: Entry, level: CompressionLevel, upperBucket: string)
 }
 
 /**
- * 懒压缩触发：扫描当前 scope 条目，找出「所有已结束自然单位」中「有未压缩原料」的待压缩单位。
- * - 不只上一单位：凡已结束（range.end <= now）且有原料、无同层概要的桶全部补压——
+ * 单个候选桶的判定（v0.8：把「为什么没压」变成一等结果）。
+ * 语义 = 原 `findPendingCompressions` 里那串 `continue` 的**命名化**，判定优先级即短路顺序：
+ * `not-ended`（单位未结束）→ `no-sources`（无未归档原料）→ `already-summarized`（已有同层概要）→ `pending`。
+ */
+export type CompressDecision = 'pending' | 'not-ended' | 'no-sources' | 'already-summarized'
+
+/** 一个候选桶的判定行 */
+export interface CompressVerdict {
+  level: CompressionLevel
+  bucket: string
+  decision: CompressDecision
+}
+
+/**
+ * 逐桶判定（**判据单一真源**）：扫描当前 scope 条目，对**每个候选桶**给出它在金字塔上的处境。
+ *
+ * 候选桶 = 所有条目的该层级桶 + 上一自然单位。
+ * - day 层优先用条目自身 `bucket`（episodic/日概要落库时即日桶，可能与 createdAt 推算不一致）；
+ *   上层（week/month/year）按 `createdAt` 推算归属桶（低层 summary 的 bucket 不是本层桶）。
+ * - 不只上一单位：凡已结束（`range.end <= now`）且有原料、无同层概要的桶全部补压——
  *   历史缺口（如插件上线前的天）也能补齐，保证金字塔完整。
  * - 幂等：目标桶已存在同层级概要 → 不算待压缩（不重复压缩）。
- * - 层级顺序 day→week→month→year：compressPending 循环调用，链式原料就绪。
- * @param entries - scope 全量条目（含归档，供幂等检查；通常为 store.list(scope, {includeArchive:true})）
- * @param config - 项目记忆配置（timeline.day/week/month/year 开关决定哪些层级启用）
+ *
+ * ⚠ 本函数是 `findPendingCompressions` 的**唯一实现来源**——后者只做过滤，
+ * 禁止两处各自维护一套判定（§5.22 判据单一真源）。
+ * @param entries - scope 全量条目（含归档，供幂等检查；通常为 `store.list(scope, {includeArchive:true})`）
+ * @param config - 项目记忆配置（`timeline.*` 开关决定哪些层级启用）
  * @param now - 当前时刻（测试注入固定时刻）
- * @returns 待压缩单位列表（按 日→周→月→年 顺序）
+ * @returns 判定行列表（按 日→周→月→年 顺序，层级内按候选桶发现顺序）
  */
-export function findPendingCompressions(
+export function explainCompressions(
   entries: readonly Entry[],
   config: MemoryConfig,
   now: Date = new Date(),
-): PendingCompression[] {
-  const pending: PendingCompression[] = []
+): CompressVerdict[] {
+  const verdicts: CompressVerdict[] = []
   const levels: CompressionLevel[] = ['day', 'week', 'month', 'year']
   for (const level of levels) {
     if (!config.timeline[level]) continue
-    // 候选桶：所有条目的该层级桶 + 上一自然单位。
-    // day 层优先用条目自身 bucket（episodic/日概要落库时即日桶，可能与 createdAt 推算不一致）；
-    // 上层（week/month/year）按 createdAt 推算归属桶（低层 summary 的 bucket 不是本层桶）。
     const candidates = new Set<string>()
     for (const entry of entries) {
       if (level === 'day' && typeof entry.bucket === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(entry.bucket)) {
@@ -268,33 +286,68 @@ export function findPendingCompressions(
     }
     candidates.add(previousBucketKey(level, now))
     for (const bucket of candidates) {
-      // 只压「已结束」单位：桶范围终点 <= now；当前单位未结束不动（条目仍可能追加）
-      const range = bucketRange(level, bucket)
-      if (range.end.getTime() > now.getTime()) continue
-      const hasSources = entries.some((entry) => isSourceFor(entry, level, bucket))
-      if (!hasSources) continue
-      const already = entries.some(
-        (entry) => entry.kind === 'summary' && entry.level === level && entry.bucket === bucket,
-      )
-      if (already) continue
-      pending.push({ level, bucket })
+      verdicts.push({ level, bucket, decision: judgeBucket(entries, level, bucket, now) })
     }
   }
-  return pending
+  return verdicts
+}
+
+/** 单桶判定（短路顺序 = 判定优先级，见 `CompressDecision`） */
+function judgeBucket(
+  entries: readonly Entry[],
+  level: CompressionLevel,
+  bucket: string,
+  now: Date,
+): CompressDecision {
+  // 只压「已结束」单位：桶范围终点 <= now；当前单位未结束不动（条目仍可能追加）
+  const range = bucketRange(level, bucket)
+  if (range.end.getTime() > now.getTime()) return 'not-ended'
+  const hasSources = entries.some((entry) => isSourceFor(entry, level, bucket))
+  if (!hasSources) return 'no-sources'
+  const already = entries.some(
+    (entry) => entry.kind === 'summary' && entry.level === level && entry.bucket === bucket,
+  )
+  if (already) return 'already-summarized'
+  return 'pending'
+}
+
+/**
+ * 懒压缩触发：从逐桶判定里取出待压缩单位（**只做过滤，不重写判据**）。
+ * - 层级顺序 day→week→month→year：compressPending 循环调用，链式原料就绪。
+ * @param entries - scope 全量条目（含归档）
+ * @param config - 项目记忆配置
+ * @param now - 当前时刻（测试注入固定时刻）
+ * @returns 待压缩单位列表（按 日→周→月→年 顺序）
+ */
+export function findPendingCompressions(
+  entries: readonly Entry[],
+  config: MemoryConfig,
+  now: Date = new Date(),
+): PendingCompression[] {
+  return explainCompressions(entries, config, now)
+    .filter((v) => v.decision === 'pending')
+    .map((v) => ({ level: v.level, bucket: v.bucket }))
 }
 
 // ---------- 压缩执行（TimelineCompressor） ----------
 
 /**
  * 时间压缩器：把「上一自然单位的原料条目」压缩为概要条目并冷归档原料。
- * 依赖注入：store（T1 存储层）+ config（T2 配置）+ summarize（summarizer.ts 或测试 fake）。
+ * 依赖注入：store（T1 存储层）+ config（T2 配置）+ summarize（summarizer.ts 或测试 fake）
+ * + `trace`（v0.8 证据层，**可选**：不给即完全不落轨迹，行为零差异——零回归硬约束）。
  */
 export class TimelineCompressor {
   constructor(
     private readonly store: MemoryStore,
     private readonly config: MemoryConfig,
     private readonly summarize: SummarizeFn,
+    private readonly trace?: CompressTraceSink,
   ) {}
+
+  /** 交出一条轨迹事件（接收器自身吞错；本方法不做任何判定、不改任何状态） */
+  private emit(event: CompressTraceEvent): void {
+    this.trace?.(event)
+  }
 
   /**
    * 压缩指定单位（**并发安全入口**）：按 (scope, level, bucket) 串行执行。
@@ -383,17 +436,71 @@ ${text}`,
    * 懒压缩入口：扫描待压缩单位并逐个压缩（访问记忆时调用一次）。
    * 循环直到无待压缩：day 概要生成 → 归档日条目 → 下一轮 week 才能看到 day 概要原料，
    * 周 → 月 → 年 链式推进；每轮至少压一个单位否则退出（幂等有界）。
+   *
+   * v0.8 证据层：**首轮**落一条 `scan`（候选桶数 + 待压数 + 非待压判定分布 + 逐桶样本
+   * ⇒ 直接回答「为什么偏偏这个桶没压」），每个单元落一条 `unit`，收尾落一条 `end`，
+   * 异常落 `error` 后**原样上抛**（只加观测，不改控制流）。
+   * 只在首轮记 scan：后续轮是链式推进的中间态，会掩盖「本轮扫描到底看到了什么」的全貌。
    */
   async compressPending(scope: string, now: Date = new Date()): Promise<CompressUnitResult[]> {
     const results: CompressUnitResult[] = []
+    const startedAt = Date.now()
+    let scanned = false
     for (;;) {
       const all = this.store.list(scope, { includeArchive: true })
-      const pending = findPendingCompressions(all, this.config, now)
+      const verdicts = explainCompressions(all, this.config, now)
+      const pending = verdicts.filter((v) => v.decision === 'pending')
+      if (!scanned) {
+        scanned = true
+        const skipped: Record<string, number> = {}
+        for (const v of verdicts) {
+          if (v.decision === 'pending') continue
+          skipped[v.decision] = (skipped[v.decision] ?? 0) + 1
+        }
+        this.emit({
+          scope,
+          phase: 'scan',
+          candidates: verdicts.length,
+          pending: pending.length,
+          skipped,
+          sample: verdicts.map((v) => `${v.level} ${v.bucket} ${v.decision}`),
+        })
+      }
       if (pending.length === 0) break
       for (const p of pending) {
-        results.push(await this.compressUnit(scope, p.level, p.bucket))
+        const unitStarted = Date.now()
+        try {
+          const result = await this.compressUnit(scope, p.level, p.bucket)
+          results.push(result)
+          this.emit({
+            scope,
+            phase: 'unit',
+            level: p.level,
+            bucket: p.bucket,
+            reason: result.reason,
+            archived: result.archivedIds.length,
+            chars: result.summary?.body.length ?? 0,
+            durMs: Date.now() - unitStarted,
+          })
+        } catch (error) {
+          this.emit({
+            scope,
+            phase: 'error',
+            level: p.level,
+            bucket: p.bucket,
+            message: (error as Error).message,
+            durMs: Date.now() - unitStarted,
+          })
+          throw error
+        }
       }
     }
+    this.emit({
+      scope,
+      phase: 'end',
+      units: results.filter((r) => r.reason === 'compressed').length,
+      totalMs: Date.now() - startedAt,
+    })
     return results
   }
 }

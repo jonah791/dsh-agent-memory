@@ -14,6 +14,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryStore } from '../lib/store.js'
 import { createMemoryTools } from '../lib/tools.js'
+import { workspaceIdOf } from '../lib/scope.js'
 import {
   DEFAULT_ROLES_CONFIG,
   admitsEntry,
@@ -50,8 +51,11 @@ class MemoryKv {
   }
 }
 
+// ⚠ 双平台夹具纪律（技能 dsh-plugin-testability）：`WID` 必须由**被测的派生函数**算出。
+// 硬编码 `c:/Users/Alice/proj` 在 POSIX（WSL）下不成立——`workspaceIdOf` 内部的 `resolve()` 语义
+// 不同 ⇒ 作用域不匹配 ⇒ 整组用例静默变「0 命中」（2026-09-15 实测：12 个 A 测试在 node 22/WSL 侧红、Windows 侧绿）。
 const CWD = 'C:\\Users\\Alice\\proj'
-const WID = 'c:/Users/Alice/proj'
+const WID = workspaceIdOf(CWD)
 
 /** v0.4 形状的配置（**没有 roles 段**）——历史字面量的活样本 */
 const LEGACY_CONFIG = {
