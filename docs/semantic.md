@@ -14,10 +14,10 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 63 项：见 §7 汇总行；`pending>0` 故**不得**标 verified） |
-| 版本 | v0.6（文档）· 对应插件 v0.8.0（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；**v0.8 压缩流水线证据层**（`explainCompressions` 逐桶判定 + `memory-compress-trace.jsonl` 侧车 + `memory_health` 读数） |
+| 状态 | **implemented**（验收 67 项：见 §7 汇总行；`pending>0` 故**不得**标 verified） |
+| 版本 | v0.7（文档）· 对应插件 v0.8.2（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；v0.8 压缩流水线证据层；**v0.8.1/v0.8.2 修 U10 真因**（总结调用补会话 id；输出预算与可归因证据） |
 | 实现落点 | `self-plugins/dsh-agent-memory/src/`（19 个模块，见 §8） |
-| 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>侧车：`${DSH_HOME}/memory-access-trace.jsonl`（v0.6 用量）、`${DSH_HOME}/memory-audit-proposals.jsonl`（v0.7 提案）、**`${DSH_HOME}/memory-compress-trace.jsonl`（v0.8 压缩流水线）**<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
+| 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>侧车：`${DSH_HOME}/memory-access-trace.jsonl`（v0.6 用量）、`${DSH_HOME}/memory-audit-proposals.jsonl`（v0.7 提案）、`${DSH_HOME}/memory-compress-trace.jsonl`（v0.8 压缩流水线）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（**`config.maxTokens: 32000`**——2026-09-15 由 16000 抬高，见 §7 A64–A67 旁注） |
 | 作者 / 日期 | 爱丽丝 · 2026-09-13 |
 | 相关规则 | AGENTS.md §5.20（语义文档系统）；§5.8（记忆检索纪律） |
 
@@ -420,9 +420,14 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | A60 | 单元抛错 ⇒ 先落 `error` 轨迹（level / bucket / message / durMs）**再原样上抛**（只加观测，不改控制流；§5.24：兜底必须留证） | `tests/compress-pipeline.test.mjs`「总结抛错 ⇒ 落 error 轨迹后原样上抛」 | ✔ 已实测 |
 | A61 | 侧车落盘纪律：只追加、坏行/异形行跳过不抛、超 `maxBytes` 轮转 `.1`、样本截断、**不可写路径 ⇒ 返回 `false` 且不抛**（尸体样本） | `tests/compress-trace.test.mjs` 4 用例（含尸体样本与轮转） | ✔ 已实测 |
 | A62 | `audit.compress_trace` 配置：缺省开（1 MB）、可关、`max_bytes=0` = 不轮转、非法（未知键 / 非布尔 / 负值 / 非映射）fail-loud | `tests/compress-trace.test.mjs`「audit.compress_trace 配置（A62）」3 用例 | ✔ 已实测 |
-| A63 | **线上**：重启后 `<DSH_HOME>/memory-compress-trace.jsonl` 出现 `scan` / `unit` / `end` 记录，且 `memory_health` 报出压缩流水线读数（五问一条命令可答） | 待本轮重启后读数（v0.8.0 部署） | **待线上验收** |
+| A63 | **线上**：重启后 `<DSH_HOME>/memory-compress-trace.jsonl` 出现 `scan` / `unit` / `end` 记录，且 `memory_health` 报出压缩流水线读数（五问一条命令可答） | ✔ **线上实测**（19:41–19:57）：轨迹 4 行→19 行；`scan` 41 候选/3 待压 + 判定分布 + 逐桶样本；`error` 带 provider 原文；`unit`/`end` 齐全；`memory_health` →「压缩流水线：扫描 7 次 / 压缩 3 单元 / 非待压判定 no-sources 33, not-ended 4, already-summarized 1」 | ✔ 已实测 |
+| A64 | 总结调用带会话 id：有 `agent` ⇒ 用 `agent.session.id`；无 agent ⇒ 显式 `sessionId` 参数（周期补压路径）；**两者皆无 ⇒ options 不含该键**（零回归） | `tests/summarizer.test.mjs`「sessionId 透传」4 用例 | ✔ 已实测 |
+| A65 | 提示词含正文长度上限（缺省 6000 字，可经第二参数覆盖）并显式劝阻逐字搬运 | `tests/summarizer.test.mjs`「长度上限（v0.8.1）…」「长度上限可覆盖…」 | ✔ 已实测 |
+| A66 | 截断错误附**可归因证据**（已产出字符数 + usage），区分「模型写长文」与「reasoning 烧预算」 | `tests/summarizer.test.mjs`「截断错误附可归因证据（v0.8.2）…」 | ✔ 已实测 |
+| A67 | **线上（症状消失级）**：三个 pending 桶全部压成概要、原料冷归档，缺口消失 | ✔ **线上实测**（19:54:21 scan → 19:55:26 `day 2026-09-13` compressed（归档 6 / 12,233 字 / 64.8s）→ 19:56:05 `day 2026-09-14`（归档 15 / 12,919 字 / 38.5s）→ 19:57:35 `week 2026-W37`（归档 6 / 17,436 字 / 90.4s）→ `end`）；库内 681→684 条（+3 概要）、归档 180→207（+27 原料） | ✔ 已实测 |
 
-> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=63, proven=61, pending=2`（A30 待线上复核；A63 待线上验收）。
+> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=67, proven=66, pending=1`（仅 A30 待线上复核）。
+> **A64–A67 的事故背景（U10 定案）**：证据层首跑即指出三桶判定正确、失败在总结调用——真因两段：① `GenerateOptions` 未带 `sessionId` ⇒ 宿主插件 `dsh-x-opencode-session` 不加 `x-opencode-session` 头 ⇒ 网关拒单（`Request is missing x-opencode-session…`）；② 路由通了以后输出触 16,000 token 上限被 fail-closed——实测单份概要 12,233 / 12,919 / 17,436 字符（≈18–26k token），**提示词的 6000 字预算没绑住（超写 2×）⇒ 硬约束只能来自 token 上限**（`maxTokens` 16000 → 32000）。
 > **A53 的诚实旁注**：重心把「话题相关性」做上去了（相关度翻倍、命中与本次会话主题一致），但**唤醒消息本身该不该注入**仍存疑——`[守护] web 已重启` 触发注入时给到的仍是运维类条目。两条可查方向：① 唤醒类消息是否应触发注入（它是系统事件、不是对话）；② 需要「命中质量」而非「命中数量」的度量（现指标只数条数与次数）。**均未决**，见 §10 U9。
 > A29 旁注（诚实）：`by_preset` 预设映射分支本次**未在线上观测到**（该子代理会话头未带 `agentPreset`，走的是派生缺省）——该分支由 A20 单测覆盖。
 > **A25/A23 的线上量化对账（2026-09-15 17:5x · 真实生产库 676 条）**：主脑视角 `recall` → `命中 496`；`role='ghost'`（`read: []`, `include_global: false`）→ `命中 384`。差额 **112 = 111（global 作用域被 `include_global: false` 收窄）+ 1（唯一带 `role='main'` 的条目被 `read: []` 拒绝）**，逐项对得上。库内实测：盖章 `role` 共 1 条（`974a5e6b`，`author = {sessionId: 'session-a5375716…', delegationDepth: 0, preset: 'alice-v2'}`），其余 **675 条为共享**（迁移安全的实证）。
@@ -509,6 +514,12 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
     - **关键设计取舍**：① **判定命名化 + 单一真源**——把原来那串 `continue` 命名成 `not-ended` / `no-sources` / `already-summarized` / `pending`，并让 `findPendingCompressions` 只做投影（禁止两处各维护一套判定）；② **只记首轮 scan**（后续轮是链式推进的中间态，会掩盖全貌）；③ **触发器不进压缩器**——`atMs`/`trigger` 由装配层补齐，压缩器只交事件；④ **零回归**（不给 sink 则行为零差异，A59 断言）；⑤ **先量后定**——本轮只改观测面，**没有**顺手改压缩业务逻辑（根因未定前不动）。
     - **顺带修正的双平台夹具缺陷**：`role` / `audit` / `centroid` 三处夹具把派生值写死（`const WID = 'c:/Users/Alice/proj'`），而 POSIX 下 `resolve()` 语义不同 ⇒ **12 个 A 测试在 node 22/WSL 侧静默红**（Windows 侧绿）。改为 `workspaceIdOf(CWD)` 派生后：mjs 套件 WSL 侧 **179/179**、Windows 侧 `test:all` **261（260 pass + 1 skip）**。教训：**夹具里的派生值必须调用被测的派生函数**，硬编码 = 换平台就静默失真。
 
+12. **2026-09-15 · v0.8.1/v0.8.2 · 证据层的第一次实战回报（U10 从「不可判」到「当晚治愈」）**
+    - **时间线（全部有落盘证据）**：19:35 部署 v0.8.0（只有观测）→ **19:35:50 首条 `scan` 就定案**（三桶判定正确）→ 19:35:51 首条 `error` 给出 provider 原文 → 19:41 修会话 id（v0.8.1）→ 错误变成「输出触顶」→ 19:45 加提示词长度预算（无效，模型超写）→ 19:53 抬 `maxTokens` 到 32000 → **19:57:35 三桶全部 compressed + `end`**。
+    - **为什么值得记为「实践修订」**：它验证了 §5.22 的规则顺序——**先补证据层再修业务逻辑**。当时三个候选解释（没扫到 / 无原料 / 压了没写）**都说得通**，若跳过 instrumentation 直接猜修，最可能是在判定层白改一晚（而判定层本来就是对的）。
+    - **被修正的两个认知**：① 「后台/定时任务里的 LLM 调用与前台等价」——**不等价**：网关类 provider 需要的会话头由宿主插件按 `GenerateOptions.sessionId` 注入，**不传就是拒单**（对外部插件的隐式依赖必须显式满足）；② 「提示词写「不要超过 N 字」就能约束输出」——**约束不住**（实测超写 2×），**输出上的硬边界只能落在 token 上限**；提示词预算只能当倾向。
+    - **观测自身的教训**：`memory_health` 的「最近待压」读的是首扫快照（U13）；`error` 记录只带 `message` 不带 `usage`——本次能归因靠的是「已产出字符数」这一条临时加的字段（v0.8.2），说明**错误路径的证据同样要设计**，不能只把成功路径做完整。
+
 ## 10 · 未决问题
 
 - **U1 ~~端到端幂等如何补~~ → 已解决（2026-09-13）**：采纳方案 ① 的**强化版**——不是 scope 级单飞，而是按 (scope, level, bucket) 串行（粒度更细、并行度更高；scope 级会把该 scope 全部桶串行化）+ 写前复核兜跨进程。**遗留（需主人裁决）**：库中 4 对历史重复桶是否去重（`forget` 软归档其中一份即可，但动记忆数据属须请示类）。
@@ -520,6 +531,8 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 - **U7 存量条目的隔间归属（需主人裁决）**：674 条存量条目全部为共享记忆——这对迁移安全是优点，对幽灵隔间是缺点（幽灵可读到全部历史）。选项：① 保持共享（靠独立 `DSH_HOME` 做真隔离）；② 一次性把某批 tag 的条目回填 `role`（= 批量改记忆数据，属须请示类）。倾向 ①。
 - **U8 记忆生命周期与价值体检（MAGE 借鉴的下一步）**：~~① 只读体检器（按 ν(x) 排序输出「GC 候选/应降级/应保留」）~~ → **已交付 v0.6**（`memory_audit` + 侧车用量轨迹，见 §5.9）。**仍缺**：② **双时态**（`validFrom/validTo`）+ `supersedes`/`invalidates` 链（现在只有布尔 `archived`，删除不留失效证据）；③ **事件超边层**（多主体共同产出的事件作为一等条目——v0.5 的 `role` 只解决分区，不解决「谁+什么动作+哪份证据共同产出了这个结论」）；④ 权重校准（需要「提案被采纳/否决 + 事后是否后悔」的样本）。
 - **U9 注入的「该不该」与「好不好」（v0.7 线上观察）**：重心化解决了「按什么查」（相关性翻倍），但暴露两个新问题：① **唤醒类消息是否该触发注入**——`[守护] web 已重启` 是系统事件，不是对话，给它注入运维历史条目价值存疑（现触发面为 GUI/telegram 主人消息，唤醒消息走在同一条路上）；② 现指标只数**条数与次数**（注入 6 次 / 命中 12 条），**没有质量口径**（"这次注入有用吗"）。倾向：先加一个**可选的判定信号**——注入是否被后续动作引用（如注入后我是否 `recall`/`update` 了其中某条），再谈是否排除唤醒触发。**未决，需主人视角**。
-- **U10 压缩缺口（2026-09-15 实测 · 待证据层读数定根因）**：库内实测缺 `日概要 2026-09-13`、`日概要 2026-09-14`、`周概要 2026-W37`（全库 grep 无，含归档）；而这两天 episodic 原料充足、单位已结束两天，§5.6 声明「含历史缺口回填」。**候选解释（未定）**：① 那些天的 episodic 全部已归档 ⇒ `no-sources`；② 总结抛错（LLM 路由/超时）⇒ 每 6 小时重试同样失败；③ 候选桶根本没被扫到。v0.8 证据层落地后，`scan` 记录的 `skipped` + `sample` 直接给出答案（**读一次轨迹即可判定**）。**根因未定前不改业务逻辑**。
+- **U10 ~~压缩缺口~~ → 已解决（2026-09-15 当晚闭环）**：症状是缺 `日概要 2026-09-13` / `日概要 2026-09-14` / `周概要 2026-W37`（全库 grep 无，含归档）而原料充足、单位已结束。**证据层（v0.8.0）首跑即定案**：`scan` 显示三桶判定**完全正确**（`pending`），失败在总结调用；两次真因——① **缺会话 id**：`GenerateOptions` 无 `sessionId` ⇒ 宿主插件 `dsh-x-opencode-session` 不加 `x-opencode-session` 头 ⇒ 网关拒单（原文即轨迹里的 `Error from provider (Console Go): Request is missing x-opencode-session…`）⇒ 修 v0.8.1（lazy 用 `agent.session.id`；periodic 把会话 id 与路由同源取出）；② **输出预算不足**：路由通了以后触 16,000 token 上限被 fail-closed，实测单份概要 12,233 / 12,919 / 17,436 字符（≈18–26k token）⇒ 修 v0.8.2 + `maxTokens` → 32000。**验收 A67 症状消失**（三桶全部 compressed、原料冷归档）。**教训（已写进知识条目）**：提示词里的字数预算是**劝告性**的（模型超写 2×），**硬约束只能来自 token 上限**。
+- **U13 `memory_health` 的「最近待压」口径易误读**：该数字取自**最近一条 `scan`（= 每轮压缩的首扫）**，因此一轮成功压缩后它仍显示压缩前的待压数（实测：显示「最近待压 3」而同一轮已压缩 3 单元）。语义没错（首扫快照）但措辞易读成「当前还剩几个」。倾向：改标签为「首扫待压」，或让 `end` 记录带收尾时的 pending（恒 0，信息量低）——**待下次发布随手修**，不单开一轮。
+- **U12 ~~夹具硬编码派生值~~ → 已解决（2026-09-15）**
 - **U11 侧车开关有两处未接线（诚实声明）**：`audit.access_trace.enabled` 与 `audit.proposal_log.enabled` 会被解析、写进配置对象，但 `index.ts` 的 writer 直接调 `appendAccessTrace` / `appendProposalRecord`，**不读该开关** ⇒ 设 `enabled: false` 目前**不生效**（文档曾承诺「可关」，属声明与实现背离）。v0.8 只把 `compress_trace` 接通到各 workspace 配置（`makeCompressTrace` 读 `cfg.audit.compressTrace`）；另两处需要把 config 传进 writer 签名（独立小重构），**未做**。倾向：与下一次触碰 `tools.ts` 的改动合并处理，避免为开关单独动一次组合。
 - **U12 ~~夹具硬编码派生值~~ → 已解决（2026-09-15）**：`role.test.mjs` / `audit.test.mjs` / `centroid.test.mjs` 三处把 `WID` 写死为 `'c:/Users/Alice/proj'`，而 POSIX 下 `resolve()` 语义不同 ⇒ 作用域不匹配、12 个 A 测试在 node 22/WSL 侧静默红（**Windows 侧一直绿，所以长期未被发现**）。改为调用 `workspaceIdOf(CWD)` 派生后双平台同源：WSL mjs **179/179**、Windows `test:all` **261（260 pass + 1 skip）**。**遗留**：`.ts` 套件在 node 22 仍不可跑（需 node ≥24，见 U2）——已在脚本旁注明前提。

@@ -171,6 +171,25 @@ describe('summarizeEntries 直调全路径', () => {
     )
   })
 
+  test('截断错误附可归因证据（v0.8.2）：已产出字符数 + usage', async () => {
+    const ctx = fakeCtx([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: '写了很久还没写完的正文' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: '写了很久还没写完的正文' } },
+      { type: 'usage', usage: { inputTokens: 9000, outputTokens: 16000 } },
+      { type: 'finish', reason: { kind: 'max-tokens' } },
+    ])
+    await assert.rejects(
+      () => summarizeEntries(ctx, { provider: 'p', model: 'm' }, makeInput()),
+      (err) => {
+        assert.equal(err.code, 'MAX_TOKENS')
+        assert.ok(err.message.includes('已产出 11 字符'), `实际消息：${err.message}`)
+        assert.ok(err.message.includes('"outputTokens":16000'))
+        return true
+      },
+    )
+  })
+
   test('模型未产出文本 → 抛错', async () => {
     const ctx = fakeCtx([{ type: 'finish', reason: { kind: 'stop' } }])
     await assert.rejects(
