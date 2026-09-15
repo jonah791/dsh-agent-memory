@@ -25,6 +25,8 @@ import type { Entry, MemoryConfig } from './types.ts'
 import type { MemoryStore } from './store.ts'
 import { workspaceIdOf, GLOBAL_SCOPE } from './scope.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, type RoleCarrier } from './role.ts'
+import { buildCentroid, recentTurnTexts } from './centroid.ts'
+import type { WeightedTerm } from './types.ts'
 import { recallEntries } from './search.ts'
 
 /** 注入依赖：存储 + 配置加载（测试注入 mock） */
@@ -82,20 +84,26 @@ export function lastUserMessageText(
  * 以 query 检索（recallEntries：标签>标题>正文打分，score>0 过滤无关），
  * 取 top maxEntries 命中，渲染为「标题（日期 · 相关度）：snippet」行。
  * 预算：maxEntries 截断条目数；maxBytes 截断字符数（截断处提示）。
+ * **v0.7**：给了 `opts.weightedTerms`（上下文重心）就用它打分——「此刻在谈什么」比
+ * 「最后一条消息的字面」更有话语权；未给则完全走原路径（零回归）。
  * @param entries - 候选条目（调用方合并当前 workspace + global）
  * @param query - 用户消息文本（自动截断到 QUERY_MAX）
- * @param opts - 预算
+ * @param opts - 预算 + 可选上下文重心
  * @returns 完整注入文本（含帧标记）；无命中返回空串
  */
 export function buildAutoRecallDigest(
   entries: Entry[],
   query: string,
-  opts: { maxEntries: number; maxBytes: number },
+  opts: { maxEntries: number; maxBytes: number; weightedTerms?: WeightedTerm[] },
 ): string {
   const trimmed = query.trim()
-  if (trimmed.length === 0) return ''
+  const weighted = opts.weightedTerms !== undefined && opts.weightedTerms.length > 0 ? opts.weightedTerms : undefined
+  if (trimmed.length === 0 && weighted === undefined) return ''
   const limited = trimmed.length > QUERY_MAX ? trimmed.slice(0, QUERY_MAX) : trimmed
-  const { results } = recallEntries(entries, { query: limited, limit: opts.maxEntries })
+  const { results } = recallEntries(entries, {
+    ...(weighted !== undefined ? { weightedTerms: weighted } : { query: limited }),
+    limit: opts.maxEntries,
+  })
   if (results.length === 0) return ''
   const lines: string[] = []
   for (const r of results) {
@@ -152,14 +160,24 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
     const view = roleViewOf(config, { agent } as unknown as RoleCarrier)
     const scopes = narrowReadScopes([scope, GLOBAL_SCOPE], view, undefined)
     const merged = applyRoleView(scopes.flatMap((s) => deps.store.list(s)), view)
+    // 上下文重心（v0.7）：注入查询 =「此刻这段对话在谈什么」，而不是最后一条消息的字面。
+    // 锚点那条已由 lastUserMessageText 取出，从历史里剔除以免重复计权。
+    const history = recentTurnTexts(decision.messages, 4)
+    const anchorIndex = history.lastIndexOf(found.text)
+    const turns = anchorIndex >= 0
+      ? [...history.slice(0, anchorIndex), ...history.slice(anchorIndex + 1)]
+      : history
+    const weightedTerms = buildCentroid(turns, found.text)
     const digest = buildAutoRecallDigest(merged, found.text, {
       maxEntries: config.autoInject.maxEntries,
       maxBytes: config.autoInject.maxBytes,
+      ...(weightedTerms.length > 0 ? { weightedTerms } : {}),
     })
     // 侧车用量轨迹（v0.6）：auto-recall 命中同样是「被用到」的证据；失败静默
     if (digest.length > 0 && config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
+      const queryLimit = found.text.length > QUERY_MAX ? found.text.slice(0, QUERY_MAX) : found.text
       const hitIds = recallEntries(merged, {
-        query: found.text.length > QUERY_MAX ? found.text.slice(0, QUERY_MAX) : found.text,
+        ...(weightedTerms.length > 0 ? { weightedTerms } : { query: queryLimit }),
         limit: config.autoInject.maxEntries,
       }).results.map((item) => item.id)
       if (hitIds.length > 0) {

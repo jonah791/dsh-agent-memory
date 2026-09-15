@@ -23,7 +23,7 @@ import { installAutoRecallInject } from './auto-inject.ts'
 import { installCompactionSink } from './compaction-sink.ts'
 import { installPeriodicCompress } from './periodic.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
-import { appendAccessTrace, readAccessIndex } from './access-trace.ts'
+import { appendAccessTrace, appendProposalRecord, readAccessIndex, readAccessSummary as readAccessSummaryFromTrace } from './access-trace.ts'
 import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -137,9 +137,15 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // 路径约定与既有插件同源：`<DSH_HOME>/<plugin>-trace.jsonl`。
   const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
   const accessTracePath = join(dshHome, 'memory-access-trace.jsonl')
+  // 提案日志（v0.7 §5.11）：audit 候选 + forget/update 动作同文件、可按 id join ⇒ 校准样本
+  const proposalLogPath = join(dshHome, 'memory-audit-proposals.jsonl')
   const recordAccess: NonNullable<MemoryToolDeps['recordAccess']> = (record) =>
     appendAccessTrace(accessTracePath, record, DEFAULT_AUDIT_CONFIG.accessTrace.maxBytes)
   const readAccess: NonNullable<MemoryToolDeps['readAccess']> = () => readAccessIndex(accessTracePath)
+  const readAccessSummary: NonNullable<MemoryToolDeps['readAccessSummary']> = () =>
+    readAccessSummaryFromTrace(accessTracePath)
+  const recordProposal: NonNullable<MemoryToolDeps['recordProposal']> = (record) =>
+    appendProposalRecord(proposalLogPath, record, DEFAULT_AUDIT_CONFIG.proposalLog.maxBytes)
 
   // 记忆回流服务提供（2026-09-06）：供 emotion/taskboard/evolution-core/skill-forge 注入消费。
   // 复用 store.remember（L1 key 覆盖 / L2/L3 指纹合并），容错返回 error 不抛。
@@ -205,7 +211,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
 
   // 4. 注册记忆工具（remember/recall/update/forget/browse/relate/stats/audit/health/version/check）
-  registerMemoryTools(ctx, { store, loadConfig, compress, recordAccess, readAccess })
+  registerMemoryTools(ctx, { store, loadConfig, compress, recordAccess, readAccess, readAccessSummary, recordProposal })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })

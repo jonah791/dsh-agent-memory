@@ -10,7 +10,7 @@
  * ISO 字符串字典序即时间序；纯日期输入按日界归一化。
  */
 
-import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RelatedItem, TimelineLevel } from './types.ts'
+import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RelatedItem, TimelineLevel, WeightedTerm } from './types.ts'
 
 /** 检索默认截断条数（未显式给 limit 时） */
 export const DEFAULT_RECALL_LIMIT = 20
@@ -128,13 +128,18 @@ export function relateClosure(
  */
 export function recallEntries(entries: Entry[], query: RecallQuery = {}): RecallResult {
   const filtered = filterEntries(entries, query)
-  const tokens = tokenize(query.query)
+  // v0.7：给了上下文重心就按权重打分；否则退回原路径（query 字符串 + 等权词项）
+  const weighted = query.weightedTerms !== undefined && query.weightedTerms.length > 0
+    ? query.weightedTerms
+    : undefined
+  const tokens = tokenizeQuery(query.query)
+  const hasQuery = weighted !== undefined || tokens.length > 0
   let scored = filtered.map((entry) => ({
     entry,
-    score: scoreEntry(entry, tokens),
+    score: weighted !== undefined ? scoreEntryWeighted(entry, weighted) : scoreEntry(entry, tokens),
   }))
-  // 带文本查询时剔除零分条目（无关内容不进结果）；无查询词时全量按新鲜度排序
-  if (tokens.length > 0) scored = scored.filter(({ score }) => score > 0)
+  // 带查询时剔除零分条目（无关内容不进结果）；无查询词时全量按新鲜度排序
+  if (hasQuery) scored = scored.filter(({ score }) => score > 0)
   scored.sort((a, b) => {
     if (b.score !== a.score) return b.score - a.score
     // accessedAt 新→旧（ISO 字典序即时间序）
@@ -191,8 +196,9 @@ const STOP_WORDS = new Set([
   '的', '地', '得', '着', '过', '呢', '吧', '啊',
 ])
 
-/** 查询文本分词：小写 + 按空白切分 + 过滤停用词；无有效词返回空数组（按新鲜度排序） */
-function tokenize(query: string | undefined): string[] {
+/** 查询文本分词：小写 + 按空白切分 + 过滤停用词；无有效词返回空数组（按新鲜度排序）。
+ *  **导出（v0.7）**：上下文重心（centroid.ts）复用同一套分词——判据单一真源，不得各写一份。 */
+export function tokenizeQuery(query: string | undefined): string[] {
   if (query === undefined) return []
   const raw = query.toLowerCase().split(/\s+/).filter((token) => token.length > 0 && !STOP_WORDS.has(token))
   const tokens: string[] = []
@@ -236,6 +242,24 @@ function scoreEntry(entry: Entry, tokens: string[]): number {
     if (body.includes(token)) score += SCORE_BODY
   }
   return score
+}
+
+/**
+ * 加权打分（v0.7 上下文重心）：逐词累加 `权重 × (标签 3 / 标题 2 / 正文 1)`。
+ * 与 `scoreEntry` 同构，只是词项带权重——这样「话题重心」比「最后一个词」更有话语权。
+ */
+function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[]): number {
+  if (terms.length === 0) return 0
+  const title = entry.title.toLowerCase()
+  const body = entry.body.toLowerCase()
+  let score = 0
+  for (const { term, weight } of terms) {
+    const token = term.toLowerCase()
+    if (entry.tags.some((tag) => tag.toLowerCase().includes(token))) score += SCORE_TAG * weight
+    if (title.includes(token)) score += SCORE_TITLE * weight
+    if (body.includes(token)) score += SCORE_BODY * weight
+  }
+  return Math.round(score * 1000) / 1000
 }
 
 /** 结果项组装：概要字段 + score + 层级标注（level 原样透出，标注文案由工具层给模型） */

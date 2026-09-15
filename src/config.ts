@@ -54,6 +54,7 @@ const AUDIT_KEYS: ReadonlySet<string> = new Set([
   'review_min_chars',
   'demote_min_chars',
   'access_trace',
+  'proposal_log',
 ])
 
 /** audit.weights 内合法键（与 AuditWeights 逐字一致） */
@@ -447,7 +448,22 @@ function auditOrDefault(value: unknown): AuditConfig {
     reviewMinChars: nonNegativeIntOrDefault(value.review_min_chars, DEFAULT_AUDIT_CONFIG.reviewMinChars, 'audit.review_min_chars'),
     demoteMinChars: nonNegativeIntOrDefault(value.demote_min_chars, DEFAULT_AUDIT_CONFIG.demoteMinChars, 'audit.demote_min_chars'),
     accessTrace: accessTraceOrDefault(value.access_trace),
+    proposalLog: proposalLogOrDefault(value.proposal_log),
   })
+}
+
+/** audit.proposal_log：提案日志开关与轮转阈值（v0.7 · 让提案有历史） */
+function proposalLogOrDefault(value: unknown): AuditConfig['proposalLog'] {
+  const base = DEFAULT_AUDIT_CONFIG.proposalLog
+  if (value === undefined || value === null) return { ...base }
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError('memory.yml: audit.proposal_log 必须是映射（enabled/max_bytes）')
+  }
+  assertNoUnknownKeys(value, ACCESS_TRACE_KEYS, 'memory.yml.audit.proposal_log')
+  return {
+    enabled: booleanOrDefault(value.enabled, base.enabled, 'audit.proposal_log.enabled'),
+    maxBytes: nonNegativeIntOrDefault(value.max_bytes, base.maxBytes, 'audit.proposal_log.max_bytes'),
+  }
 }
 
 /** audit.weights：逐项非负数（缺省走默认先验） */

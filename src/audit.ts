@@ -57,6 +57,8 @@ export const DEFAULT_AUDIT_CONFIG: AuditConfig = Object.freeze({
   /** 未引用且体量 ≥ 此字符数 → DEMOTE（可降级/压缩） */
   demoteMinChars: 3000,
   accessTrace: Object.freeze({ enabled: true, maxBytes: 2_000_000 }),
+  /** 提案日志（v0.7）：让提案有历史——audit 候选 + forget/update 动作同文件可 join */
+  proposalLog: Object.freeze({ enabled: true, maxBytes: 1_000_000 }),
 })
 
 /** 复述衰减的基准稳定度（天）——MAGE 用 30 天半衰期 */

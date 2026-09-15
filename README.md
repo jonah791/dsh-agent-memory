@@ -11,7 +11,7 @@
 # dsh-agent-memory
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.6.0-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.7.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
   <img src="https://img.shields.io/badge/tests-125%20passed-brightgreen" alt="tests">
@@ -43,6 +43,7 @@
 
 - **启动注入**：会话第 1 个 step 注入一次「记忆速览」（global fact 全量 → 概要按桶降序 → 近期明细按 `updatedAt` 降序；只给标题/时间/tags，**不给正文**）。
 - **auto-recall**：每条**真实主人消息**（GUI/Web，或 telegram 插件注入）到达时注入 top-N 相关记忆（含 ≤90 字 snippet）；工具结果与其他插件注入**不触发**；同消息 id 每会话只注入一次。
+  **v0.7 重心化**：查询词不再是「最后一条消息的字面」，而是**上下文重心**——最近 4 轮对话文本的加权词项（越新权重越高 `decay=0.7`，最新一条再 ×2.0 作锚点）。动机是实测反例：重启唤醒消息曾注入三条与当轮意图无关的记忆。无历史时退化为原行为（零回归，A47 断言逐字节一致）。
 - **时间压缩**：L3 情景记忆按日桶 → 日概要 → 周 → 月 → 年（只压**已结束**且有原料的自然单位，同桶同层幂等）。
 - **压缩即记忆**：订阅 `compaction/*` 事件，会话压缩完成时把 checkpoint 原文**保底存档**为 episodic 并即时通知（`wakeup=true`）——提炼与否由 agent 决定。
 - **记忆回流服务**：`ctx.memoryApi.remember({text,kind?,tags?,key?,scope?})` → `{id,action}` 或 `{error}`（默认 `global` + `knowledge`），供 emotion / taskboard / evolution-core / skill-forge 等插件把运行态结论写回主记忆库。
@@ -74,7 +75,7 @@
 
 > 依赖官方 storage 栈（`storage` / `storage-json` / `storage-domain`）——web-app bundle 已提供，无需额外行。
 
-**3) 30 秒验证**：调 `memory_version` → 期望返回 `name: dsh-agent-memory`、`version: 0.6.0` 与**晚于源码修改时刻**的 `buildAt`；再调 `memory_health` → 期望 `total > 0`（已有历史条目）；再调 `memory_stats` → 各 `kind` 计数与 `${DSH_HOME}/storages/agent_memory.json` 中的实际条目数一致。
+**3) 30 秒验证**：调 `memory_version` → 期望返回 `name: dsh-agent-memory`、`version: 0.7.0` 与**晚于源码修改时刻**的 `buildAt`；再调 `memory_health` → 期望 `total > 0`（已有历史条目）；再调 `memory_stats` → 各 `kind` 计数与 `${DSH_HOME}/storages/agent_memory.json` 中的实际条目数一致。
 
 ## 配置
 
@@ -110,6 +111,7 @@
 | `audit.keep_recent_days` / `archive_min_age_days` | `7` / `14` | 保新窗口 / 归档候选最小年龄（天） |
 | `audit.review_min_chars` / `demote_min_chars` | `12000` / `3000` | 交人裁决阈值 / 可降级阈值（字符） |
 | `audit.access_trace.enabled` / `max_bytes` | `true` / `2000000` | 侧车用量轨迹（`<DSH_HOME>/memory-access-trace.jsonl`）：只追加 + 吞错 + 超限轮转 `.1`，**绝不改条目**；关掉则体检的 `usage` 项恒 0 |
+| `audit.proposal_log.enabled` / `max_bytes` | `true` / `1000000` | 提案日志（`<DSH_HOME>/memory-audit-proposals.jsonl`，v0.7）：`audit` 候选 + `forget/update` 动作**同文件可按 id join** ⇒ 权重校准样本；同样只追加 + 吞错 + 轮转，**不写记忆库** |
 
 **角色维度最小示例**（工作台部署）：
 
@@ -177,7 +179,7 @@ console.log("⑤更新时刻",new Date(require("node:fs").statSync(process.env.D
 
 **生效判据**（三选一，按可靠性排序）：
 
-1. **语义级（最直接）**：调 `memory_version` → `version` 应等于 `package.json` 的 `0.6.0`，`buildAt` 应等于 `lib/index.js` 的产物 mtime（该工具是**动态**读这两处的——2026-09-01 之前它硬编码版本、`buildAt` 实为调用时刻，即「判据本身说谎」，已修）。
+1. **语义级（最直接）**：调 `memory_version` → `version` 应等于 `package.json` 的 `0.7.0`，`buildAt` 应等于 `lib/index.js` 的产物 mtime（该工具是**动态**读这两处的——2026-09-01 之前它硬编码版本、`buildAt` 实为调用时刻，即「判据本身说谎」，已修）。
 2. **进程级**：`lib/index.js` 的 mtime ≤ web 进程启动时间，且 `src/*.ts` 不新于 `lib/index.js`（源码改了没构建 = 跑的还是旧产物）。
 3. **行为级**：工具面出现 10 个 `memory_*`；把一条记忆写进库后，`${DSH_HOME}/storages/agent_memory.json` 的 `tables.entries` 条数 +1 且文件 mtime 前进。
 
@@ -197,9 +199,9 @@ npm run test:ts   # = tsc && node --test "tests/*.test.ts"   （需 node ≥ 24�
 npm run test:all  # = 两套一起
 ```
 
-**实测（2026-09-15，node v24.18.0）：`npm test` → `# tests 153 / # pass 153 / # fail 0 / # skipped 0`；`npm run test:ts` → `# pass 81 / # fail 0 / # skipped 1`（跳过项为 `scope.test.ts` 的 Windows 平台条件，见 `t.skip('Windows resolve 会加盘符前缀')`）；`npm run test:all` → `# tests 235 / # pass 234 / # fail 0 / # skipped 1`。**无需网络、无需真实外部依赖**——LLM 总结路径在测试里以桩注入，telegram 不涉及。
+**实测（2026-09-15，node v24.18.0）：`npm test` → `# tests 165 / # pass 165 / # fail 0 / # skipped 0`；`npm run test:ts` → `# pass 81 / # fail 0 / # skipped 1`（跳过项为 `scope.test.ts` 的 Windows 平台条件）；`npm run test:all` → `# tests 247 / # pass 246 / # fail 0 / # skipped 1`。**无需网络、无需真实外部依赖**——LLM 总结路径在测试里以桩注入，telegram 不涉及。
 
-覆盖范围（`tests/` 共 14 个文件；`npm test` 跑其中 9 个 `.mjs`）：
+覆盖范围（`tests/` 共 15 个文件；`npm test` 跑其中 10 个 `.mjs`）：
 
 - `store.test.mjs` — 条目 CRUD、写去重三态（`created`/`updated`/`merged`）、L1 key 覆盖、标题指纹合并
 - `search.test.mjs` — 打分与排序、过滤、截断；**联想层**（related 链强度降序）与 **BFS 多跳闭包**（hop 标注/防环/每跳 limit）
@@ -209,7 +211,8 @@ npm run test:all  # = 两套一起
 - `auto-inject.test.mjs` — auto-recall **触发面**（GUI/Telegram 触发、其他插件注入**不触发**、空文本跳过、多 text block 拼接）+ 预算截断与长 query 截断
 - `summarizer.test.mjs` — 总结提示词与响应处理
 - `role.test.mjs` — **v0.5 角色维度**：会话判据、角色推导四级优先、准入四判据 R1–R4、未启用 = 同一引用透传、`include_global` 收窄、归属不可转移、工具层准入一致（recall/browse/stats/relate/update/forget）、无 `roles` 段的历史配置不崩
-- `audit.test.mjs` — **v0.6 价值体检器**：只读零写入、承重必 KEEP（反例）、recency/体量单调、近重复簇、分档顺序、字符合计对账、视野一致、侧车轨迹（追加/坏行/轮转/吞错）、用量项、`audit` 配置 fail-loud
+- `audit.test.mjs` — **v0.6 价值体检器**：只读零写入、承重必 KEEP（反例）、recency/体量单调、近重复簇、分档顺序、字符合计对账、视野一致、侧车轨迹（追加/坏行/轮转/吞错）、用量项、`audit` 配置 fail-loud、索引范围（看不见≠没有）
+- `centroid.test.mjs` — **v0.7 重心/度量/提案日志**：重心衰减与锚点、同轮去重、封顶与退化、**重心召回落字面召不回的历史话题**、零回归逐字节一致、素材挑选、轨迹汇总口径、提案日志两类记录可 join + 吞错 + 开关、`memory_health` 命中率信号、`proposal_log` 配置
 
 `.ts` 套件（5 个文件：`browse` / `compaction-sink` / `config` / `scope` / `tools`）需 node ≥ 24（原生类型剥离）：2026-09-15 在 **node v24.18.0** 实测 `# pass 81 / # fail 0 / # skipped 1`（跳过为 Windows 平台条件）。`config.test.ts` 覆盖 `roles` 段的缺省/完整/4 条非法 fail-loud 用例。
 

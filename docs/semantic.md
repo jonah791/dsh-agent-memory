@@ -14,9 +14,9 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 44 项：43 项已实测 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
-| 版本 | v0.4（文档）· 对应插件 v0.6.0（`package.json`）——v0.5 角色维度（归属 + 准入）；v0.6 价值体检器（只读提案 + 侧车用量轨迹） |
-| 实现落点 | `self-plugins/dsh-agent-memory/src/`（17 个模块，见 §8） |
+| 状态 | **implemented**（验收 54 项：51 项已实测 / 3 项待线上；`pending>0` 故**不得**标 verified） |
+| 版本 | v0.5（文档）· 对应插件 v0.7.0（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志 |
+| 实现落点 | `self-plugins/dsh-agent-memory/src/`（18 个模块，见 §8） |
 | 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
 | 作者 / 日期 | 爱丽丝 · 2026-09-13 |
 | 相关规则 | AGENTS.md §5.20（语义文档系统）；§5.8（记忆检索纪律） |
@@ -259,6 +259,41 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 2. **视野一致**：`memory_audit` 是读路径 ⇒ 过 `applyRoleView`（提案只含调用者视野内的条目）
 3. **不做自动处置**：无 `--apply`、无定时归档；删除/归档由 agent 显式发起
 
+### 5.10 重心化注入契约（v0.7 · 从「消息关键词」到「上下文重心」）
+
+**动机（借鉴 VCPToolBox 的「引力」范式——理念而非代码）**：原 auto-recall 以**最后一条主人消息的字面**为查询词——用户说「最近压力好大」，三个月前提过的「考试」不会被召回，因为字面里没有那个词。实测反例（2026-09-15）：重启唤醒消息注入的全是与当轮意图无关的历史条目。
+
+**语义**：注入查询 = **上下文重心**，而不是单条消息。
+
+| 概念 | 定义 |
+|------|------|
+| 重心（centroid） | 最近 K 轮消息文本的**加权词项集合**：越新的轮次权重越高（逐轮衰减），最新一条额外加成（锚点） |
+| 衰减 | `turnWeight = decay^(距最新轮次的距离)`，缺省 `decay = 0.7`；最新一轮再乘 `anchorBoost = 2.0` |
+| 词项 | 复用检索层**同一套**分词（CJK bigram + 停用词过滤）——**判据单一真源**，不得各写一份 |
+| 权重上限 | 每轮内同一词项只计一次（防单条长消息主导）；保留权重最高的 `maxTerms = 24` |
+| 兜底 | 无历史（首轮）或无有效词项 ⇒ **退化为原行为**（以单条消息为查询）——零回归是硬约束 |
+
+**加权打分**：`score = Σ_t w_t × (标签命中 3 / 标题命中 2 / 正文命中 1)`；未给加权词项时走原路径（`query` 字符串）。
+
+**命中率度量（可观测）**：侧车轨迹已按 `source` 记 `recall`（我主动查）与 `auto`（系统注入）两类；`memory_health` 汇总报出**注入次数 / 主动检索次数 / 命中条目数 / 最近注入时刻**——「环境」是否真的建起来了，看这个比值，不看感觉。
+
+### 5.11 提案日志契约（v0.7 · 让提案有历史）
+
+**动机（借鉴 VCPToolBox 的梦境审批：提案落盘、可回看、可拒绝）**：`memory_audit` 的提案原本只活在一次工具返回里，无法回答「我当时提了什么、后来做了什么、对不对」。
+
+**落点**：`<DSH_HOME>/memory-audit-proposals.jsonl`（与用量轨迹同族的侧车；**只追加 / 吞错 / 按体积轮转**，绝不改条目）。
+
+**两类记录（同一文件，可按 id join）**：
+
+| kind | 何时写 | 关键字段 |
+|------|--------|---------|
+| `audit` | 每次 `memory_audit` 运行 | `atMs` / `role` / `weights` / `summary`（各档条数与字符）/ `candidates`（前 20：id/bucket/score/chars） |
+| `action` | `forget` / `update` 成功时 | `atMs` / `action` / `id` / `reason?` |
+
+**用途**：`audit` ⋈ `action` = 「提案被采纳/否决」的样本 ⇒ 权重校准（§10 U8 第 ④ 项）的前提。**它只记事实，不评判**——校准是后续的事。
+
+**与 A31 的关系（必须说清）**：`memory_audit` 仍是**只读工具**——不写记忆库、不刷新 `accessedAt`；写的是**侧车观测文件**（§5.22 观测层：吞错、不阻塞主流程）。A31 的判据是「存储文件内容 + `accessedAt` 不变」，本契约不与之冲突；新增验收见 A50。
+
 ## 6 · 边界与信任
 
 - **能力 ≠ 沙箱**：本能力不隔离、不鉴权、不加密；能读到存储文件的人都可改记忆。
@@ -332,7 +367,18 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | A43 | **线上**：`recall` / auto-recall 在真实 `DSH_HOME` 落 `<DSH_HOME>/memory-access-trace.jsonl`，体检读到该轨迹（`usageSource='trace'`） | ✔ **线上实测**（2026-09-15 18:2x，v0.6.0 重启后）：自动注入触发即落盘 `{"atMs":1789467668040,"source":"auto","role":"main","ids":[3 个 id]}`（178 字节）；`memory_audit` 报「用量信号：侧车轨迹」 | ✔ 已实测 |
 | A44 | **索引范围**：引用/标签复用/重复簇按「视野内全量（含归档）」统计，分类仍按本次集合；集合外的承重原料必须如实报出（「看不见」≠「没有」） | `tests/audit.test.mjs`「A44 索引范围…」；线上实证：默认视图报 `承重 0 条` **并**给注脚「另有 177 条承重原料不在本次集合内」，`includeArchive: true` 后报 `承重 177 条` | ✔ 已实测 |
 
-> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=44, proven=43, pending=1`。
+| A45 | 重心纯函数：越新的历史轮权重越高（decay^距离）、锚点最强（×2.0）、同轮同词项只计一次、`maxTerms` 封顶、无有效词项 ⇒ 空数组 | `tests/centroid.test.mjs`「A45 重心…」「A45b 重心：封顶…」 | ✔ 已实测 |
+| A46 | **重心召回 > 字面召回**：历史提过「考试」、最新消息说「最近有点累」⇒ 字面路径召不回考试条目，重心路径能 | `tests/centroid.test.mjs`「A46 重心能召回「字面里没提」的历史话题…」 | ✔ 已实测 |
+| A47 | **零回归**：不给 `weightedTerms`（或给空数组）时 `buildAutoRecallDigest` 与原路径逐字节一致；纯重心（无锚点文本）不崩 | `tests/centroid.test.mjs`「A47 未给重心 ⇒ 完全走原路径…」；`tests/auto-inject.test.mjs` 原 11 条仍绿 | ✔ 已实测 |
+| A48 | 重心素材挑选：排除工具结果与插件注入，保留主人消息与模型回答，取最后 N 条 | `tests/centroid.test.mjs`「A48 重心素材…」 | ✔ 已实测 |
+| A49 | 轨迹汇总口径：`auto`/`recall` 计数、去重命中数、命中总数、最近时刻；坏行跳过 | `tests/centroid.test.mjs`「A49 轨迹汇总…」 | ✔ 已实测 |
+| A50 | 提案日志：`audit` 与 `action` 两类记录**同文件可按 id join**；写入失败吞错、不影响工具返回；开关关闭即不写；**`memory_audit` 仍不写记忆库、不刷 `accessedAt`**（A31 不破） | `tests/centroid.test.mjs`「A50 提案日志…」「A50b 提案日志：写入失败吞错…」 | ✔ 已实测 |
+| A51 | `memory_health` 报命中率信号（注入次数 / 主动检索次数 / 去重命中数 / 最近时刻）；无信号时全 0 不崩 | `tests/centroid.test.mjs`「A51 memory_health 报命中率信号…」 | ✔ 已实测 |
+| A52 | `audit.proposal_log` 配置：缺省开（1 MB 轮转）、可关、未知键/负值 fail-loud | `tests/centroid.test.mjs`「A52 audit.proposal_log 配置…」 | ✔ 已实测 |
+| A53 | **线上**：重启后下一条真实主人消息的注入块包含「与对话历史话题相关」的条目（对照上一轮纯字面路径的注入），且 `memory_health` 的注入计数增长 | 待线上验收：观察下一条真实主人消息的 `【相关记忆（auto-recall）】` 块 + `memory_health` | **待线上验收** |
+| A54 | **线上**：`<DSH_HOME>/memory-audit-proposals.jsonl` 出现 `audit` 记录（我跑体检后）；若我随后 `forget/update`，同文件出现可 join 的 `action` 记录 | 待线上验收：跑一次 `memory_audit` 后 `tail` 该文件 | **待线上验收** |
+
+> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=54, proven=51, pending=3`（A30 待复核 + A53/A54 待线上）。
 > A29 旁注（诚实）：`by_preset` 预设映射分支本次**未在线上观测到**（该子代理会话头未带 `agentPreset`，走的是派生缺省）——该分支由 A20 单测覆盖。
 > **A25/A23 的线上量化对账（2026-09-15 17:5x · 真实生产库 676 条）**：主脑视角 `recall` → `命中 496`；`role='ghost'`（`read: []`, `include_global: false`）→ `命中 384`。差额 **112 = 111（global 作用域被 `include_global: false` 收窄）+ 1（唯一带 `role='main'` 的条目被 `read: []` 拒绝）**，逐项对得上。库内实测：盖章 `role` 共 1 条（`974a5e6b`，`author = {sessionId: 'session-a5375716…', delegationDepth: 0, preset: 'alice-v2'}`），其余 **675 条为共享**（迁移安全的实证）。
 
@@ -356,7 +402,8 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | `src/index.ts` | 装配：开域 / `memoryApi` / 注册工具 / 三个 install / 周期补压装配 |
 | `src/role.ts` | **v0.5 角色维度**（纯函数）：会话身份判据 / 角色推导 / 策略解析 / 四条准入判据 / 视野组装 / 读作用域收窄 |
 | `src/audit.ts` | **v0.6 价值体检器**（纯函数）：引用索引（承重）/ 标签复用 / 近重复簇 / 评分（七项）/ 四档裁决（REVIEW→KEEP→ARCHIVE→DEMOTE）/ 分组聚合；只读，不改条目 |
-| `src/access-trace.ts` | **v0.6 侧车用量轨迹**：追加（JSONL）/ 坏行跳过 / 按体积轮转 / 吞错；`parseAccessTrace` 纯函数离线可测 |
+| `src/access-trace.ts` | **v0.6 侧车用量轨迹**：追加（JSONL）/ 坏行跳过 / 按体积轮转 / 吞错；`parseAccessTrace` 纯函数离线可测。**v0.7 增**：`appendJsonl`（通用侧车写入，单一实现）、`summarizeAccessRecords`（命中率度量口径）、`appendProposalRecord`（提案日志） |
+| `src/centroid.ts` | **v0.7 上下文重心**（纯函数）：多轮衰减 + 锚点加成 + 词项去重封顶；`recentTurnTexts` 从消息批次挑素材（排除工具结果与插件注入）。复用 `search.ts: tokenizeQuery`（分词单一真源） |
 
 **未实现 / 未验证部分（显式标注）**：
 
@@ -404,6 +451,11 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
    - **先量后设计（关键教训）**：设计前先量了生产库，才发现 **MAGE 的四项输入我一项都没有**——尤其「读路径不刷新 `accessedAt`」（676 条中仅 180 条 `accessedAt≠updatedAt`，而 180 **恰好等于归档数** ⇒ 差异全来自归档动作，不是「被读过」）。⇒ 判据改成「**有就用，没有就承认**」：只用 refs/age/chars/tags/dup 五项真信号 + 补一层侧车轨迹换成 `u(x)`，其余三项（增益/矛盾/置信）**明确不假装有**。
    - **设计取舍（写下来免得将来重推）**：① **提案 ≠ 裁决**——工具只读，不归档不删除；② **承重不可推翻**（A32 反例：被 `archiveRef` 引用的原料即使又老又无溯源也判 KEEP——否则就是建议我归档掉自己赖以回溯的素材）；③ **权重是启发式先验不是拟合值**，校准（记录提案被采纳/否决）留到 v3；④ 用量轨迹**只追加 + 吞错 + 轮转 + 绝不改条目**（读路径不得产生记忆库写副作用）。
    - **顺带暴露的事实**：本库 31 条 day 概要占 193,348 字符（均 6,237 字/天）——「概要比原料还厚」的嫌疑已由体检器 `REVIEW` 档自动标出，不需人肉发现。
+10. **2026-09-15 · v0.7 重心化注入 + 命中率度量 + 提案日志（借鉴 VCPToolBox 的「引力」理念）**
+    - 语义**被补充**：读完 VCPToolBox（`docs/reviews/VCPToolBox-评读报告.md`）后，取其**理念**不取其代码（其许可为 CC BY-NC-SA 4.0 非商用，不可抄）。三条落地：① **注入查询 = 上下文重心**（§5.10）② **命中率可观测**（`memory_health` 报注入/主动检索次数）③ **提案有历史**（§5.11 提案日志）。
+    - **为什么只借理念**：它的实现依赖 Rust 向量内核 + SQLite + 多租户隔离（为「服务很多人」付的代价），我只有一份记忆、一个主人——**抄复杂度 ≠ 抄理念**。
+    - **关键设计取舍**：① **零回归是硬约束**——不给重心就逐字节走原路径（A47 断言同一输出）；② **分词单一真源**——重心直接复用 `search.ts: tokenizeQuery`，不另写一份停用词表（§5.22 判据单一真源）；③ **只读不破**——提案日志是侧车观测文件，`memory_audit` 仍不写记忆库、不刷 `accessedAt`（A50 显式断言）。
+    - **自证反例**：本次改动的动机来自实测反例（重启唤醒消息注入了三条与当轮意图无关的记忆）；A46 把该反例翻过来写成判据——**反例进测试，才算真的修了**。
 
 ## 10 · 未决问题
 

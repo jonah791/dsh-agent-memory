@@ -194,11 +194,21 @@ export interface AuditConfig {
   demoteMinChars: number
   /** 侧车用量轨迹（只追加、吞错、按体积轮转；绝不改条目） */
   accessTrace: { enabled: boolean; maxBytes: number }
+  /** 提案日志（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join） */
+  proposalLog: { enabled: boolean; maxBytes: number }
+}
+
+/** 加权查询词项（v0.7 上下文重心：注入查询 = 加权词项集合，而非单条消息字面） */
+export interface WeightedTerm {
+  term: string
+  weight: number
 }
 
 /** 检索查询 */
 export interface RecallQuery {
   query?: string
+  /** 上下文重心（v0.7）：与 `query` 二选一；给了它则按权重打分 */
+  weightedTerms?: WeightedTerm[]
   kind?: EntryKind[]
   tags?: string[]
   since?: string

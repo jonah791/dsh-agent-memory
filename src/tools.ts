@@ -22,6 +22,7 @@ import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import { resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
 import { statsOf, titleFingerprint } from './store.ts'
+import type { AccessSummary } from './access-trace.ts'
 import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
@@ -42,6 +43,10 @@ export interface MemoryToolDeps {
   recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[] }) => Promise<boolean> | void
   /** 侧车轨迹读取（体检用；缺省/读失败 ⇒ undefined = 无用量信号） */
   readAccess?: () => Promise<Map<string, { hits: number; lastAtMs: number }> | undefined>
+  /** 用量轨迹汇总（v0.7 命中率度量：注入次数 / 主动检索次数；缺省不报） */
+  readAccessSummary?: () => Promise<AccessSummary | undefined>
+  /** 提案日志写入（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join；吞错） */
+  recordProposal?: (record: unknown) => Promise<boolean> | void
 }
 
 /** 缺省配置加载器：读取 .dsh/memory.yml，缺失走默认，非法 fail loud */
@@ -93,6 +98,19 @@ function roleStampOf(
     ? explicit
     : (view.enabled ? view.role : undefined)
   return { ...(role !== undefined ? { role } : {}), author }
+}
+
+/**
+ * 记录一次显式动作到提案日志（v0.7 §5.11 的动作侧；吞错，绝不影响主流程）。
+ * 与 `memory_audit` 写的 `audit` 记录同文件，可按 id join ⇒ 为权重校准攒「提案 vs 采纳」样本。
+ */
+function recordAction(
+  deps: MemoryToolDeps,
+  config: MemoryConfig,
+  record: { action: 'forget' | 'update'; id: string; reason?: string },
+): void {
+  if (config.audit?.proposalLog?.enabled !== true || deps.recordProposal === undefined) return
+  void deps.recordProposal({ atMs: Date.now(), kind: 'action', ...record })
 }
 
 /**
@@ -351,6 +369,7 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       }
       if (args.tags !== undefined) patch.tags = args.tags
       await deps.store.update(entry.scope, args.id, patch)
+      recordAction(deps, config, { action: 'update', id: args.id })
       return { id: args.id }
     },
   })
@@ -386,6 +405,7 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
         throw new Error(`forget: 未找到 id="${args.id}" 的记忆条目（当前视野内）`)
       }
       await deps.store.forget(entry.scope, args.id, args.reason)
+      recordAction(deps, config, { action: 'forget', id: args.id, ...(args.reason !== undefined ? { reason: args.reason } : {}) })
       return { id: args.id, archived: true }
     },
   })
@@ -633,11 +653,15 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
           role: { type: 'string', required: true },
           rolesEnabled: { type: 'boolean', required: true },
           roleReason: { type: 'string', required: true },
+          autoCalls: { type: 'integer', required: true },
+          recallCalls: { type: 'integer', required: true },
+          distinctHits: { type: 'integer', required: true },
+          lastAccessAt: { type: 'string', required: true },
         },
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `记忆插件健康：${value.ok ? '正常' : '异常'}（共 ${value.total} 条 / 归档 ${value.archiveCount}；注入 ${value.injectEnabled ? '开' : '关'}）｜角色 ${value.role}（${value.rolesEnabled ? '角色维度已启用' : '角色维度未启用→零过滤'}；判据：${value.roleReason}）`,
+        text: `记忆插件健康：${value.ok ? '正常' : '异常'}（共 ${value.total} 条 / 归档 ${value.archiveCount}；注入 ${value.injectEnabled ? '开' : '关'}）｜角色 ${value.role}（${value.rolesEnabled ? '角色维度已启用' : '角色维度未启用→零过滤'}；判据：${value.roleReason}）｜命中率信号：注入 ${value.autoCalls} 次 / 主动检索 ${value.recallCalls} 次 / 命中条目 ${value.distinctHits} 条${value.lastAccessAt.length > 0 ? `（最近 ${value.lastAccessAt}）` : ''}`,
       }],
     },
     async execute(args, exec) {
@@ -645,6 +669,10 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
       const { entries } = gatherReadable(deps, { readScopes, includeArchive: true, view })
       const stats = statsOf(entries)
+      // 命中率度量（v0.7 §5.10）：注入次数 vs 主动检索次数——「环境」是否真建起来了看这个比值
+      const summary: AccessSummary | undefined = deps.readAccessSummary === undefined
+        ? undefined
+        : await deps.readAccessSummary()
       return {
         ok: true,
         total: stats.total,
@@ -654,6 +682,12 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
         role: view.role,
         rolesEnabled: view.enabled,
         roleReason: view.reason,
+        autoCalls: summary?.autoCalls ?? 0,
+        recallCalls: summary?.recallCalls ?? 0,
+        distinctHits: summary?.distinctIds ?? 0,
+        lastAccessAt: summary !== undefined && summary.lastAtMs > 0
+          ? new Date(summary.lastAtMs).toISOString().slice(0, 19)
+          : '',
       }
     },
   })
@@ -836,13 +870,31 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
       const { entries: universe } = gatherReadable(deps, { readScopes, includeArchive: true, view, explicitScope: args.scope })
       const entries = includeArchive ? universe : universe.filter((entry) => !entry.archived)
       const usage = deps.readAccess === undefined ? undefined : await deps.readAccess()
-      return auditMemory({
+      const result = auditMemory({
         entries,
         indexEntries: universe,
         ...(config.audit !== undefined ? { config: config.audit } : {}),
         ...(usage !== undefined ? { usage } : {}),
         query: { topN: args.topN, minChars: args.minChars, includeArchive },
       })
+      // 提案日志（v0.7 §5.11）：让提案有历史——与后续 forget/update 动作同文件、可按 id join。
+      // 写的是**侧车观测文件**：不写记忆库、不刷新 accessedAt（A31 的只读判据不受影响）。
+      if (config.audit?.proposalLog?.enabled === true && deps.recordProposal !== undefined) {
+        void deps.recordProposal({
+          atMs: Date.now(),
+          kind: 'audit',
+          role: view.role,
+          weights: config.audit.weights,
+          summary: result.summary,
+          candidates: result.candidates.slice(0, 20).map((candidate) => ({
+            id: candidate.id,
+            bucket: candidate.bucket,
+            score: candidate.score,
+            chars: candidate.evidence.chars,
+          })),
+        })
+      }
+      return result
     },
   })
 }

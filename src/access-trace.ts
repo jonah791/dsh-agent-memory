@@ -83,19 +83,16 @@ export function shouldRotate(sizeBytes: number, maxBytes: number): boolean {
  * @param maxBytes - 轮转阈值（≤0 表示不轮转）
  * @returns 是否写入成功（失败只返回 false，不抛）
  */
-export async function appendAccessTrace(
+/**
+ * 通用 JSONL 侧车追加（**吞错**）：只追加 / 超限轮转 / 失败返回 false。
+ * 用量轨迹与提案日志共用本函数——**写入纪律只有一份实现**（§5.22 判据单一真源）。
+ */
+export async function appendJsonl(
   filePath: string,
-  record: AccessRecord,
+  record: unknown,
   maxBytes: number,
 ): Promise<boolean> {
   try {
-    const capped: AccessRecord = {
-      atMs: record.atMs,
-      source: record.source,
-      ...(record.role !== undefined && record.role.length > 0 ? { role: record.role } : {}),
-      ids: record.ids.slice(0, MAX_IDS_PER_RECORD),
-    }
-    if (capped.ids.length === 0) return false
     if (maxBytes > 0) {
       try {
         const info = await stat(filePath)
@@ -104,12 +101,102 @@ export async function appendAccessTrace(
         // 文件不存在 / 无法 stat：直接继续写（首次写入路径）
       }
     }
-    await appendFile(filePath, `${JSON.stringify(capped)}\n`, 'utf8')
+    await appendFile(filePath, `${JSON.stringify(record)}\n`, 'utf8')
     return true
   } catch {
     return false
   }
 }
+
+/**
+ * 追加一条用量轨迹（**吞错**）：只交出命中 id，绝不改条目。
+ * @param filePath - 轨迹文件路径
+ * @param record - 记录（ids 超上限自动截断；空 ids 不写）
+ * @param maxBytes - 轮转阈值（≤0 表示不轮转）
+ * @returns 是否写入成功（失败只返回 false，不抛）
+ */
+export async function appendAccessTrace(
+  filePath: string,
+  record: AccessRecord,
+  maxBytes: number,
+): Promise<boolean> {
+  const capped: AccessRecord = {
+    atMs: record.atMs,
+    source: record.source,
+    ...(record.role !== undefined && record.role.length > 0 ? { role: record.role } : {}),
+    ids: record.ids.slice(0, MAX_IDS_PER_RECORD),
+  }
+  if (capped.ids.length === 0) return false
+  return appendJsonl(filePath, capped, maxBytes)
+}
+
+/**
+ * 用量轨迹汇总（纯函数）——**命中率度量的唯一口径**：
+ * 「环境是否真的建起来了」看 `auto`（系统注入）与 `recall`（我主动查）的比值，不看感觉。
+ * 坏行跳过（同 parseAccessTrace）。
+ */
+export interface AccessSummary {
+  /** 系统注入次数 */
+  autoCalls: number
+  /** 主动检索次数 */
+  recallCalls: number
+  /** 去重后的命中条目数 */
+  distinctIds: number
+  /** 命中总次数（含重复命中） */
+  totalHits: number
+  /** 最近一次写入时刻（ms；无记录为 0） */
+  lastAtMs: number
+}
+
+export function summarizeAccessRecords(text: string): AccessSummary {
+  const out: AccessSummary = { autoCalls: 0, recallCalls: 0, distinctIds: 0, totalHits: 0, lastAtMs: 0 }
+  const ids = new Set<string>()
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    let record: unknown
+    try {
+      record = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (typeof record !== 'object' || record === null) continue
+    const r = record as { atMs?: unknown; source?: unknown; ids?: unknown }
+    const atMs = typeof r.atMs === 'number' && Number.isFinite(r.atMs) ? r.atMs : 0
+    if (atMs > out.lastAtMs) out.lastAtMs = atMs
+    if (r.source === 'auto') out.autoCalls += 1
+    else if (r.source === 'recall') out.recallCalls += 1
+    if (!Array.isArray(r.ids)) continue
+    for (const id of r.ids) {
+      if (typeof id !== 'string' || id.length === 0) continue
+      ids.add(id)
+      out.totalHits += 1
+    }
+  }
+  out.distinctIds = ids.size
+  return out
+}
+
+/** 读取并汇总用量轨迹（**吞错**）：不可读 ⇒ undefined（调用方按「无信号」处理） */
+export async function readAccessSummary(filePath: string): Promise<AccessSummary | undefined> {
+  try {
+    const text = await readFile(filePath, 'utf8')
+    const summary = summarizeAccessRecords(text)
+    return summary.autoCalls + summary.recallCalls > 0 ? summary : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 追加一条提案日志（audit 候选 / forget-update 动作；**吞错**、只追加、可轮转） */
+export async function appendProposalRecord(
+  filePath: string,
+  record: unknown,
+  maxBytes: number,
+): Promise<boolean> {
+  return appendJsonl(filePath, record, maxBytes)
+}
+
 
 /**
  * 读取轨迹索引（**吞错**）：文件不存在或不可读 ⇒ 返回 undefined（调用方按「无用量信号」处理）。
