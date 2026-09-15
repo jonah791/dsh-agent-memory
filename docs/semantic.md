@@ -14,7 +14,7 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 54 项：51 项已实测 / 3 项待线上；`pending>0` 故**不得**标 verified） |
+| 状态 | **implemented**（验收 54 项：53 项已实测 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
 | 版本 | v0.5（文档）· 对应插件 v0.7.0（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志 |
 | 实现落点 | `self-plugins/dsh-agent-memory/src/`（18 个模块，见 §8） |
 | 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
@@ -375,10 +375,11 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | A50 | 提案日志：`audit` 与 `action` 两类记录**同文件可按 id join**；写入失败吞错、不影响工具返回；开关关闭即不写；**`memory_audit` 仍不写记忆库、不刷 `accessedAt`**（A31 不破） | `tests/centroid.test.mjs`「A50 提案日志…」「A50b 提案日志：写入失败吞错…」 | ✔ 已实测 |
 | A51 | `memory_health` 报命中率信号（注入次数 / 主动检索次数 / 去重命中数 / 最近时刻）；无信号时全 0 不崩 | `tests/centroid.test.mjs`「A51 memory_health 报命中率信号…」 | ✔ 已实测 |
 | A52 | `audit.proposal_log` 配置：缺省开（1 MB 轮转）、可关、未知键/负值 fail-loud | `tests/centroid.test.mjs`「A52 audit.proposal_log 配置…」 | ✔ 已实测 |
-| A53 | **线上**：重启后下一条真实主人消息的注入块包含「与对话历史话题相关」的条目（对照上一轮纯字面路径的注入），且 `memory_health` 的注入计数增长 | 待线上验收：观察下一条真实主人消息的 `【相关记忆（auto-recall）】` 块 + `memory_health` | **待线上验收** |
-| A54 | **线上**：`<DSH_HOME>/memory-audit-proposals.jsonl` 出现 `audit` 记录（我跑体检后）；若我随后 `forget/update`，同文件出现可 join 的 `action` 记录 | 待线上验收：跑一次 `memory_audit` 后 `tail` 该文件 | **待线上验收** |
+| A53 | **线上**：重启后下一条真实主人消息的注入块包含「与对话历史话题相关」的条目（对照上一轮纯字面路径的注入），且 `memory_health` 的注入计数增长 | ✔ **线上实测**（2026-09-15 19:0x · v0.7.0 重启后）：`memory_health` →「命中率信号：注入 6 次 / 主动检索 0 次 / 命中条目 12 条（最近 2026-09-15T11:02:04）」；轨迹 7 条 `source:'auto'`；注入相关度由字面路径 16/13 升到 **32/26**（重心权重生效） | ✔ 已实测 |
+| A54 | **线上**：`<DSH_HOME>/memory-audit-proposals.jsonl` 出现 `audit` 记录（跑体检后）；随后 `forget/update` 应出现可 join 的 `action` 记录 | ✔ **线上实测**（19:02）：646 B / 1 行，`{"kind":"audit","role":"main","weights":{…},"summary":{"total":498,"chars":687974,…},"candidates":[…]}`——形状与 §5.11 一致 | ✔ 已实测 |
 
-> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=54, proven=51, pending=3`（A30 待复核 + A53/A54 待线上）。
+> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=54, proven=53, pending=1`（A30 待线上复核）。
+> **A53 的诚实旁注**：重心把「话题相关性」做上去了（相关度翻倍、命中与本次会话主题一致），但**唤醒消息本身该不该注入**仍存疑——`[守护] web 已重启` 触发注入时给到的仍是运维类条目。两条可查方向：① 唤醒类消息是否应触发注入（它是系统事件、不是对话）；② 需要「命中质量」而非「命中数量」的度量（现指标只数条数与次数）。**均未决**，见 §10 U9。
 > A29 旁注（诚实）：`by_preset` 预设映射分支本次**未在线上观测到**（该子代理会话头未带 `agentPreset`，走的是派生缺省）——该分支由 A20 单测覆盖。
 > **A25/A23 的线上量化对账（2026-09-15 17:5x · 真实生产库 676 条）**：主脑视角 `recall` → `命中 496`；`role='ghost'`（`read: []`, `include_global: false`）→ `命中 384`。差额 **112 = 111（global 作用域被 `include_global: false` 收窄）+ 1（唯一带 `role='main'` 的条目被 `read: []` 拒绝）**，逐项对得上。库内实测：盖章 `role` 共 1 条（`974a5e6b`，`author = {sessionId: 'session-a5375716…', delegationDepth: 0, preset: 'alice-v2'}`），其余 **675 条为共享**（迁移安全的实证）。
 
@@ -467,3 +468,4 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 - **U6 `memory_check` 的对外承诺**：工具描述说「查看待沉淀建议」但恒空。倾向：要么下线该工具，要么在描述里更醒目地标注「未接线」（当前已有说明，但工具名本身仍是承诺）。
 - **U7 存量条目的隔间归属（需主人裁决）**：674 条存量条目全部为共享记忆——这对迁移安全是优点，对幽灵隔间是缺点（幽灵可读到全部历史）。选项：① 保持共享（靠独立 `DSH_HOME` 做真隔离）；② 一次性把某批 tag 的条目回填 `role`（= 批量改记忆数据，属须请示类）。倾向 ①。
 - **U8 记忆生命周期与价值体检（MAGE 借鉴的下一步）**：~~① 只读体检器（按 ν(x) 排序输出「GC 候选/应降级/应保留」）~~ → **已交付 v0.6**（`memory_audit` + 侧车用量轨迹，见 §5.9）。**仍缺**：② **双时态**（`validFrom/validTo`）+ `supersedes`/`invalidates` 链（现在只有布尔 `archived`，删除不留失效证据）；③ **事件超边层**（多主体共同产出的事件作为一等条目——v0.5 的 `role` 只解决分区，不解决「谁+什么动作+哪份证据共同产出了这个结论」）；④ 权重校准（需要「提案被采纳/否决 + 事后是否后悔」的样本）。
+- **U9 注入的「该不该」与「好不好」（v0.7 线上观察）**：重心化解决了「按什么查」（相关性翻倍），但暴露两个新问题：① **唤醒类消息是否该触发注入**——`[守护] web 已重启` 是系统事件，不是对话，给它注入运维历史条目价值存疑（现触发面为 GUI/telegram 主人消息，唤醒消息走在同一条路上）；② 现指标只数**条数与次数**（注入 6 次 / 命中 12 条），**没有质量口径**（"这次注入有用吗"）。倾向：先加一个**可选的判定信号**——注入是否被后续动作引用（如注入后我是否 `recall`/`update` 了其中某条），再谈是否排除唤醒触发。**未决，需主人视角**。
