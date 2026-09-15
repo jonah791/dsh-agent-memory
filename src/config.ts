@@ -5,13 +5,16 @@
  * - 文件缺失 / 字段缺失 → 走缺省配置（DEFAULT_CONFIG）
  * - 文件存在但解析失败（YAML 语法错误或字段非法）→ fail loud（抛错，绝不静默吞掉）
  *
+ * v0.5 新增 `roles` 段（多智能体工作台模式：角色归属与准入，见 src/role.ts）。
+ *
  * 本模块是纯函数层，不依赖 Cordis 运行时，便于离线单测（tests/config.test.ts）。
  */
 
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parse as parseYaml } from 'yaml'
-import type { EntryKind, MemoryConfig } from './types.ts'
+import { DEFAULT_ROLES_CONFIG } from './role.ts'
+import type { EntryKind, MemoryConfig, RolePolicy, RolesConfig } from './types.ts'
 
 /** 合法条目层级（memory.yml layers 字段取值域） */
 const VALID_KINDS: readonly string[] = ['fact', 'knowledge', 'episodic', 'summary']
@@ -29,6 +32,7 @@ const TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
   'max_entries',
   'inject',
   'auto_inject',
+  'roles',
 ])
 
 /** inject 块内合法键 */
@@ -39,6 +43,19 @@ const AUTO_INJECT_KEYS: ReadonlySet<string> = new Set(['enabled', 'max_bytes', '
 
 /** timeline 块内合法键 */
 const TIMELINE_KEYS: ReadonlySet<string> = new Set(['day', 'week', 'month', 'year', 'archive'])
+
+/** roles 块内合法键 */
+const ROLES_KEYS: ReadonlySet<string> = new Set([
+  'enabled',
+  'default',
+  'derived',
+  'by_preset',
+  'policy_default',
+  'policies',
+])
+
+/** 单条角色策略块内合法键 */
+const POLICY_KEYS: ReadonlySet<string> = new Set(['read', 'kinds', 'include_shared', 'include_global'])
 
 /** 缺省配置（§2.3 默认值表），冻结防改 */
 export const DEFAULT_CONFIG: MemoryConfig = deepFreeze({
@@ -64,6 +81,7 @@ export const DEFAULT_CONFIG: MemoryConfig = deepFreeze({
     maxBytes: 1500,
     maxEntries: 3,
   },
+  roles: DEFAULT_ROLES_CONFIG,
 })
 
 /** 配置非法时抛出的错误类型（fail loud 的载体） */
@@ -113,6 +131,7 @@ export function resolveMemoryConfig(raw: unknown): MemoryConfig {
     maxEntries: positiveIntOrDefault(raw.max_entries, DEFAULT_CONFIG.maxEntries, 'max_entries'),
     inject: injectOrDefault(raw.inject),
     autoInject: autoInjectOrDefault(raw.auto_inject),
+    roles: rolesOrDefault(raw.roles),
   })
 }
 
@@ -270,6 +289,17 @@ function stringOrDefault(value: unknown, fallback: string, name: string): string
   return value
 }
 
+/** 角色名：非空字符串，缺省走默认（空白串视为非法——静默的空角色会让准入语义退化） */
+function roleNameOrDefault(value: unknown, fallback: string, name: string): string {
+  if (value === undefined || value === null) return fallback
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new MemoryConfigError(
+      `memory.yml: ${name} 必须是非空字符串（实际：${JSON.stringify(value)}）`,
+    )
+  }
+  return value.trim()
+}
+
 /** 正整数字段：缺省走默认，非正整数 / 非整数抛错 */
 function positiveIntOrDefault(value: unknown, fallback: number, name: string): number {
   if (value === undefined || value === null) return fallback
@@ -279,6 +309,104 @@ function positiveIntOrDefault(value: unknown, fallback: number, name: string): n
     )
   }
   return value
+}
+
+// ---------- roles 段（v0.5） ----------
+
+/** roles 块：字段级缺省 + 未知键拒绝 */
+function rolesOrDefault(value: unknown): RolesConfig {
+  if (value === undefined || value === null) return DEFAULT_ROLES_CONFIG
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError(
+      'memory.yml: roles 必须是映射（enabled/default/derived/by_preset/policy_default/policies）',
+    )
+  }
+  assertNoUnknownKeys(value, ROLES_KEYS, 'memory.yml.roles')
+  return deepFreeze({
+    enabled: booleanOrDefault(value.enabled, DEFAULT_ROLES_CONFIG.enabled, 'roles.enabled'),
+    default: roleNameOrDefault(value.default, DEFAULT_ROLES_CONFIG.default, 'roles.default'),
+    derived: roleNameOrDefault(value.derived, DEFAULT_ROLES_CONFIG.derived, 'roles.derived'),
+    byPreset: presetMapOrDefault(value.by_preset),
+    policyDefault: policyOrDefault(value.policy_default, DEFAULT_ROLES_CONFIG.policyDefault, 'roles.policy_default'),
+    policies: policiesOrDefault(value.policies),
+  })
+}
+
+/** by_preset：预设名 → 角色名（两侧皆非空字符串） */
+function presetMapOrDefault(value: unknown): Record<string, string> {
+  if (value === undefined || value === null) return { ...DEFAULT_ROLES_CONFIG.byPreset }
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError('memory.yml: roles.by_preset 必须是映射（预设名: 角色名）')
+  }
+  const out: Record<string, string> = {}
+  for (const [preset, role] of Object.entries(value)) {
+    if (preset.trim().length === 0) {
+      throw new MemoryConfigError('memory.yml: roles.by_preset 的键必须是非空预设名')
+    }
+    if (typeof role !== 'string' || role.trim().length === 0) {
+      throw new MemoryConfigError(
+        `memory.yml: roles.by_preset["${preset}"] 必须是非空角色名（实际：${JSON.stringify(role)}）`,
+      )
+    }
+    out[preset] = role.trim()
+  }
+  return out
+}
+
+/** policies：角色 → 策略映射 */
+function policiesOrDefault(value: unknown): Record<string, RolePolicy> {
+  if (value === undefined || value === null) return { ...DEFAULT_ROLES_CONFIG.policies }
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError('memory.yml: roles.policies 必须是映射（角色名: 策略块）')
+  }
+  const out: Record<string, RolePolicy> = {}
+  for (const [role, policy] of Object.entries(value)) {
+    if (role.trim().length === 0) {
+      throw new MemoryConfigError('memory.yml: roles.policies 的角色名不得为空')
+    }
+    out[role.trim()] = policyOrDefault(policy, DEFAULT_ROLES_CONFIG.policyDefault, `roles.policies.${role}`)
+  }
+  return out
+}
+
+/** 单条角色策略：字段级缺省 + 未知键拒绝 */
+function policyOrDefault(value: unknown, fallback: RolePolicy, name: string): RolePolicy {
+  if (value === undefined || value === null) return { ...fallback }
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError(
+      `memory.yml: ${name} 必须是映射（read/kinds/include_shared/include_global）`,
+    )
+  }
+  assertNoUnknownKeys(value, POLICY_KEYS, `memory.yml.${name}`)
+  const out: RolePolicy = {
+    read: readListOrDefault(value.read, fallback.read, `${name}.read`),
+    includeShared: booleanOrDefault(value.include_shared, fallback.includeShared ?? true, `${name}.include_shared`),
+    includeGlobal: booleanOrDefault(value.include_global, fallback.includeGlobal ?? true, `${name}.include_global`),
+  }
+  if (value.kinds !== undefined && value.kinds !== null) {
+    out.kinds = layersOrDefault(value.kinds)
+  } else if (fallback.kinds !== undefined) {
+    out.kinds = [...fallback.kinds]
+  }
+  return out
+}
+
+/** read 白名单：字符串数组（`'*'` 合法 = 全部） */
+function readListOrDefault(value: unknown, fallback: string[] | undefined, name: string): string[] {
+  if (value === undefined || value === null) return [...(fallback ?? [])]
+  if (!Array.isArray(value)) {
+    throw new MemoryConfigError(`memory.yml: ${name} 必须是数组（如 ["*"] 或 ["main"]）`)
+  }
+  const out: string[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' || item.trim().length === 0) {
+      throw new MemoryConfigError(
+        `memory.yml: ${name} 元素必须是非空字符串（实际：${JSON.stringify(item)}）`,
+      )
+    }
+    out.push(item.trim())
+  }
+  return out
 }
 
 /** 深度冻结（防止调用方误改共享配置对象） */

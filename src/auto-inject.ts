@@ -23,7 +23,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry, MemoryConfig } from './types.ts'
 import type { MemoryStore } from './store.ts'
-import { workspaceIdOf } from './scope.ts'
+import { workspaceIdOf, GLOBAL_SCOPE } from './scope.ts'
+import { applyRoleView, narrowReadScopes, roleViewOf, type RoleCarrier } from './role.ts'
 import { recallEntries } from './search.ts'
 
 /** 注入依赖：存储 + 配置加载（测试注入 mock） */
@@ -145,7 +146,10 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
 
     // 检索：合并当前 workspace + global（attach 语义同 recall 工具）
     const scope = workspaceIdOf(cwd)
-    const merged = [...deps.store.list(scope), ...deps.store.list('global')]
+    // 角色视野（v0.5）：注入面同样受准入约束——否则隔离会在注入路径上被静默绕过
+    const view = roleViewOf(config, { agent } as unknown as RoleCarrier)
+    const scopes = narrowReadScopes([scope, GLOBAL_SCOPE], view, undefined)
+    const merged = applyRoleView(scopes.flatMap((s) => deps.store.list(s)), view)
     const digest = buildAutoRecallDigest(merged, found.text, {
       maxEntries: config.autoInject.maxEntries,
       maxBytes: config.autoInject.maxBytes,

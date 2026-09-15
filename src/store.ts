@@ -46,6 +46,13 @@ export interface EntryDraft {
   source?: Entry['source']
   /** summary → 原始条目 id 列表（T6 压缩产物，规格 §2.1） */
   archiveRef?: string[]
+  /**
+   * 角色归属（v0.5）：**只在新建时生效**——命中已有条目（key 覆盖 / 标题合并）时
+   * 保留原条目的归属，写入不得静默转移分区（转移需要显式路径，本轮不提供）。
+   */
+  role?: string
+  /** 写入者溯源（v0.5）：新建时记录，后续修订不覆盖（保留「谁创建」） */
+  author?: Entry['author']
 }
 
 /** 条目更新补丁（按 id 定位，缺省字段不动） */
@@ -178,6 +185,8 @@ export class MemoryStore {
       archived: false,
       ...(draft.source !== undefined ? { source: draft.source } : {}),
       ...(draft.archiveRef !== undefined ? { archiveRef: draft.archiveRef } : {}),
+      ...(draft.role !== undefined ? { role: draft.role } : {}),
+      ...(draft.author !== undefined ? { author: draft.author } : {}),
     }
     await this.kv.put(memoryKey(scope, kind, entry.id), entry)
     return { id: entry.id, action: 'created' }
@@ -224,22 +233,12 @@ export class MemoryStore {
     return this.kv.delete(memoryKey(scope, existing.kind, id))
   }
 
-  /** 统计（memory_stats 工具用）：按 kind/level/bucket/归档计数 */
+  /**
+   * 统计（memory_stats 工具用）：按 kind/level/bucket/归档计数。
+   * v0.5：委托 `statsOf(entries)`——工具层可先按角色视野过滤再统计（同一判据，勿两处各算）。
+   */
   stats(scope: string): MemoryStats {
-    const byKind: Partial<Record<EntryKind, number>> = {}
-    const byLevel: Partial<Record<TimelineLevel, number>> = {}
-    const bucketCounts: Record<string, number> = {}
-    let archiveCount = 0
-    let total = 0
-    for (const [, entry] of this.kv.entries()) {
-      if (entry.scope !== scope) continue
-      total += 1
-      byKind[entry.kind] = (byKind[entry.kind] ?? 0) + 1
-      if (entry.level !== null) byLevel[entry.level] = (byLevel[entry.level] ?? 0) + 1
-      if (entry.bucket !== null) bucketCounts[entry.bucket] = (bucketCounts[entry.bucket] ?? 0) + 1
-      if (entry.archived) archiveCount += 1
-    }
-    return { total, byKind, byLevel, bucketCounts, archiveCount }
+    return statsOf(this.list(scope, { includeArchive: true }))
   }
 
   /** (scope, key) 精确匹配活跃条目（L1 查重） */
@@ -277,4 +276,25 @@ export class MemoryStore {
       ...(draft.source !== undefined ? { source: draft.source } : {}),
     }
   }
+}
+
+/**
+ * 条目集合统计（v0.5 抽出为纯函数）：
+ * 供 `MemoryStore.stats`（全量）与工具层「先按角色视野过滤再统计」共用同一判据。
+ * @param entries - 候选条目（含归档也计入 total/archiveCount）
+ */
+export function statsOf(entries: readonly Entry[]): MemoryStats {
+  const byKind: Partial<Record<EntryKind, number>> = {}
+  const byLevel: Partial<Record<TimelineLevel, number>> = {}
+  const bucketCounts: Record<string, number> = {}
+  let archiveCount = 0
+  let total = 0
+  for (const entry of entries) {
+    total += 1
+    byKind[entry.kind] = (byKind[entry.kind] ?? 0) + 1
+    if (entry.level !== null) byLevel[entry.level] = (byLevel[entry.level] ?? 0) + 1
+    if (entry.bucket !== null) bucketCounts[entry.bucket] = (bucketCounts[entry.bucket] ?? 0) + 1
+    if (entry.archived) archiveCount += 1
+  }
+  return { total, byKind, byLevel, bucketCounts, archiveCount }
 }

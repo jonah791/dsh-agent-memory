@@ -11,7 +11,7 @@
 # dsh-agent-memory
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.2.4-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.5.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
   <img src="https://img.shields.io/badge/tests-125%20passed-brightgreen" alt="tests">
@@ -28,13 +28,13 @@
 | 工具 | 用途 |
 |------|------|
 | `remember` | 写入/覆盖/合并。L1 `fact` 带 `key`（同 scope+key 精确覆盖）；L2 `knowledge` / L3 `episodic` 同标题自动合并（标签并集 + 正文追加）；未命中则新建。受 `max_entries` 守卫（**仅拦新建**） |
-| `recall` | 检索：关键词/层级/标签/时间过滤，相关度（标签 3 > 标题 2 > 正文 1）+ 新鲜度排序；每个结果附 `related` 关联链；结果标注来源 scope 与压缩层级 |
+| `recall` | 检索：关键词/层级/标签/时间过滤，相关度（标签 3 > 标题 2 > 正文 1）+ 新鲜度排序；每个结果附 `related` 关联链；结果标注来源 scope 与压缩层级。**v0.5：受角色视野约束**（见「角色视野」），可用 `role` 参数切换视角 |
 | `memory_relate` | 联想导航：按 id 展开关联网络；`depth>1` 走 BFS 多跳记忆社区（`hop` 标注层级、visited 防环、每跳 `limit` 扇出） |
 | `memory_browse` | 时间金字塔浏览（年/月/周/日分桶 + 层级/标签/时间过滤 + 分页）。与 `recall` 互补——「不知道有什么」时的发现路径 |
 | `update` | 按 id 修订：`text` 首行作新标题、全文替换正文；`tags` 整体替换 |
 | `forget` | 软归档（`archived=true` + 记 `reason`）：不再进活跃检索，`includeArchive` 可找回 |
 | `memory_stats` | 各层级/压缩层级/时间桶计数 + 归档数（可 `scope` 限定） |
-| `memory_health` | 运行时概览：条目总数、归档数、生效读 scopes、注入开关 |
+| `memory_health` | 运行时概览：条目总数、归档数、生效读 scopes、注入开关、**生效角色（`role` / `rolesEnabled` / `roleReason`）** |
 | `memory_version` | 插件版本 + 构建时刻（**动态**读 `package.json` 与产物 mtime，用于 HMR 验证） |
 | `memory_check` | 「待沉淀建议」——**当前恒返回空数组**（通道 B 未接线，工具描述已如实声明） |
 
@@ -47,6 +47,10 @@
 - **记忆回流服务**：`ctx.memoryApi.remember({text,kind?,tags?,key?,scope?})` → `{id,action}` 或 `{error}`（默认 `global` + `knowledge`），供 emotion / taskboard / evolution-core / skill-forge 等插件把运行态结论写回主记忆库。
 
 > 两侧注入都采用**尾部追加**（不动消息批次中部），以保护前缀缓存命中率。
+
+**角色视野（v0.5 · 多智能体工作台模式）**：启用 `roles` 后，`recall` / `memory_browse` / `memory_relate` / `memory_stats` 与两侧注入**共用同一视野**——按调用者角色（人类会话 → `default`；子代理 / 队员 → `derived`，可用 `by_preset` 精确映射）**在检索前剔除**不可见条目；`remember` 自动盖角色章并记 `author`（会话 id / 委派深度 / 预设名）。**未启用时零过滤**（`applyRoleView` 返回同一数组引用），行为与 v0.4 完全一致。排查「为什么看不见某条」先调 `memory_health` 看 `role` 与 `roleReason`。
+
+> **诚实声明**：角色维度是**视野管理**，不是安全边界——`role` 参数可自述、记忆文件可被能读盘的人改写。要真正的隔离（幽灵隔间 / 多租户）请用**独立 `DSH_HOME`**。详见 `docs/semantic.md` §5.8 / §6。
 
 ## 快速开始
 
@@ -69,7 +73,7 @@
 
 > 依赖官方 storage 栈（`storage` / `storage-json` / `storage-domain`）——web-app bundle 已提供，无需额外行。
 
-**3) 30 秒验证**：调 `memory_version` → 期望返回 `name: dsh-agent-memory`、`version: 0.2.4` 与**晚于源码修改时刻**的 `buildAt`；再调 `memory_health` → 期望 `total > 0`（已有历史条目）；再调 `memory_stats` → 各 `kind` 计数与 `${DSH_HOME}/storages/agent_memory.json` 中的实际条目数一致。
+**3) 30 秒验证**：调 `memory_version` → 期望返回 `name: dsh-agent-memory`、`version: 0.5.0` 与**晚于源码修改时刻**的 `buildAt`；再调 `memory_health` → 期望 `total > 0`（已有历史条目）；再调 `memory_stats` → 各 `kind` 计数与 `${DSH_HOME}/storages/agent_memory.json` 中的实际条目数一致。
 
 ## 配置
 
@@ -96,6 +100,34 @@
 | `max_entries` | `2000` | 条目上限（**仅拦截新建**，覆盖/合并不受限） |
 | `inject.enabled / max_bytes / max_entries` | `true / 3000 / 20` | 启动注入预算 |
 | `auto_inject.enabled / max_bytes / max_entries` | `true / 1500 / 3` | auto-recall 预算 |
+| `roles.enabled` | `false` | **角色维度总开关**（v0.5）：`false` = 零过滤，行为与 v0.4 一致 |
+| `roles.default` / `roles.derived` | `main` / `derived` | 人类会话 / 派生会话（子代理·队员）的缺省角色 |
+| `roles.by_preset` | `{}` | `agentPreset` → 角色映射（如 `code: worker`） |
+| `roles.policy_default` | `{read: ['*'], include_shared: true, include_global: true}` | 未声明策略的角色所用策略 |
+| `roles.policies.<角色>` | `{}` | 角色策略：`read`（归属白名单，`'*'`=全部）、`kinds`（类型白名单）、`include_shared`、`include_global` |
+
+**角色维度最小示例**（工作台部署）：
+
+```yaml
+# <workspace>/.dsh/memory.yml
+roles:
+  enabled: true
+  default: main            # 人类会话：默认策略 read ['*'] → 全见
+  derived: worker          # 子代理 / 队员
+  by_preset:
+    code: worker
+    verify-preset: verifier
+  policies:
+    worker:
+      read: [main]         # 见自己 + 主脑 + 共享；看不见其他队员的隔间
+      include_shared: true
+    verifier:              # 验收方：拿不到实施方的过程流（AGENTS.md §5.26 G8 机制化）
+      read: [main]
+      kinds: [fact, knowledge, summary]
+      include_global: false
+    ghost-01:
+      read: []             # 隔间：只看得见自己与共享记忆
+```
 
 > **fail-loud**：`memory.yml` 未知顶层键、非法枚举、非布尔、非正整数、`archive≠keep` 等一律抛 `MemoryConfigError`（不静默补默认）；**只有「文件不存在」走全默认**。当前 `<工作区>/.dsh/memory.yml` 不存在 ⇒ 全部走默认。
 
@@ -140,7 +172,7 @@ console.log("⑤更新时刻",new Date(require("node:fs").statSync(process.env.D
 
 **生效判据**（三选一，按可靠性排序）：
 
-1. **语义级（最直接）**：调 `memory_version` → `version` 应等于 `package.json` 的 `0.2.4`，`buildAt` 应等于 `lib/index.js` 的产物 mtime（该工具是**动态**读这两处的——2026-09-01 之前它硬编码版本、`buildAt` 实为调用时刻，即「判据本身说谎」，已修）。
+1. **语义级（最直接）**：调 `memory_version` → `version` 应等于 `package.json` 的 `0.5.0`，`buildAt` 应等于 `lib/index.js` 的产物 mtime（该工具是**动态**读这两处的——2026-09-01 之前它硬编码版本、`buildAt` 实为调用时刻，即「判据本身说谎」，已修）。
 2. **进程级**：`lib/index.js` 的 mtime ≤ web 进程启动时间，且 `src/*.ts` 不新于 `lib/index.js`（源码改了没构建 = 跑的还是旧产物）。
 3. **行为级**：工具面出现 10 个 `memory_*`；把一条记忆写进库后，`${DSH_HOME}/storages/agent_memory.json` 的 `tables.entries` 条数 +1 且文件 mtime 前进。
 
@@ -160,9 +192,9 @@ npm run test:ts   # = tsc && node --test "tests/*.test.ts"   （需 node ≥ 24�
 npm run test:all  # = 两套一起
 ```
 
-**实测（本次运行，node v22.22.1，`npm test`）：`# tests 125 / # suites 20 / # pass 125 / # fail 0 / # skipped 0`**（约 7.6s，徽章数字即此）。**无需网络、无需真实外部依赖**——LLM 总结路径在测试里以桩注入，telegram 不涉及。
+**实测（2026-09-15，node v24.18.0）：`npm test` → `# suites 20 / # pass 139 / # fail 0 / # skipped 0`；`npm run test:ts` → `# pass 81 / # fail 0 / # skipped 1`（跳过项为 `scope.test.ts` 的 Windows 平台条件，见 `t.skip('Windows resolve 会加盘符前缀')`）；`npm run test:all` → `221 项 / fail 0 / skipped 1`。**无需网络、无需真实外部依赖**——LLM 总结路径在测试里以桩注入，telegram 不涉及。
 
-覆盖范围（`tests/` 共 12 个文件；`npm test` 跑其中 7 个 `.mjs`）：
+覆盖范围（`tests/` 共 13 个文件；`npm test` 跑其中 8 个 `.mjs`）：
 
 - `store.test.mjs` — 条目 CRUD、写去重三态（`created`/`updated`/`merged`）、L1 key 覆盖、标题指纹合并
 - `search.test.mjs` — 打分与排序、过滤、截断；**联想层**（related 链强度降序）与 **BFS 多跳闭包**（hop 标注/防环/每跳 limit）
@@ -171,8 +203,9 @@ npm run test:all  # = 两套一起
 - `inject.test.mjs` — 启动注入：global fact 全量、概要先于明细、预算截断、归档条目不出场、空记忆不注入
 - `auto-inject.test.mjs` — auto-recall **触发面**（GUI/Telegram 触发、其他插件注入**不触发**、空文本跳过、多 text block 拼接）+ 预算截断与长 query 截断
 - `summarizer.test.mjs` — 总结提示词与响应处理
+- `role.test.mjs` — **v0.5 角色维度**：会话判据、角色推导四级优先、准入四判据 R1–R4、未启用 = 同一引用透传、`include_global` 收窄、归属不可转移、工具层准入一致（recall/browse/stats/relate/update/forget）、无 `roles` 段的历史配置不崩
 
-未在本次运行内（`.ts` 套件，5 个文件：`browse` / `compaction-sink` / `config` / `scope` / `tools`）：`npm run test:ts` 在 **node v22 上不可跑**（原生类型剥离需 node ≥ 24）——本次实测 `# pass 0 / # fail 5`（全部为加载失败）。**该套件在此环境的用例实数：未取到**（`docs/semantic.md` §10 U2 记为 76 项、`node ≥ 24` 下手工全绿，本次未复现）。
+`.ts` 套件（5 个文件：`browse` / `compaction-sink` / `config` / `scope` / `tools`）需 node ≥ 24（原生类型剥离）：2026-09-15 在 **node v24.18.0** 实测 `# pass 81 / # fail 0 / # skipped 1`（跳过为 Windows 平台条件）。`config.test.ts` 覆盖 `roles` 段的缺省/完整/4 条非法 fail-loud 用例。
 
 **未覆盖**：`ctx` 级集成（真实 `agent/pre-step` 事件流、inbox 通知投递）、周期补压定时器（`src/periodic.ts` **无单测**，见 `docs/semantic.md` §7 A17「待线上验收」）。
 

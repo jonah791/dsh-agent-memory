@@ -17,7 +17,8 @@ import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Entry, MemoryConfig } from './types.ts'
 import type { MemoryStore } from './store.ts'
-import { workspaceIdOf } from './scope.ts'
+import { workspaceIdOf, GLOBAL_SCOPE } from './scope.ts'
+import { applyRoleView, narrowReadScopes, roleViewOf, type RoleCarrier } from './role.ts'
 
 /** 注入依赖：存储 + 配置加载（测试注入 mock） */
 export interface MemoryInjectDeps {
@@ -110,8 +111,16 @@ export function installMemoryInject(ctx: Context, deps: MemoryInjectDeps): void 
       return decision
     }
     const scope = workspaceIdOf(cwd)
-    const globalFacts = deps.store.list('global').filter((e) => e.kind === 'fact' && !e.archived)
-    const scopeEntries = deps.store.list(scope)
+    // 角色视野（v0.5）：速览只给该调用者角色可见的条目；未启用 roles 时零过滤（与 v0.4 等价）
+    const view = roleViewOf(config, { agent } as unknown as RoleCarrier)
+    const scopes = narrowReadScopes([GLOBAL_SCOPE, scope], view, undefined)
+    const globalFacts = scopes.includes(GLOBAL_SCOPE)
+      ? applyRoleView(
+        deps.store.list(GLOBAL_SCOPE).filter((entry) => entry.kind === 'fact' && !entry.archived),
+        view,
+      )
+      : []
+    const scopeEntries = applyRoleView(deps.store.list(scope), view)
     const digest = buildMemoryDigest(globalFacts, scopeEntries, {
       maxBytes: config.inject.maxBytes,
       maxEntries: config.inject.maxEntries,

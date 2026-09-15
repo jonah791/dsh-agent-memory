@@ -102,6 +102,15 @@ test('完整：全部字段 → 原样生效', () => {
     inject: { enabled: false, maxBytes: 1500, maxEntries: 8 },
     // auto_inject 未在 YAML 指定 → 走缺省（L3 2026-09-01）
     autoInject: { enabled: true, maxBytes: 1500, maxEntries: 3 },
+    // roles 未在 YAML 指定 → 走缺省（v0.5：总开关关闭 ⇒ 零过滤，行为与 v0.4 一致）
+    roles: {
+      enabled: false,
+      default: 'main',
+      derived: 'derived',
+      byPreset: {},
+      policyDefault: { read: ['*'], includeShared: true, includeGlobal: true },
+      policies: {},
+    },
   })
 })
 
@@ -190,4 +199,58 @@ test('非法：冻结保护（默认配置不可改）', () => {
   assert.throws(() => {
     DEFAULT_CONFIG.layers.push('episodic')
   }, TypeError)
+})
+
+// ---------- 5. roles 段（v0.5 多智能体工作台模式） ----------
+
+test('roles：缺省段 → 总开关关闭 + 不设限默认策略（行为与 v0.4 一致）', () => {
+  const cfg = parseMemoryConfig('')
+  assert.equal(cfg.roles.enabled, false)
+  assert.deepEqual(cfg.roles.policyDefault.read, ['*'])
+  assert.deepEqual(cfg.roles.policies, {})
+  assert.equal(cfg.roles.default, 'main')
+  assert.equal(cfg.roles.derived, 'derived')
+})
+
+test('roles：完整段 → 原样生效（含 verifier 型收窄策略）', () => {
+  const cfg = parseMemoryConfig(`
+roles:
+  enabled: true
+  default: main
+  derived: worker
+  by_preset:
+    code: worker
+  policy_default:
+    read: ["*"]
+    include_global: true
+  policies:
+    verifier:
+      read: []
+      kinds: [fact, knowledge]
+      include_global: false
+`)
+  assert.equal(cfg.roles.enabled, true)
+  assert.equal(cfg.roles.derived, 'worker')
+  assert.equal(cfg.roles.byPreset.code, 'worker')
+  assert.deepEqual(cfg.roles.policies.verifier?.read, [])
+  assert.deepEqual(cfg.roles.policies.verifier?.kinds, ['fact', 'knowledge'])
+  assert.equal(cfg.roles.policies.verifier?.includeGlobal, false)
+  // 未声明的维度回落缺省（不静默变成 false）
+  assert.equal(cfg.roles.policies.verifier?.includeShared, true)
+})
+
+test('非法：roles 未知键 → MemoryConfigError', () => {
+  assert.throws(() => parseMemoryConfig('roles:\n  enabld: true\n'), MemoryConfigError)
+})
+
+test('非法：roles.policies 策略块未知键 → MemoryConfigError', () => {
+  assert.throws(() => parseMemoryConfig('roles:\n  policies:\n    worker:\n      readz: ["*"]\n'), MemoryConfigError)
+})
+
+test('非法：roles.default 空白串 → MemoryConfigError', () => {
+  assert.throws(() => parseMemoryConfig('roles:\n  default: "  "\n'), MemoryConfigError)
+})
+
+test('非法：roles.by_preset 值非字符串 → MemoryConfigError', () => {
+  assert.throws(() => parseMemoryConfig('roles:\n  by_preset:\n    code: 5\n'), MemoryConfigError)
 })

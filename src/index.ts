@@ -48,6 +48,13 @@ const entrySchema = zod.object({
     reason: zod.string().optional(),
   }).optional(),
   archiveRef: zod.array(zod.string()).optional(),
+  // v0.5 角色维度（多智能体工作台模式）：归属 + 写入者溯源
+  role: zod.string().optional(),
+  author: zod.object({
+    sessionId: zod.string().optional(),
+    delegationDepth: zod.number().optional(),
+    preset: zod.string().optional(),
+  }).optional(),
 })
 
 /** 记忆域声明：单表 entries，key = <scope>:<kind>:<id>（domain 即命名空间，规格 §2.2） */

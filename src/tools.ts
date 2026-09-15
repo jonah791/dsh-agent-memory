@@ -17,13 +17,14 @@ import { readFileSync, statSync } from 'node:fs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { EntryKind, MemoryConfig, RememberResult } from './types.ts'
+import type { Entry, EntryKind, MemoryConfig, RememberResult } from './types.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import { resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
-import { titleFingerprint } from './store.ts'
+import { statsOf, titleFingerprint } from './store.ts'
 import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
+import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
 
 /** 工具依赖：存储 + 配置加载（单测注入 mock 用） */
 export interface MemoryToolDeps {
@@ -40,15 +41,64 @@ async function loadConfigDefault(workspaceRoot: string): Promise<MemoryConfig> {
   return loadMemoryConfig(memoryConfigPath(workspaceRoot))
 }
 
-/** 一次调用的运行时上下文：解析出的配置 + 会话 cwd（cwd 缺失时配置按启动目录读） */
+/** 会话载体类型（roleViewOf / sessionHeaderOf 的鸭子类型输入） */
+type RoleCarrierLike = Parameters<typeof roleViewOf>[1]
+
+/**
+ * 一次调用的运行时上下文：解析出的配置 + 会话 cwd + **调用者视野**（v0.5）。
+ * 视野在唯一的入口处解析一次，所有读路径共用——避免各工具各推导一遍角色。
+ * @param roleOverride - 工具参数显式指定的角色（最高优先）
+ */
 async function resolveRuntime(
   exec: ToolRunContext,
   deps: MemoryToolDeps,
-): Promise<{ config: MemoryConfig; cwd: string | undefined }> {
+  roleOverride?: string,
+): Promise<{ config: MemoryConfig; cwd: string | undefined; view: RoleView }> {
   const cwd = sessionCwdOf(exec)
   const loader = deps.loadConfig ?? loadConfigDefault
   const config = await loader(cwd ?? process.cwd())
-  return { config, cwd }
+  const view = roleViewOf(config, exec as unknown as RoleCarrierLike, roleOverride)
+  return { config, cwd, view }
+}
+
+/**
+ * 写路径的角色盖章（v0.5）：
+ * - `role` 只在**角色维度启用**或调用方**显式指定**时盖章——缺省不盖章 = 共享记忆（迁移安全：
+ *   存量条目与未启用角色的项目行为不变）；
+ * - `author` 无条件记录（溯源，与可见性无关）。
+ */
+function roleStampOf(
+  exec: ToolRunContext,
+  config: MemoryConfig,
+  explicitRole: string | undefined,
+): { role?: string; author: Entry['author'] } {
+  const view = roleViewOf(config, exec as unknown as RoleCarrierLike)
+  const header = sessionHeaderOf(exec as unknown as RoleCarrierLike)
+  const sessionId = sessionIdOf(exec as unknown as RoleCarrierLike)
+  const author: Entry['author'] = {
+    ...(sessionId !== undefined ? { sessionId } : {}),
+    ...(header?.delegationDepth !== undefined ? { delegationDepth: header.delegationDepth } : {}),
+    ...(header?.agentPreset !== undefined ? { preset: header.agentPreset } : {}),
+  }
+  const explicit = explicitRole?.trim()
+  const role = explicit !== undefined && explicit.length > 0
+    ? explicit
+    : (view.enabled ? view.role : undefined)
+  return { ...(role !== undefined ? { role } : {}), author }
+}
+
+/**
+ * 读路径统一取数：作用域合并 → 视野收窄 → 角色准入过滤（v0.5）。
+ * 所有读工具（recall / browse / relate / stats）必须走这里——**单点过滤**，
+ * 否则「recall 过滤了但 browse 没过滤」= 隔离是假的。
+ */
+function gatherReadable(
+  deps: MemoryToolDeps,
+  opts: { readScopes: string[]; includeArchive: boolean; view: RoleView; explicitScope?: string },
+): { entries: Entry[]; scopes: string[] } {
+  const scopes = narrowReadScopes(opts.readScopes, opts.view, opts.explicitScope)
+  const entries = scopes.flatMap((scope) => deps.store.list(scope, { includeArchive: opts.includeArchive }))
+  return { entries: applyRoleView(entries, opts.view), scopes }
 }
 
 /** action → 中文文案（工具 render 用） */
@@ -97,6 +147,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       kind: { type: 'string', enum: ['fact', 'knowledge', 'episodic'], description: '层级：fact=事实 / knowledge=知识 / episodic=情景。缺省 knowledge。' },
       tags: { type: 'array', items: { type: 'string' }, description: '检索标签（可选）。' },
       scope: { type: 'string', description: '写入作用域覆盖：global 或 workspaceId（缺省按项目 memory.yml 路由）。' },
+      role: { type: 'string', description: '角色归属（v0.5 多智能体工作台）：条目归属的角色隔间。缺省时——项目启用 roles 则盖调用者角色，否则为共享记忆（所有角色可见）。' },
     },
     output: {
       schema: {
@@ -143,6 +194,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         scope: writeScope,
         level: null,
         bucket: null,
+        ...roleStampOf(exec, config, args.role),
       })
     },
   })
@@ -162,6 +214,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       scope: { type: 'string', description: '作用域覆盖：global 只查全局；workspaceId 跨项目查（global 仍附加）。' },
       limit: { type: 'integer', description: '返回条数上限（缺省 20）。' },
       includeArchive: { type: 'boolean', description: '是否包含已归档条目（缺省 false）。' },
+      role: { type: 'string', description: '角色视角覆盖（v0.5）：以指定角色检索。缺省 = 按调用者会话身份推导（人类会话→主脑角色；子代理/队员→派生角色）。仅当项目启用 roles 时生效。' },
     },
     output: {
       schema: {
@@ -221,15 +274,15 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       },
     },
     async execute(args, exec) {
-      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
       // 懒压缩（DESIGN.md §五）：访问记忆时补压上一自然单位；fire-and-forget，失败静默（幂等保证下次重试）
       for (const scope of readScopes) {
         if (deps.compress !== undefined) void deps.compress(scope, exec.agent).catch(() => {})
       }
       const includeArchive = args.includeArchive ?? false
-      // 作用域合并：workspace + global 全量拉取后统一走检索管道（规格 §5：global 永远附加）
-      const entries = readScopes.flatMap((scope) => deps.store.list(scope, { includeArchive }))
+      // 取数：作用域合并 → 视野收窄 → 角色准入过滤（v0.5 单点过滤）→ 检索管道
+      const { entries } = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
       return recallEntries(entries, {
         query: args.query,
         kind: args.kind,
@@ -264,11 +317,13 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       render: (_args, value) => [{ type: 'text', text: `已更新记忆条目 ${value.id}` }],
     },
     async execute(args, exec) {
-      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { config, cwd, view } = await resolveRuntime(exec, deps)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
-      const entry = findEntry(deps.store, readScopes, args.id)
+      // 视野内定位：视野外的条目不可修订（v0.5——修订权随视野，不留越视野后门）
+      const { entries } = gatherReadable(deps, { readScopes, includeArchive: true, view })
+      const entry = entries.find((candidate) => candidate.id === args.id)
       if (entry === undefined) {
-        throw new Error(`update: 未找到 id="${args.id}" 的记忆条目（当前检索作用域内）`)
+        throw new Error(`update: 未找到 id="${args.id}" 的记忆条目（当前视野内）`)
       }
       const patch: EntryPatch = {}
       if (args.text !== undefined) {
@@ -304,11 +359,13 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
       render: (_args, value) => [{ type: 'text', text: `已归档记忆条目 ${value.id}` }],
     },
     async execute(args, exec) {
-      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { config, cwd, view } = await resolveRuntime(exec, deps)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
-      const entry = findEntry(deps.store, readScopes, args.id)
+      // 视野内定位：视野外的条目不可归档（v0.5，同 update）
+      const { entries } = gatherReadable(deps, { readScopes, includeArchive: true, view })
+      const entry = entries.find((candidate) => candidate.id === args.id)
       if (entry === undefined) {
-        throw new Error(`forget: 未找到 id="${args.id}" 的记忆条目（当前检索作用域内）`)
+        throw new Error(`forget: 未找到 id="${args.id}" 的记忆条目（当前视野内）`)
       }
       await deps.store.forget(entry.scope, args.id, args.reason)
       return { id: args.id, archived: true }
@@ -343,22 +400,20 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
       }],
     },
     async execute(args, exec) {
-      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { config, cwd, view } = await resolveRuntime(exec, deps)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
       // 懒压缩（DESIGN.md §五）：访问记忆时补压上一自然单位；fire-and-forget，失败静默
       for (const scope of readScopes) {
         if (deps.compress !== undefined) void deps.compress(scope, exec.agent).catch(() => {})
       }
-      const merged: MemoryStats = { total: 0, byKind: {}, byLevel: {}, bucketCounts: {}, archiveCount: 0 }
-      for (const scope of readScopes) {
-        const stats = deps.store.stats(scope)
-        merged.total += stats.total
-        merged.archiveCount += stats.archiveCount
-        mergeCounts(merged.byKind as Record<string, number>, stats.byKind as Record<string, number>)
-        mergeCounts(merged.byLevel as Record<string, number>, stats.byLevel as Record<string, number>)
-        mergeCounts(merged.bucketCounts, stats.bucketCounts)
-      }
-      return { ...merged, scopes: readScopes }
+      // 计数按视野取数后统计（v0.5：启用角色时统计只反映可见集合；停用时与 v0.4 等价）
+      const { entries, scopes } = gatherReadable(deps, {
+        readScopes,
+        includeArchive: true,
+        view,
+        explicitScope: args.scope,
+      })
+      return { ...statsOf(entries), scopes }
     },
   })
 }
@@ -378,6 +433,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       includeArchive: { type: 'boolean', description: '是否包含已归档条目（默认否）。' },
       page: { type: 'integer', description: '页码（1 起，默认 1）。' },
       pageSize: { type: 'integer', description: '每页组数（默认 20）。' },
+      role: { type: 'string', description: '角色视角覆盖（v0.5）：缺省按调用者会话身份推导。仅当项目启用 roles 时生效。' },
     },
     output: {
       schema: {
@@ -433,9 +489,10 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       },
     },
     async execute(args, exec) {
-      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
-      const entries = readScopes.flatMap((scope) => deps.store.list(scope, { includeArchive: args.includeArchive ?? false }))
+      const includeArchive = args.includeArchive ?? false
+      const { entries } = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
       const result = browseEntries(entries, {
         kind: args.kind,
         tags: args.tags,
@@ -467,6 +524,7 @@ function buildRelate(deps: MemoryToolDeps): ToolDefinition {
       depth: { type: 'integer', description: 'BFS 跳数（缺省 1=单跳；2-3 多跳探索记忆社区）。' },
       scope: { type: 'string', description: '作用域覆盖（global 或 workspaceId）；缺省当前 workspace + global。' },
       includeArchive: { type: 'boolean', description: '是否包含已归档条目（默认否）。' },
+      role: { type: 'string', description: '角色视角覆盖（v0.5）：缺省按调用者会话身份推导。目标与邻居都必须通过该视野的准入。' },
     },
     output: {
       schema: {
@@ -517,12 +575,13 @@ function buildRelate(deps: MemoryToolDeps): ToolDefinition {
       },
     },
     async execute(args, exec) {
-      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
       const includeArchive = args.includeArchive ?? false
-      const entries = readScopes.flatMap((scope) => deps.store.list(scope, { includeArchive }))
-      const target = findEntry(deps.store, readScopes, args.id)
-      if (target === undefined) return { ok: false, error: `未找到 id="${args.id}" 的记忆条目（当前检索作用域内）` }
+      // 视野内取数：目标与邻居都必须过同一准入（否则 memory_relate 会成为隔离缺口）
+      const { entries } = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
+      const target = entries.find((candidate) => candidate.id === args.id)
+      if (target === undefined) return { ok: false, error: `未找到 id="${args.id}" 的记忆条目（当前视野内）` }
       const depth = args.depth ?? 1
       const limitPerHop = args.limit ?? 3
       const related = depth > 1
@@ -553,6 +612,9 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
           archiveCount: { type: 'integer', required: true },
           scopes: { type: 'array', required: true, items: { type: 'string' } },
           injectEnabled: { type: 'boolean', required: true },
+          role: { type: 'string', required: true },
+          rolesEnabled: { type: 'boolean', required: true },
+          roleReason: { type: 'string', required: true },
         },
       },
       render: (args, value) => [{
@@ -561,21 +623,19 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
       }],
     },
     async execute(args, exec) {
-      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { config, cwd, view } = await resolveRuntime(exec, deps)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
-      let total = 0
-      let archiveCount = 0
-      for (const scope of readScopes) {
-        const stats = deps.store.stats(scope)
-        total += stats.total
-        archiveCount += stats.archiveCount
-      }
+      const { entries } = gatherReadable(deps, { readScopes, includeArchive: true, view })
+      const stats = statsOf(entries)
       return {
         ok: true,
-        total,
-        archiveCount,
+        total: stats.total,
+        archiveCount: stats.archiveCount,
         scopes: readScopes,
         injectEnabled: config.inject.enabled,
+        role: view.role,
+        rolesEnabled: view.enabled,
+        roleReason: view.reason,
       }
     },
   })

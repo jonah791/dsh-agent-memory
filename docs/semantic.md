@@ -14,9 +14,9 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 18 项：17 项已实测 / 1 项待线上验收；`pending>0` 故**不得**标 verified） |
-| 版本 | v0.2（文档）· 对应插件 v0.2.4（`package.json`） |
-| 实现落点 | `self-plugins/dsh-agent-memory/src/`（14 个模块，见 §8） |
+| 状态 | **implemented**（验收 27 项：25 项已实测 / 1 项待线上验收 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
+| 版本 | v0.3（文档）· 对应插件 v0.5.0（`package.json`）——v0.5 新增**角色维度**（多智能体工作台模式：归属 + 准入） |
+| 实现落点 | `self-plugins/dsh-agent-memory/src/`（15 个模块，见 §8） |
 | 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`<workspace>/.dsh/memory.yml`（当前 E:\alice 不存在 → 全默认）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
 | 作者 / 日期 | 爱丽丝 · 2026-09-13 |
 | 相关规则 | AGENTS.md §5.20（语义文档系统）；§5.8（记忆检索纪律） |
@@ -54,6 +54,11 @@
 | 记忆回流 | 服务 `ctx.memoryApi.remember()`——其他插件把运行态结论写回记忆库 |
 | 联想链 / 联想闭包 | `relatedOf` 单跳相关条目；`relateClosure` BFS 多跳记忆图行走（`hop` 标注层级） |
 | 尾部追加 | 动态注入统一放在消息批次**末尾**（保护前缀缓存，避免插在中部破坏缓存命中） |
+| 角色（role） | v0.5 条目的**分区维度**：`main`（人类会话缺省）/ `derived`（派生会话缺省）/ 自定义（`worker` / `verifier` / `ghost-01` …）。缺省不设字段 = **共享记忆** |
+| 视野（RoleView） | 一次调用解析出的「角色 + 策略 + 是否收窄 global」，由 `roleViewOf` 产出，所有读路径共用 |
+| 准入（admission） | 按策略**在检索前剔除**条目（R1–R4 判据）；不是排序降权 |
+| 归属（stamp） | 写路径给新条目盖 `role`（仅当角色维度启用或显式指定）+ 记 `author`（溯源） |
+| 隔间 | 一个角色对应的可见集合；隔间之间默认互不可见（除非策略 `read` 白名单放行） |
 
 ## 4 · 概念模型与不变量
 
@@ -78,6 +83,9 @@
    **I6a 同桶同层唯一（并发保证，2026-09-13 补）**：`compressUnit` 的临界区（查概要 → await LLM 总结 → 写入）按 `compressUnitKey(scope, level, bucket)` 在**进程内串行**（`src/lock.ts`），并在写入前二次复核。⇒ 进程内任意并发调用组合下，同一 (scope, level, bucket) 只落一条概要。判据见 §7 A16；旧反例（4 对重复桶）即本不变量**曾被违反**的实证。
 7. **I7 归档是软删**：`forget` 置 `archived=true` 并记 `reason`；默认检索不可见，`includeArchive`/`memory_browse` 可再取；压缩后的原料同样被冷归档（可沿 `archiveRef` 回溯）。
 8. **I8 配置 fail-loud**：`memory.yml` 未知键 / 非法值 → 抛 `MemoryConfigError`（不静默补默认）；仅「文件不存在」走默认。
+9. **I9 视野单点过滤（v0.5）**：启用 `roles` 后，**所有读路径**（recall / browse / relate / stats / 启动注入 / auto-recall）共用 `applyRoleView` 这一处准入过滤——条目在**检索之前**被剔除而非降权。⇒ 判据：任何读路径绕过 `gatherReadable`（工具层）或 `applyRoleView`（注入层）即为违反；未启用 `roles` 时 `applyRoleView` 必须返回**同一数组引用**（零过滤、零拷贝）。
+10. **I10 归属不可转移（v0.5）**：`role` 只在**新建**时盖章；命中已有条目（key 覆盖 / 标题合并）保留原归属——写入不得静默转移分区。`author` 记创建者，后续修订不覆盖。
+11. **I11 共享是默认且是显式的（v0.5）**：不盖章 = 共享记忆（所有角色按各自策略可见）；盖章只发生在「`roles.enabled` 为真」或「调用方显式给 `role`」时。存量条目（含 v0.4 前写入的 674 条）一律为共享——**迁移安全优先于隔离强度**。
 
 ## 5 · 契约
 
@@ -175,9 +183,40 @@
 
 **写入真源唯一**：上表所有路径最终都调 `MemoryStore.remember / update / forget / put`。
 
+### 5.8 角色维度契约（v0.5 · 多智能体工作台模式）
+
+**背景**：工作台里主脑（人类会话）、派生队员（子代理 / Agent Teams 成员）、验收方、幽灵隔间共享**同一张记忆表**。角色维度给「谁看得见什么」一个可配置、可验收的答案（借鉴 MAGE, arXiv:2608.29678 的 role policy index + Γ 准入门槛）。
+
+**配置块**（`memory.yml`，全部 fail-loud；缺省见 `DEFAULT_ROLES_CONFIG`）：
+
+| 键 | 语义 | 缺省 |
+|----|------|------|
+| `enabled` | 总开关。**false = 零过滤**（行为与 v0.4 完全一致） | `false` |
+| `default` / `derived` | 人类会话 / 派生会话的缺省角色名 | `main` / `derived` |
+| `by_preset` | `agentPreset` → 角色（预设名映射，如 `code: worker`） | `{}` |
+| `policy_default` | 未声明策略的角色所用策略 | `{read: ['*'], include_shared: true, include_global: true}` |
+| `policies.<role>` | 角色策略：`read`（归属白名单，`'*'` = 全部）、`kinds`（类型白名单）、`include_shared`、`include_global` | `{}` |
+
+**推导链**（`deriveRole`，纯函数）：显式 `role` 参数 → `by_preset[agentPreset]` → 人类会话（`session-<uuid>`）取 `default` → 派生会话取 `derived`；**无会话 id → 取 `default`**（保守，宁可见全不可静默失明）。判据理由随 `memory_health.roleReason` 透出。
+
+**准入判据**（`admitsEntry`，按序，fail-closed）：
+
+| 序 | 判据 | 结果 |
+|----|------|------|
+| R1 | `policy.kinds` 非空且条目 kind 不在其中 | 拒绝 |
+| R2 | 条目无 `role`（共享）且 `include_shared !== false` | 放行 |
+| R3 | 条目 `role` === 调用者角色 | 放行 |
+| R4 | `policy.read` 含 `'*'` 或含条目 `role` | 放行 / 否则拒绝 |
+
+**读路径**：`gatherReadable`（工具层）与注入层各自先 `narrowReadScopes`（`include_global: false` 且**未显式给 scope** 时去掉 global），再 `applyRoleView` 过滤。
+**写路径**：`role` 只在**新建**时盖章（启用 roles → 盖调用者角色；未启用 → 仅显式 `role` 生效；两者皆无 → 共享）；`author = {sessionId, delegationDepth, preset}` 无条件记录。
+**工具参数**：`recall` / `memory_browse` / `memory_relate` / `remember` 接受 `role`（视角/归属覆盖）；`update` / `forget` **不提供**越视野后门（只能改视野内条目）。
+**推荐骨架**（工作台部署，示例见 README）：`main: read ['*']`；`worker: read ['main']`；`verifier: read ['main'], kinds [fact, knowledge, summary], include_global false`；`ghost-*: read []`（隔间互不可见）。
+
 ## 6 · 边界与信任
 
 - **能力 ≠ 沙箱**：本能力不隔离、不鉴权、不加密；能读到存储文件的人都可改记忆。
+- **角色维度是视野管理，不是安全边界（v0.5 诚实声明）**：工具参数 `role` 可自述、记忆文件可被能读盘的人改写、共享记忆对所有角色可见——它防的是「不小心看见」与「默认继承上下文」，**不防蓄意越权**。要真正的隔离（幽灵隔间 / 多租户）必须配**独立 `DSH_HOME`**（另见 AGENTS.md §5.26 G1/G8）。
 - **信任边界**：信任 Caller（agent/插件）的内容决策；不信任输入形态——配置走 fail-loud 校验，工具参数走 `defineTool` schema 校验，持久化走 zod schema。
 - **不越界清单**：不做内容判断 ✅｜不做语义去重（只按标题指纹）✅｜不做跨设备同步 ✅｜不做凭据存储（工具描述明确「不用来记密钥/口令」）✅。
 - **失败面（每条都明确「拒绝」或「放行」，无静默二义）**：
@@ -194,6 +233,9 @@
 | 懒压缩失败 | `.catch(()=>{})` **静默**（v0.3 前的停摆根因，见 §9） |
 | 注入无命中 / 无 cwd / 配置关闭 | 不注入、不报错 |
 | `memoryApi` 失败 | 返回 `{error}`，调用方容错不阻塞 |
+| `roles` 段非法（未知键 / 空角色名 / 非字符串预设映射 / 非法 kinds） | **拒绝**：抛 `MemoryConfigError`（fail loud，同 I8） |
+| 条目被角色策略剔除 | 静默不出现在结果里（准入 ≠ 报错）；`memory_relate` 对视野外 id 返回 `ok:false`；`update`/`forget` 对视野外 id 报「未找到…（当前视野内）」 |
+| 会话无 id（无法判定身份） | 放行：按 `roles.default` 处理（保守可见全），理由随 `memory_health.roleReason` 透出 |
 
 ## 7 · 可证伪验收
 
@@ -217,8 +259,20 @@
 | A16 | **端到端幂等**：进程内任意并发组合下，同一 (scope, level, bucket) 只存在一条概要 | 修复**前**反例（保留为尸体样本）：生产库 4 对重复桶 `day 2026-08-24 / 08-26 / 08-30 / 09-10`；修复**后**证据：`tests/timeline.test.mjs` describe「并发幂等（2026-09-13 修复：重复概要桶）」2 用例（两实例并发 → `summarize` 只调 1 次 + 只 1 份概要 + 原料只归档一次；写前复核命中他方概要 → 让位且原料保持未归档） | ✔ 已实测（存量 4 对重复桶仍在库，属历史数据，见 U1 遗留） |
 | A17 | 周期补压：启动延迟首跑 + 周期轮询 + 单 scope 失败不静默 + dispose 清定时器 | 仅有代码路径（`src/periodic.ts` + `index.ts:200-226` 装配），**无单测文件**；生产日志未捕获 `周期补压` 输出（宿主流未落盘） | **待线上验收** |
 | A18 | 互斥原语语义：同键排队串行（任意时刻 ≤1 在临界区）、异键并行不退化、前序异常不毒化链、settle 后键不泄漏 | `tests/lock.test.mjs` 6 用例（含 50 并发样本） | ✔ 已实测 |
+| A19 | 人类会话判据：`session-<uuid>` 为真；裸 uuid / 空串 / 畸形为假 | `tests/role.test.mjs`「A19 isUserSessionId…」 | ✔ 已实测 |
+| A20 | 角色推导四级优先：显式 `role` > `by_preset[agentPreset]` > 人类会话缺省 > 派生会话缺省；**无 id → 人类缺省**（保守）；`roles` 段缺失 → 走缺省且总开关关闭 | `tests/role.test.mjs`「A20 角色推导…」「A20 roles 段缺失…」 | ✔ 已实测 |
+| A21 | 准入四判据 R1–R4：种类收窄 / 共享记忆可见性可关 / 自己放行 / 白名单（含 `'*'`）放行，其余拒绝 | `tests/role.test.mjs`「A21 准入判据 R1–R4」 | ✔ 已实测 |
+| A22 | **未启用 = 零过滤**：`applyRoleView` 返回**同一数组引用**（零拷贝，行为与 v0.4 一致） | `tests/role.test.mjs`「A22 未启用角色维度 → 同一数组引用透传」 | ✔ 已实测 |
+| A23 | `include_global: false` → 读作用域去掉 global；**显式 scope 参数优先于该配置** | `tests/role.test.mjs`「A23 include_global=false…」 | ✔ 已实测 |
+| A24 | 归属不可经写入转移：同 key 覆盖 / 同标题合并都**保留原条目 `role`** | `tests/role.test.mjs`「A24 归属只在新建时盖章…」 | ✔ 已实测 |
+| A25 | 工具层准入一致：`recall` / `memory_browse` / `memory_stats` / `memory_relate` / `update` / `forget` 同一视野——verifier 策略下看不见他人隔间、过程流与 global；视野外条目不可改；显式 `role` 可切视角 | `tests/role.test.mjs` 4 用例（「A25 recall：verifier…」「A25 memory_browse / memory_stats / memory_relate…」「A25 update / forget…」「A25 显式 role 参数…」） | ✔ 已实测 |
+| A26 | 兼容性：**无 `roles` 段的 v0.4 形状配置**不崩、零过滤（历史字面量活样本）、`memory_health` 如实报 `rolesEnabled=false` | `tests/role.test.mjs`「A26 …（v0.4 行为回归）」「A26 历史配置字面量…」；`tests/tools.test.ts` 的 `BASE_CONFIG` 即无 roles 段的活样本，全套仍绿 | ✔ 已实测 |
+| A27 | 写路径盖章：启用 roles → 盖调用者角色 + 记 `author`；未启用且未显式指定 → **不盖章（共享记忆）** | `tests/role.test.mjs`「A27 工具层写路径盖章…」 | ✔ 已实测 |
+| A28 | `roles` 段的配置解析：缺省/完整/非法（未知键、空角色名、非字符串预设映射）fail loud | `tests/config.test.ts`「roles：缺省段…」「roles：完整段…」+ 4 条非法用例 | ✔ 已实测 |
+| A29 | 生产会话按角色取数：主会话（`session-<uuid>`）→ `main`；子代理/队员（裸 uuid）→ `derived`；启用 roles 后注入面与工具面同一视野 | 待线上验收：以 `memory_health.role` 在主会话与一个真实子代理会话中各测一次 | **待线上验收** |
+| A30 | 旧客户端/旧配置并存下，其他插件经 `ctx.memoryApi.remember` 写入仍为共享记忆（不被静默划入某隔间） | 代码路径：`index.ts` 的 `memoryApi` 不传 `role`；待线上复核（下次插件回流时核对 `author`/`role` 字段） | **待线上复核** |
 
-> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=18, proven=17, pending=1`。
+> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=30, proven=28, pending=2`。
 
 ## 8 · 与实现的关系
 
@@ -238,6 +292,7 @@
 | `src/compaction-sink.ts` | 压缩即记忆（`session/event` → 保底落库 + 通知） |
 | `src/tools.ts` | 10 个工具定义 + 懒压缩钩子接线 |
 | `src/index.ts` | 装配：开域 / `memoryApi` / 注册工具 / 三个 install / 周期补压装配 |
+| `src/role.ts` | **v0.5 角色维度**（纯函数）：会话身份判据 / 角色推导 / 策略解析 / 四条准入判据 / 视野组装 / 读作用域收窄 |
 
 **未实现 / 未验证部分（显式标注）**：
 
@@ -275,6 +330,11 @@
    - **实现踩坑（自证，值得留档）**：首版把复核块插在 `store.remember` **之后** → 命中自己刚写的概要 → 提前 return → **原料永不归档**。跑测试时 7 项红拦下——注意：若只做「两实例并发只写一份概要」的浅断言，此 bug 会**静默通过**并发测试。教训：① **幂等复核必须紧贴写入之前，位置本身就是语义**；② 并发测试必须同时断言**副作用完整**（原料归档、`archiveRef`），只数产物份数会放过「该做的没做」。
    - 顺带收口：第 1 条的文本漂移（`README.md` / `tests/compaction-sink.test.ts` 头注与测试名 / `DESIGN.md` 两处的 `wakeup=false` → `true`）与第 6 条的记账缺口（新增 `test:ts` / `test:all`，README 数字回填实测）。
 
+8. **2026-09-15 · v0.5 角色维度（多智能体工作台模式）**
+   - 语义**被补充**：主人指令「借鉴 MAGE（arXiv:2608.29678）思路升级记忆插件以适应未来的多智能体工作台模式」⇒ 新增**归属**（写时盖章 `role` + `author`）与**准入**（读前按策略剔除）两条正交语义；判据 R1–R4、配置块 `roles`、`memory_health` 增 `role/rolesEnabled/roleReason`。
+   - **设计取舍（写下来免得将来重推）**：① **向后兼容优先**——`enabled` 缺省 false 且未启用时 `applyRoleView` 返回同一引用，674 条存量与全部历史测试行为不变；② **共享是缺省**（不盖章），宁可弱隔离也不让存量条目在启用瞬间消失；③ **不做安全边界**——诚实声明它防的是「不小心看见」与「默认继承上下文」，真正隔离要独立 `DSH_HOME`；④ **验收不自己验自己**（AGENTS.md §5.26 G8）用 `verifier` 策略在**检索层**实现：收窄 `kinds` + `include_global: false` + `read: []`（只看共享与自己的）。
+   - **实现踩坑（自证，值得留档）**：`tools.ts` 里 8 处工具 execute 都以 `const { config, cwd } = await resolveRuntime(...)` 开头——批量注入「视野」时漏改 3 处（update / forget / relate）只改了使用点没改解构点，**tsc 立刻以 TS18004（`No value exists in scope for the shorthand property 'view'`）拦下**。教训：**注入一个新上下文变量时，「解构点」与「使用点」必须同批改**——编译器能抓「用了没声明」，抓不到「声明了没用」。
+
 ## 10 · 未决问题
 
 - **U1 ~~端到端幂等如何补~~ → 已解决（2026-09-13）**：采纳方案 ① 的**强化版**——不是 scope 级单飞，而是按 (scope, level, bucket) 串行（粒度更细、并行度更高；scope 级会把该 scope 全部桶串行化）+ 写前复核兜跨进程。**遗留（需主人裁决）**：库中 4 对历史重复桶是否去重（`forget` 软归档其中一份即可，但动记忆数据属须请示类）。
@@ -283,3 +343,5 @@
 - **U4 ~~README / 测试名的 `wakeup=false` 文本~~ → 已解决（2026-09-13）**：四处（`README.md` §压缩即记忆、`tests/compaction-sink.test.ts` 头注 + 测试名、`DESIGN.md` §十 表格与通道 C 段）全部改为 `wakeup=true` 完成即送达，并标注 2026-08-16 修正来源；权威语义以行为与本文档为准。
 - **U5 年层与 `deprecated` 路径缺正向验证**：年概要从未产出（因 2026 年未结束）；同时「压缩链能否上探到年」没有测试或 dry-run 证据。倾向：补一个注入固定时钟的链式压缩测试（day→week→month→year 全链）。
 - **U6 `memory_check` 的对外承诺**：工具描述说「查看待沉淀建议」但恒空。倾向：要么下线该工具，要么在描述里更醒目地标注「未接线」（当前已有说明，但工具名本身仍是承诺）。
+- **U7 存量条目的隔间归属（需主人裁决）**：674 条存量条目全部为共享记忆——这对迁移安全是优点，对幽灵隔间是缺点（幽灵可读到全部历史）。选项：① 保持共享（靠独立 `DSH_HOME` 做真隔离）；② 一次性把某批 tag 的条目回填 `role`（= 批量改记忆数据，属须请示类）。倾向 ①。
+- **U8 记忆生命周期与价值体检（MAGE 借鉴的下一步）**：本插件目前只有 `archived` 布尔 + 无使用计数/衰减/价值函数，**读多写少的条目与只增不减的历史（79 条 checkpoint 占 33% 字符量）没有可计算判据**。路线：① 双时态（`validFrom/validTo`）与 `supersedes`/`invalidates` 链；② 只读体检器（按 `ν(x)=置信+溯源+时效+使用−年龄−成本` 排序输出「GC 候选/应降级/应保留」）；③ 事件超边层（多主体共同产出的事件作为一等条目）。**均为未实现**，需要时单独立项（语义文档先行）。
