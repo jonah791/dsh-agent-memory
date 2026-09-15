@@ -101,6 +101,99 @@ export interface MemoryConfig {
   }
   /** 角色维度配置（v0.5 多智能体工作台模式） */
   roles: RolesConfig
+  /** 价值体检配置（v0.6：只读提案器 memory_audit） */
+  audit: AuditConfig
+}
+
+/** 体检权重（`memory.yml` 的 `audit.weights`）——**启发式先验，不是拟合值**（校准是 v3 的事） */
+export interface AuditWeights {
+  ref: number
+  recent: number
+  usage: number
+  tag: number
+  role: number
+  size: number
+  dup: number
+}
+
+/** 体检档位（决策，不是排名） */
+export type AuditBucket = 'KEEP' | 'DEMOTE' | 'ARCHIVE' | 'REVIEW'
+
+/** 价值体检查询（memory_audit） */
+export interface AuditQuery {
+  scope?: string
+  /** 角色视角覆盖（缺省按调用者推导；体检是读路径 ⇒ 过角色准入） */
+  role?: string
+  /** 返回候选条数上限（缺省 30） */
+  topN?: number
+  /** 只列体量 ≥ 此字符数的候选（缺省 0 = 全部） */
+  minChars?: number
+  includeArchive?: boolean
+}
+
+/** 体检候选（单个条目的分档与证据） */
+export interface AuditCandidate {
+  id: string
+  kind: EntryKind
+  title: string
+  scope: string
+  bucket: AuditBucket
+  score: number
+  /** 人可读的证据行（为什么落这一档） */
+  reasons: string[]
+  evidence: {
+    ageDays: number
+    chars: number
+    refs: number
+    usage: number
+    tags: number
+    hasSource: boolean
+    role?: string
+    dupCluster?: number
+    dupOf?: string
+  }
+}
+
+/** 体检分组（按 kind/level 聚合，看「哪一坨最占地方」） */
+export interface AuditGroup {
+  key: string
+  label: string
+  count: number
+  chars: number
+  /** 该组主导档位 */
+  dominantBucket: AuditBucket
+}
+
+/** 体检结果 */
+export interface AuditResult {
+  summary: {
+    total: number
+    chars: number
+    byBucket: Record<AuditBucket, number>
+    charsByBucket: Record<AuditBucket, number>
+    /** 用量信号的来源：侧车轨迹 / 无 */
+    usageSource: 'trace' | 'none'
+    /** 被更晚条目引用过的条目数（承重计数） */
+    referenced: number
+  }
+  groups: AuditGroup[]
+  candidates: AuditCandidate[]
+  notes: string[]
+}
+
+/** 体检配置（`memory.yml` 的 `audit` 段） */
+export interface AuditConfig {
+  weights: AuditWeights
+  /** age ≤ 此天数的条目判 KEEP（保新，避免误伤在用的东西） */
+  keepRecentDays: number
+  /** age ≥ 此天数才够格判 ARCHIVE */
+  archiveMinAgeDays: number
+  /** 体量 ≥ 此字符数即入 REVIEW（超大条目交人裁决） */
+  reviewMinChars: number
+  /** 未被引用且体量 ≥ 此字符数即判 DEMOTE */
+  demoteMinChars: number
+  /** 侧车用量轨迹（只追加、吞错、按体积轮转；绝不改条目） */
+  accessTrace: { enabled: boolean; maxBytes: number }
 }
 
 /** 检索查询 */

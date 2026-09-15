@@ -25,6 +25,7 @@ import { statsOf, titleFingerprint } from './store.ts'
 import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
+import { auditMemory } from './audit.ts'
 
 /** 工具依赖：存储 + 配置加载（单测注入 mock 用） */
 export interface MemoryToolDeps {
@@ -34,6 +35,13 @@ export interface MemoryToolDeps {
   loadConfig?: (workspaceRoot: string) => Promise<MemoryConfig> | MemoryConfig
   /** 懒压缩钩子（T7 接线：TimelineCompressor.compressPending；访问记忆时补压上一自然单位，DESIGN.md §五） */
   compress?: (scope: string, agent?: Agent) => Promise<void>
+  /**
+   * 侧车用量轨迹写入（v0.6；缺省不落盘）。
+   * 实现方负责「只追加 / 吞错 / 按体积轮转」——工具层只负责把命中 id 交出去。
+   */
+  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[] }) => Promise<boolean> | void
+  /** 侧车轨迹读取（体检用；缺省/读失败 ⇒ undefined = 无用量信号） */
+  readAccess?: () => Promise<Map<string, { hits: number; lastAtMs: number }> | undefined>
 }
 
 /** 缺省配置加载器：读取 .dsh/memory.yml，缺失走默认，非法 fail loud */
@@ -283,7 +291,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       const includeArchive = args.includeArchive ?? false
       // 取数：作用域合并 → 视野收窄 → 角色准入过滤（v0.5 单点过滤）→ 检索管道
       const { entries } = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
-      return recallEntries(entries, {
+      const result = recallEntries(entries, {
         query: args.query,
         kind: args.kind,
         tags: args.tags,
@@ -292,6 +300,16 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         limit: args.limit,
         includeArchive,
       })
+      // 侧车用量轨迹（v0.6）：只交出命中 id，**绝不改条目**；失败静默（吞错在实现方）
+      if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined && result.results.length > 0) {
+        void deps.recordAccess({
+          atMs: Date.now(),
+          source: 'recall',
+          role: view.role,
+          ids: result.results.map((item) => item.id),
+        })
+      }
+      return result
     },
   })
 }
@@ -715,6 +733,111 @@ function buildCheck(): ToolDefinition {
 }
 
 /**
+ * 构建 memory_audit 工具（v0.6 价值体检器）——**只读提案器**。
+ * 硬约束（§5.9）：① 不归档不删除不写库 ② 过角色视野（读路径） ③ 分数是序数，权重是启发式先验。
+ */
+function buildAudit(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_audit',
+    description: '价值体检（只读）：回答「哪些条目值得继续占位置、哪些该降级/归档」。输出四档提案——KEEP（承重：被概要 archiveRef 引用 / 新 / 有角色归属）、DEMOTE（未引用且体量大，可降级压缩）、ARCHIVE（未引用 + 老 + 无溯源，归档候选）、REVIEW（近重复簇 / 超大条目，交人裁决）——每条带证据行，并给出按层级聚合的体量视图。**只读**：不归档、不删除、不刷新 accessedAt；分数是序数（权重为启发式先验，非拟合值）。',
+    parameters: {
+      scope: { type: 'string', description: '作用域覆盖（缺省当前 workspace + global；受调用者角色视野约束）。' },
+      role: { type: 'string', description: '角色视角覆盖（缺省按调用者会话身份推导）。' },
+      topN: { type: 'integer', description: '返回候选条数上限（缺省 30）。' },
+      minChars: { type: 'integer', description: '只列体量 ≥ 此字符数的候选（缺省 0 = 全部）。' },
+      includeArchive: { type: 'boolean', description: '是否把已归档条目也纳入体检（缺省 false）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          summary: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              total: { type: 'integer', required: true },
+              chars: { type: 'integer', required: true },
+              byBucket: { type: 'object', additionalProperties: true, required: true },
+              charsByBucket: { type: 'object', additionalProperties: true, required: true },
+              usageSource: { type: 'string', required: true },
+              referenced: { type: 'integer', required: true },
+            },
+          },
+          groups: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                key: { type: 'string', required: true },
+                label: { type: 'string', required: true },
+                count: { type: 'integer', required: true },
+                chars: { type: 'integer', required: true },
+                dominantBucket: { type: 'string', required: true },
+              },
+            },
+          },
+          candidates: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                kind: { type: 'string', required: true },
+                title: { type: 'string', required: true },
+                scope: { type: 'string', required: true },
+                bucket: { type: 'string', required: true },
+                score: { type: 'number', required: true },
+                reasons: { type: 'array', required: true, items: { type: 'string' } },
+                evidence: { type: 'object', additionalProperties: true, required: true },
+              },
+            },
+          },
+          notes: { type: 'array', required: true, items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => {
+        const b = value.summary.byBucket
+        const cb = value.summary.charsByBucket
+        const lines = [
+          `记忆体检（只读提案）：${value.summary.total} 条 / ${value.summary.chars} 字符；承重 ${value.summary.referenced} 条｜用量信号：${value.summary.usageSource === 'trace' ? '侧车轨迹' : '无（usage 项恒 0）'}`,
+          `分档：KEEP ${b['KEEP']}(${cb['KEEP']}) · DEMOTE ${b['DEMOTE']}(${cb['DEMOTE']}) · ARCHIVE ${b['ARCHIVE']}(${cb['ARCHIVE']}) · REVIEW ${b['REVIEW']}(${cb['REVIEW']})`,
+          `体量前三组：${value.groups.slice(0, 3).map((g) => `${g.label} ${g.count} 条/${g.chars} 字`).join(' · ')}`,
+        ]
+        for (const candidate of value.candidates.slice(0, 10)) {
+          const title = candidate.title.length > 42 ? candidate.title.slice(0, 41) + '…' : candidate.title
+          lines.push(`- [${candidate.bucket}] ${title}（${candidate.evidence['chars']} 字 · ${candidate.evidence['ageDays']} 天 · ${candidate.evidence['refs']} 引用）${candidate.reasons[0] ?? ''}`)
+        }
+        if (value.candidates.length > 10) {
+          lines.push(`（另有 ${value.candidates.length - 10} 条候选，见结构化返回）`)
+        }
+        lines.push('提案 ≠ 裁决：本工具不归档不删除；要做请显式调用 forget（动记忆数据属须请示类）。')
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      const includeArchive = args.includeArchive ?? false
+      // 视野一致（硬约束 ②）：体检是读路径，提案只含调用者视野内的条目
+      const { entries } = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
+      const usage = deps.readAccess === undefined ? undefined : await deps.readAccess()
+      return auditMemory({
+        entries,
+        ...(config.audit !== undefined ? { config: config.audit } : {}),
+        ...(usage !== undefined ? { usage } : {}),
+        query: { topN: args.topN, minChars: args.minChars, includeArchive },
+      })
+    },
+  })
+}
+
+/**
  * 构建六个记忆工具定义（纯函数，单测可直接取 execute 跑行为）。
  * @param deps - 存储 + 配置加载依赖
  * @returns 六条 registry-ready 工具定义
@@ -728,6 +851,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildUpdate(deps),
     buildForget(deps),
     buildStats(deps),
+    buildAudit(deps),
     buildCheck(),
     buildHealth(deps),
     buildVersion(),

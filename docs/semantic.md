@@ -14,9 +14,9 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 30 项：29 项已实测 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
-| 版本 | v0.3（文档）· 对应插件 v0.5.0（`package.json`）——v0.5 新增**角色维度**（多智能体工作台模式：归属 + 准入） |
-| 实现落点 | `self-plugins/dsh-agent-memory/src/`（15 个模块，见 §8） |
+| 状态 | **implemented**（验收 43 项：41 项已实测 / 1 项待线上验收 / 1 项待线上复核；`pending>0` 故**不得**标 verified） |
+| 版本 | v0.4（文档）· 对应插件 v0.6.0（`package.json`）——v0.5 角色维度（归属 + 准入）；v0.6 价值体检器（只读提案 + 侧车用量轨迹） |
+| 实现落点 | `self-plugins/dsh-agent-memory/src/`（17 个模块，见 §8） |
 | 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（`config.maxTokens: 16000`） |
 | 作者 / 日期 | 爱丽丝 · 2026-09-13 |
 | 相关规则 | AGENTS.md §5.20（语义文档系统）；§5.8（记忆检索纪律） |
@@ -213,6 +213,52 @@
 **工具参数**：`recall` / `memory_browse` / `memory_relate` / `remember` 接受 `role`（视角/归属覆盖）；`update` / `forget` **不提供**越视野后门（只能改视野内条目）。
 **推荐骨架**（工作台部署，示例见 README）：`main: read ['*']`；`worker: read ['main']`；`verifier: read ['main'], kinds [fact, knowledge, summary], include_global false`；`ghost-*: read []`（隔间互不可见）。
 
+### 5.9 价值体检器契约（v0.6 · `memory_audit`）
+
+**定位**：**只读提案器**，回答唯一问题——「库里哪些条目值得继续占位置，哪些该降级/归档」（给证据行，不给感觉）。**提案 ≠ 裁决**：它不归档、不删除、不写库、不刷新 `accessedAt`；动记忆数据归 agent（且属须请示类）。
+
+**输入信号（先量后设计 · 2026-09-15 实测 676 条）**：
+
+| 信号 | 有无 | 取证 |
+|------|------|------|
+| 时间（createdAt/updatedAt/accessedAt） | ✅ | **读路径不刷新 `accessedAt`**：676 条中 180 条 `accessedAt≠updatedAt`，而 180 **恰等于归档数** ⇒ 差异只来自归档动作 |
+| 引用结构（`archiveRef` 承重） | ✅ | 177/676 条被概要引用 |
+| 体量（字符） | ✅ | 活跃 496 条 / 683,315 字符 |
+| 标签 | ✅ | 仅 2 条无标签 |
+| 近重复 | ✅ | 标题指纹 6 簇 / 13 条 |
+| 溯源（`source` / `role`） | ⚠ 弱 | 473 条无 `source`（权重给低） |
+| 使用次数 `u(x)` / 增益 `g(x)` / 矛盾数 `cnt(x)` / 置信 `κ(x)` | ⚠ 由**侧车轨迹**补 `u(x)` 一项 | 见下「逻辑轨迹」；其余三项本版**不假装有** |
+
+**评分（序数；不宣称绝对值有意义）**：
+
+```
+score(x) = w_ref·承重 + w_rec·recency + w_use·usage + w_tag·标签 + w_role·归属
+         − w_size·体量 − w_dup·重复
+recency = exp(−age/S)，S = 30 天（MAGE 的 R(x,t)，减复述项）
+usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只少一项证据）
+```
+
+权重来自 `memory.yml` 的 `audit.weights`（**启发式先验，不是拟合值**——校准是 v3 的事，需要「提案被采纳/否决 + 事后是否后悔」的样本）。
+
+**四档判据（输出决策 + 理由，不是排行榜）**：
+
+| 档 | 判据（按序判定） |
+|----|-----------------|
+| `REVIEW` | 落在近重复簇 / 体量超 `review_min_chars` / 层级异常 → 交人裁决 |
+| `KEEP` | 被 `archiveRef` 引用（承重原料）**或** age ≤ `keep_recent_days` **或** 有 `role`+`author` |
+| `ARCHIVE` | 未被引用 且 age ≥ `archive_min_age_days` 且 无 `source` 且 已被概要覆盖（同 kind 存在更晚概要） |
+| `DEMOTE` | 其余「未被引用且体量 ≥ `demote_min_chars`」（可降级：并入上级概要/压缩） |
+
+**输出形状**：`memory_audit({ scope?, role?, topN?, minChars?, includeArchive? })` →
+`{ summary: { total, chars, byBucket, charsByBucket }, groups: [{ key, kind/level/tag, count, chars, bucket }], candidates: [{ id, kind, title, bucket, score, reasons[], evidence }], notes[] }`。
+
+**逻辑轨迹（侧车，v0.6 起采集）**：`<DSH_HOME>/memory-access-trace.jsonl` —— 一行一次读命中：`{atMs, source:'recall'|'auto', role, ids:[…]}`。写入**只追加**（POSIX append，天然免锁）、**吞错**（失败即跳过，不影响 recall）、**按体积轮转**（超 `access_trace.max_bytes` 改名为 `.1` 重开），**绝不改条目**。审计器只读它，缺文件 ⇒ `usage=0`。
+
+**硬约束（三条，均可断言）**：
+1. **只读**：跑完存储文件内容不变、`accessedAt` 不变（判据：跑前后字节级一致）
+2. **视野一致**：`memory_audit` 是读路径 ⇒ 过 `applyRoleView`（提案只含调用者视野内的条目）
+3. **不做自动处置**：无 `--apply`、无定时归档；删除/归档由 agent 显式发起
+
 ## 6 · 边界与信任
 
 - **能力 ≠ 沙箱**：本能力不隔离、不鉴权、不加密；能读到存储文件的人都可改记忆。
@@ -271,6 +317,19 @@
 | A28 | `roles` 段的配置解析：缺省/完整/非法（未知键、空角色名、非字符串预设映射）fail loud | `tests/config.test.ts`「roles：缺省段…」「roles：完整段…」+ 4 条非法用例 | ✔ 已实测 |
 | A29 | 生产会话按角色取数：主会话（`session-<uuid>`）→ `main`；派生会话（子代理 / 队员）→ 派生角色；启用 roles 后注入面与工具面同一视野 | ✔ **线上实测**（2026-09-15 17:4x，插件 v0.5.0 + `E:\alice\.dsh\memory.yml` 已启用）：主会话 `memory_health` → `角色 main（角色维度已启用；判据：人类会话（session-<uuid>））`；**真实子代理会话**（subagent `7756cf92`，`delegationDepth=1`）→ `角色 worker（角色维度已启用；判据：派生会话（delegationDepth=1））`；两次 `memory_version` 均报 `0.5.0（build 2026-09-15T09:43:04）` | ✔ 已实测 |
 | A30 | 其他插件经 `ctx.memoryApi.remember` 写入仍为共享记忆（不被静默划入某隔间） | 代码路径：`index.ts` 的 `memoryApi` 不传 `role`（`author` 亦不伪造）；待线上复核（下次插件回流时核对 `role` 字段缺省） | **待线上复核** |
+| A31 | **只读**：`memory_audit` 跑完库内容逐字不变、`accessedAt` 不被刷新；体检自身不写用量轨迹 | `tests/audit.test.mjs`「A31 只读：…（零写入）」「A31b memory_audit 不写轨迹…」 | ✔ 已实测 |
+| A32 | **承重必 KEEP（反例）**：被 `archiveRef` 引用的原料即使又老又无溯源也判 KEEP——不得建议归档掉自己赖以回溯的原料 | `tests/audit.test.mjs`「A32 承重原料必为 KEEP…（反例）」 | ✔ 已实测 |
+| A33 | recency 单调：其余相同，越新分数越高（exp(−age/30)） | `tests/audit.test.mjs`「A33 recency 单调…」 | ✔ 已实测 |
+| A34 | 体量惩罚单调：其余相同，越大分数越低 | `tests/audit.test.mjs`「A34 体量惩罚单调…」 | ✔ 已实测 |
+| A35 | 近重复簇：同标题（归一化）条目同簇、canonical 取最新、成员全部进 REVIEW | `tests/audit.test.mjs`「A35 近重复簇…」 | ✔ 已实测 |
+| A36 | 分档顺序可复现：REVIEW（体量/重复）→ KEEP（承重）→ KEEP（新）→ ARCHIVE → DEMOTE → KEEP（小兜底）；候选排序按「需要动作」档位聚类 | `tests/audit.test.mjs`「A36 分档顺序可复现…」 | ✔ 已实测 |
+| A37 | 对账：各档条数与字符合计 = 输入总量（分组视图同样对账，不漏不多） | `tests/audit.test.mjs`「A37 对账…」 | ✔ 已实测 |
+| A38 | 视野一致：体检是读路径 ⇒ 过 `applyRoleView`（verifier 策略下提案只含共享条目） | `tests/audit.test.mjs`「A38 视野一致…」 | ✔ 已实测 |
+| A39 | 侧车轨迹：只追加一行/次、坏行跳过不抛、超限轮转为 `.1`、写失败返回 `false`（吞错）、空 ids 不写 | `tests/audit.test.mjs`「A39 侧车轨迹…」 | ✔ 已实测 |
+| A40 | 用量项：有轨迹时命中多的分更高；无轨迹 ⇒ `usage=0` 且 `usageSource='none'`（公式不失真，只少一项证据） | `tests/audit.test.mjs`「A40 用量项…」 | ✔ 已实测 |
+| A41 | `audit` 配置：缺省走先验、覆盖生效、非法 fail-loud（未知键 / 负权重 / 字符串天数 / 小数 max_bytes） | `tests/audit.test.mjs`「A41 audit 配置…」「A41b 无 audit 段的历史配置…」 | ✔ 已实测 |
+| A42 | 工具面 11 个（新增 `memory_audit`），描述含「只读」承诺 | `tests/audit.test.mjs`「A42 工具面…」；`tests/tools.test.ts`「工具齐备，名称与契约一致」 | ✔ 已实测 |
+| A43 | **线上**：`recall` / auto-recall 在真实 `DSH_HOME` 落 `<DSH_HOME>/memory-access-trace.jsonl`，体检读到该轨迹（`usageSource='trace'`） | 待线上验收：跑一次真实 recall 后 `memory_audit` 应报 `usageSource='trace'` | **待线上验收** |
 
 > 测量口径：`pending = total − proven`（fail-closed）。本表 `total=30, proven=29, pending=1`。
 > A29 旁注（诚实）：`by_preset` 预设映射分支本次**未在线上观测到**（该子代理会话头未带 `agentPreset`，走的是派生缺省）——该分支由 A20 单测覆盖。
@@ -295,6 +354,8 @@
 | `src/tools.ts` | 10 个工具定义 + 懒压缩钩子接线 |
 | `src/index.ts` | 装配：开域 / `memoryApi` / 注册工具 / 三个 install / 周期补压装配 |
 | `src/role.ts` | **v0.5 角色维度**（纯函数）：会话身份判据 / 角色推导 / 策略解析 / 四条准入判据 / 视野组装 / 读作用域收窄 |
+| `src/audit.ts` | **v0.6 价值体检器**（纯函数）：引用索引（承重）/ 标签复用 / 近重复簇 / 评分（七项）/ 四档裁决（REVIEW→KEEP→ARCHIVE→DEMOTE）/ 分组聚合；只读，不改条目 |
+| `src/access-trace.ts` | **v0.6 侧车用量轨迹**：追加（JSONL）/ 坏行跳过 / 按体积轮转 / 吞错；`parseAccessTrace` 纯函数离线可测 |
 
 **未实现 / 未验证部分（显式标注）**：
 
@@ -337,6 +398,12 @@
    - **设计取舍（写下来免得将来重推）**：① **向后兼容优先**——`enabled` 缺省 false 且未启用时 `applyRoleView` 返回同一引用，674 条存量与全部历史测试行为不变；② **共享是缺省**（不盖章），宁可弱隔离也不让存量条目在启用瞬间消失；③ **不做安全边界**——诚实声明它防的是「不小心看见」与「默认继承上下文」，真正隔离要独立 `DSH_HOME`；④ **验收不自己验自己**（AGENTS.md §5.26 G8）用 `verifier` 策略在**检索层**实现：收窄 `kinds` + `include_global: false` + `read: []`（只看共享与自己的）。
    - **实现踩坑（自证，值得留档）**：`tools.ts` 里 8 处工具 execute 都以 `const { config, cwd } = await resolveRuntime(...)` 开头——批量注入「视野」时漏改 3 处（update / forget / relate）只改了使用点没改解构点，**tsc 立刻以 TS18004（`No value exists in scope for the shorthand property 'view'`）拦下**。教训：**注入一个新上下文变量时，「解构点」与「使用点」必须同批改**——编译器能抓「用了没声明」，抓不到「声明了没用」。
 
+9. **2026-09-15 · v0.6 价值体检器（只读提案器 + 侧车用量轨迹）**
+   - 语义**被补充**：主人「价值体检器你打算怎么设计」→「可以」⇒ 新增 §5.9 契约与 `memory_audit`（第 11 个工具）。
+   - **先量后设计（关键教训）**：设计前先量了生产库，才发现 **MAGE 的四项输入我一项都没有**——尤其「读路径不刷新 `accessedAt`」（676 条中仅 180 条 `accessedAt≠updatedAt`，而 180 **恰好等于归档数** ⇒ 差异全来自归档动作，不是「被读过」）。⇒ 判据改成「**有就用，没有就承认**」：只用 refs/age/chars/tags/dup 五项真信号 + 补一层侧车轨迹换成 `u(x)`，其余三项（增益/矛盾/置信）**明确不假装有**。
+   - **设计取舍（写下来免得将来重推）**：① **提案 ≠ 裁决**——工具只读，不归档不删除；② **承重不可推翻**（A32 反例：被 `archiveRef` 引用的原料即使又老又无溯源也判 KEEP——否则就是建议我归档掉自己赖以回溯的素材）；③ **权重是启发式先验不是拟合值**，校准（记录提案被采纳/否决）留到 v3；④ 用量轨迹**只追加 + 吞错 + 轮转 + 绝不改条目**（读路径不得产生记忆库写副作用）。
+   - **顺带暴露的事实**：本库 31 条 day 概要占 193,348 字符（均 6,237 字/天）——「概要比原料还厚」的嫌疑已由体检器 `REVIEW` 档自动标出，不需人肉发现。
+
 ## 10 · 未决问题
 
 - **U1 ~~端到端幂等如何补~~ → 已解决（2026-09-13）**：采纳方案 ① 的**强化版**——不是 scope 级单飞，而是按 (scope, level, bucket) 串行（粒度更细、并行度更高；scope 级会把该 scope 全部桶串行化）+ 写前复核兜跨进程。**遗留（需主人裁决）**：库中 4 对历史重复桶是否去重（`forget` 软归档其中一份即可，但动记忆数据属须请示类）。
@@ -346,4 +413,4 @@
 - **U5 年层与 `deprecated` 路径缺正向验证**：年概要从未产出（因 2026 年未结束）；同时「压缩链能否上探到年」没有测试或 dry-run 证据。倾向：补一个注入固定时钟的链式压缩测试（day→week→month→year 全链）。
 - **U6 `memory_check` 的对外承诺**：工具描述说「查看待沉淀建议」但恒空。倾向：要么下线该工具，要么在描述里更醒目地标注「未接线」（当前已有说明，但工具名本身仍是承诺）。
 - **U7 存量条目的隔间归属（需主人裁决）**：674 条存量条目全部为共享记忆——这对迁移安全是优点，对幽灵隔间是缺点（幽灵可读到全部历史）。选项：① 保持共享（靠独立 `DSH_HOME` 做真隔离）；② 一次性把某批 tag 的条目回填 `role`（= 批量改记忆数据，属须请示类）。倾向 ①。
-- **U8 记忆生命周期与价值体检（MAGE 借鉴的下一步）**：本插件目前只有 `archived` 布尔 + 无使用计数/衰减/价值函数，**读多写少的条目与只增不减的历史（79 条 checkpoint 占 33% 字符量）没有可计算判据**。路线：① 双时态（`validFrom/validTo`）与 `supersedes`/`invalidates` 链；② 只读体检器（按 `ν(x)=置信+溯源+时效+使用−年龄−成本` 排序输出「GC 候选/应降级/应保留」）；③ 事件超边层（多主体共同产出的事件作为一等条目）。**均为未实现**，需要时单独立项（语义文档先行）。
+- **U8 记忆生命周期与价值体检（MAGE 借鉴的下一步）**：~~① 只读体检器（按 ν(x) 排序输出「GC 候选/应降级/应保留」）~~ → **已交付 v0.6**（`memory_audit` + 侧车用量轨迹，见 §5.9）。**仍缺**：② **双时态**（`validFrom/validTo`）+ `supersedes`/`invalidates` 链（现在只有布尔 `archived`，删除不留失效证据）；③ **事件超边层**（多主体共同产出的事件作为一等条目——v0.5 的 `role` 只解决分区，不解决「谁+什么动作+哪份证据共同产出了这个结论」）；④ 权重校准（需要「提案被采纳/否决 + 事后是否后悔」的样本）。

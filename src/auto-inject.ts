@@ -31,6 +31,8 @@ import { recallEntries } from './search.ts'
 export interface AutoRecallInjectDeps {
   store: MemoryStore
   loadConfig: (workspaceRoot: string) => Promise<MemoryConfig> | MemoryConfig
+  /** 侧车用量轨迹写入（v0.6；缺省不落盘）。吞错由实现方负责——注入绝不能因它失败 */
+  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[] }) => Promise<boolean> | void
 }
 
 /** snippet 最大长度（字符） */
@@ -154,6 +156,16 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
       maxEntries: config.autoInject.maxEntries,
       maxBytes: config.autoInject.maxBytes,
     })
+    // 侧车用量轨迹（v0.6）：auto-recall 命中同样是「被用到」的证据；失败静默
+    if (digest.length > 0 && config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
+      const hitIds = recallEntries(merged, {
+        query: found.text.length > QUERY_MAX ? found.text.slice(0, QUERY_MAX) : found.text,
+        limit: config.autoInject.maxEntries,
+      }).results.map((item) => item.id)
+      if (hitIds.length > 0) {
+        void deps.recordAccess({ atMs: Date.now(), source: 'auto', role: view.role, ids: hitIds })
+      }
+    }
     if (digest.length === 0) return decision
 
     signal.throwIfAborted()

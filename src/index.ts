@@ -23,6 +23,10 @@ import { installAutoRecallInject } from './auto-inject.ts'
 import { installCompactionSink } from './compaction-sink.ts'
 import { installPeriodicCompress } from './periodic.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
+import { appendAccessTrace, readAccessIndex } from './access-trace.ts'
+import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
 import type { Entry } from './types.ts'
 
 // ---------- 持久化域 ----------
@@ -129,6 +133,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   ctx.effect(() => () => domain.close(), 'agent-memory.domainClose')
   const store = new MemoryStore(domain.table('entries'))
 
+  // 侧车用量轨迹（v0.6 价值体检器的用量信号）——**只追加 / 吞错 / 按体积轮转**，绝不改条目。
+  // 路径约定与既有插件同源：`<DSH_HOME>/<plugin>-trace.jsonl`。
+  const dshHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
+  const accessTracePath = join(dshHome, 'memory-access-trace.jsonl')
+  const recordAccess: NonNullable<MemoryToolDeps['recordAccess']> = (record) =>
+    appendAccessTrace(accessTracePath, record, DEFAULT_AUDIT_CONFIG.accessTrace.maxBytes)
+  const readAccess: NonNullable<MemoryToolDeps['readAccess']> = () => readAccessIndex(accessTracePath)
+
   // 记忆回流服务提供（2026-09-06）：供 emotion/taskboard/evolution-core/skill-forge 注入消费。
   // 复用 store.remember（L1 key 覆盖 / L2/L3 指纹合并），容错返回 error 不抛。
   ctx.provide('memoryApi', {
@@ -192,14 +204,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     await compressor.compressPending(scope)
   }
 
-  // 4. 注册七个记忆工具（remember/recall/memory_browse/update/forget/memory_stats/memory_check）
-  registerMemoryTools(ctx, { store, loadConfig, compress })
+  // 4. 注册记忆工具（remember/recall/update/forget/browse/relate/stats/audit/health/version/check）
+  registerMemoryTools(ctx, { store, loadConfig, compress, recordAccess, readAccess })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })
 
   // 5b. 自动 recall 注入（L3 2026-09-01）：每条新主人消息注入 top 命中（尾追加，缓存友好）
-  installAutoRecallInject(ctx, { store, loadConfig })
+  installAutoRecallInject(ctx, { store, loadConfig, recordAccess })
 
   // 6. 压缩即记忆（v0.2 通道 C）：compaction 成功 → checkpoint 自动落库
   installCompactionSink(ctx, { store })

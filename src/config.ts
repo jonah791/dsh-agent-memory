@@ -14,7 +14,8 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import { DEFAULT_ROLES_CONFIG } from './role.ts'
-import type { EntryKind, MemoryConfig, RolePolicy, RolesConfig } from './types.ts'
+import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
+import type { AuditConfig, AuditWeights, EntryKind, MemoryConfig, RolePolicy, RolesConfig } from './types.ts'
 
 /** 合法条目层级（memory.yml layers 字段取值域） */
 const VALID_KINDS: readonly string[] = ['fact', 'knowledge', 'episodic', 'summary']
@@ -33,6 +34,7 @@ const TOP_LEVEL_KEYS: ReadonlySet<string> = new Set([
   'inject',
   'auto_inject',
   'roles',
+  'audit',
 ])
 
 /** inject 块内合法键 */
@@ -43,6 +45,22 @@ const AUTO_INJECT_KEYS: ReadonlySet<string> = new Set(['enabled', 'max_bytes', '
 
 /** timeline 块内合法键 */
 const TIMELINE_KEYS: ReadonlySet<string> = new Set(['day', 'week', 'month', 'year', 'archive'])
+
+/** audit 块内合法键（v0.6 价值体检器） */
+const AUDIT_KEYS: ReadonlySet<string> = new Set([
+  'weights',
+  'keep_recent_days',
+  'archive_min_age_days',
+  'review_min_chars',
+  'demote_min_chars',
+  'access_trace',
+])
+
+/** audit.weights 内合法键（与 AuditWeights 逐字一致） */
+const WEIGHT_KEYS: ReadonlySet<string> = new Set(['ref', 'recent', 'usage', 'tag', 'role', 'size', 'dup'])
+
+/** audit.access_trace 内合法键 */
+const ACCESS_TRACE_KEYS: ReadonlySet<string> = new Set(['enabled', 'max_bytes'])
 
 /** roles 块内合法键 */
 const ROLES_KEYS: ReadonlySet<string> = new Set([
@@ -82,6 +100,7 @@ export const DEFAULT_CONFIG: MemoryConfig = deepFreeze({
     maxEntries: 3,
   },
   roles: DEFAULT_ROLES_CONFIG,
+  audit: DEFAULT_AUDIT_CONFIG,
 })
 
 /** 配置非法时抛出的错误类型（fail loud 的载体） */
@@ -132,6 +151,7 @@ export function resolveMemoryConfig(raw: unknown): MemoryConfig {
     inject: injectOrDefault(raw.inject),
     autoInject: autoInjectOrDefault(raw.auto_inject),
     roles: rolesOrDefault(raw.roles),
+    audit: auditOrDefault(raw.audit),
   })
 }
 
@@ -409,8 +429,83 @@ function readListOrDefault(value: unknown, fallback: string[] | undefined, name:
   return out
 }
 
-/** 深度冻结（防止调用方误改共享配置对象） */
-function deepFreeze<T>(value: T): T {
+// ---------- audit 段（v0.6 价值体检器） ----------
+
+/** audit 块：字段级缺省 + 未知键拒绝 */
+function auditOrDefault(value: unknown): AuditConfig {
+  if (value === undefined || value === null) return DEFAULT_AUDIT_CONFIG
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError(
+      'memory.yml: audit 必须是映射（weights/keep_recent_days/archive_min_age_days/review_min_chars/demote_min_chars/access_trace）',
+    )
+  }
+  assertNoUnknownKeys(value, AUDIT_KEYS, 'memory.yml.audit')
+  return deepFreeze({
+    weights: weightsOrDefault(value.weights),
+    keepRecentDays: nonNegativeNumberOrDefault(value.keep_recent_days, DEFAULT_AUDIT_CONFIG.keepRecentDays, 'audit.keep_recent_days'),
+    archiveMinAgeDays: nonNegativeNumberOrDefault(value.archive_min_age_days, DEFAULT_AUDIT_CONFIG.archiveMinAgeDays, 'audit.archive_min_age_days'),
+    reviewMinChars: nonNegativeIntOrDefault(value.review_min_chars, DEFAULT_AUDIT_CONFIG.reviewMinChars, 'audit.review_min_chars'),
+    demoteMinChars: nonNegativeIntOrDefault(value.demote_min_chars, DEFAULT_AUDIT_CONFIG.demoteMinChars, 'audit.demote_min_chars'),
+    accessTrace: accessTraceOrDefault(value.access_trace),
+  })
+}
+
+/** audit.weights：逐项非负数（缺省走默认先验） */
+function weightsOrDefault(value: unknown): AuditWeights {
+  const base = DEFAULT_AUDIT_CONFIG.weights
+  if (value === undefined || value === null) return { ...base }
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError('memory.yml: audit.weights 必须是映射（ref/recent/usage/tag/role/size/dup）')
+  }
+  assertNoUnknownKeys(value, WEIGHT_KEYS, 'memory.yml.audit.weights')
+  return {
+    ref: nonNegativeNumberOrDefault(value.ref, base.ref, 'audit.weights.ref'),
+    recent: nonNegativeNumberOrDefault(value.recent, base.recent, 'audit.weights.recent'),
+    usage: nonNegativeNumberOrDefault(value.usage, base.usage, 'audit.weights.usage'),
+    tag: nonNegativeNumberOrDefault(value.tag, base.tag, 'audit.weights.tag'),
+    role: nonNegativeNumberOrDefault(value.role, base.role, 'audit.weights.role'),
+    size: nonNegativeNumberOrDefault(value.size, base.size, 'audit.weights.size'),
+    dup: nonNegativeNumberOrDefault(value.dup, base.dup, 'audit.weights.dup'),
+  }
+}
+
+/** audit.access_trace：侧车轨迹开关与轮转阈值 */
+function accessTraceOrDefault(value: unknown): AuditConfig['accessTrace'] {
+  const base = DEFAULT_AUDIT_CONFIG.accessTrace
+  if (value === undefined || value === null) return { ...base }
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError('memory.yml: audit.access_trace 必须是映射（enabled/max_bytes）')
+  }
+  assertNoUnknownKeys(value, ACCESS_TRACE_KEYS, 'memory.yml.audit.access_trace')
+  return {
+    enabled: booleanOrDefault(value.enabled, base.enabled, 'audit.access_trace.enabled'),
+    maxBytes: nonNegativeIntOrDefault(value.max_bytes, base.maxBytes, 'audit.access_trace.max_bytes'),
+  }
+}
+
+/** 非负数字段（年龄/天数允许小数；负数与 NaN/Infinity 拒绝） */
+function nonNegativeNumberOrDefault(value: unknown, fallback: number, name: string): number {
+  if (value === undefined || value === null) return fallback
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new MemoryConfigError(
+      `memory.yml: ${name} 必须是非负有限数字（实际：${JSON.stringify(value)}）`,
+    )
+  }
+  return value
+}
+
+/** 非负整数字段（0 合法：如 max_bytes=0 表示不轮转） */
+function nonNegativeIntOrDefault(value: unknown, fallback: number, name: string): number {
+  if (value === undefined || value === null) return fallback
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new MemoryConfigError(
+      `memory.yml: ${name} 必须是非负整数（实际：${JSON.stringify(value)}）`,
+    )
+  }
+  return value
+}
+
+/** 深度冻结（防止调用方误改共享配置对象） */function deepFreeze<T>(value: T): T {
   if (typeof value === 'object' && value !== null) {
     for (const key of Object.keys(value)) {
       deepFreeze((value as Record<string, unknown>)[key])

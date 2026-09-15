@@ -17,6 +17,7 @@ import {
   parseMemoryConfig,
   resolveMemoryConfig,
 } from '../src/config.ts'
+import { DEFAULT_AUDIT_CONFIG } from '../src/audit.ts'
 
 // ---------- 1. 缺省态 ----------
 
@@ -111,6 +112,8 @@ test('完整：全部字段 → 原样生效', () => {
       policyDefault: { read: ['*'], includeShared: true, includeGlobal: true },
       policies: {},
     },
+    // audit 未在 YAML 指定 → 走缺省（v0.6 价值体检器先验）
+    audit: DEFAULT_AUDIT_CONFIG,
   })
 })
 
