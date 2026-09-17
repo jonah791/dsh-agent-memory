@@ -129,18 +129,19 @@
 
 优先级：**显式参数 > 配置模式 > 无 cwd 降级**。
 
-### 5.4 工具面（11 个，均 `defineTool` 注册）
+### 5.4 工具面（12 个，均 `defineTool` 注册）
 
 | 工具 | 语义要点 |
 |------|---------|
 | `remember` | 写入；L1 key 覆盖 / L2·L3 合并 / 新建；受 `max_entries` 守卫（仅新建）；`kind` 未在 `layers` 启用 → fail loud |
 | `recall` | 检索：关键词/层级/标签/时间过滤 + 相关度（标签3 > 标题2 > 正文1）与新鲜度排序；**每个结果附 `related` 联想链** |
-| `update` | 按 id 改正文（首行作新标题）/ 替换 tags |
-| `forget` | 软归档 + 记 `reason`（未知 id 报错） |
+| `update` | 按 id 修订；**v0.9 三模式**：`replace`（缺省·`text` 首行作标题、全文作正文）/ `append`（追加到正文末尾）/ `patch`（`find`→`replace`，**要求唯一命中**，0 处或多处一律 fail loud）；内容真变即落**修订快照**（`revisions`，保留最近 3 条）；`tags` 整体替换 |
+| `forget` | 软归档（`archived=true`，`reason` 记入 `source`）；**v0.9 三种选择器**：`id`（单条·未命中报错）/ `ids[]`（批量）/ `tier`（按 `memory_audit` 分档批量：`ARCHIVE`/`DEMOTE`/`REVIEW`，**`KEEP` 被拒**）；`max` 护栏（缺省 100 / 硬上限 500）+ `dryRun` 预览；批量自动记 `forget: bulk（N 条）` |
+| `memory_merge` | **v0.9 合并原语**：把 `ids` 的正文并入 `canonical`（带「合并自 <id>（<title>）」来源标注，**信息不丢**），随后软归档之；`strategy=keep-canonical` 只归档不动正文；跳过分支（canonical 自身 / 列表内重复 / 不存在 / 已归档）逐条回报 |
 | `memory_browse` | 时间金字塔浏览（层级/时间/标签过滤 + 分页），「不知道有什么」时的发现路径 |
 | `memory_relate` | 按 id 展开关联网络；`depth>1` 走 BFS 多跳闭包（`hop` 标注、visited 防环） |
 | `memory_stats` | 各层/桶/归档计数（跨 scope 聚合） |
-| `memory_audit` | **只读提案器**（v0.6 §5.9）：KEEP / DEMOTE / ARCHIVE / REVIEW 四档 + 证据行 + 层级聚合；**不归档、不删除、不刷 `accessedAt`**；读路径一样过角色视野 |
+| `memory_audit` | **只读提案器**（v0.6 §5.9）：KEEP / DEMOTE / ARCHIVE / REVIEW 四档 + 证据行 + 层级聚合；**不归档、不删除、不刷 `accessedAt`**；读路径一样过角色视野。**v0.9：与 `forget`/`memory_merge` 构成可执行闭环**（提案 → `dryRun` 预览 → 执行） |
 | `memory_health` | 运行时概览：条目/归档数、读 scopes、注入开关、**角色与判据**（v0.5）、**命中率信号**（v0.7：注入次数/主动检索/去重命中/最近时刻）、**压缩流水线读数**（v0.8 §5.12：扫描轮数/压缩单元数/最近待压数/非待压判定分布/候选样本） |
 | `memory_version` | 版本 + 构建时刻（**动态**读 `package.json` 与产物 mtime） |
 | `memory_check` | 「待沉淀建议」；**当前恒返回空数组**（通道 B 未接线，§8） |
@@ -425,8 +426,18 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | A65 | 提示词含正文长度上限（缺省 6000 字，可经第二参数覆盖）并显式劝阻逐字搬运 | `tests/summarizer.test.mjs`「长度上限（v0.8.1）…」「长度上限可覆盖…」 | ✔ 已实测 |
 | A66 | 截断错误附**可归因证据**（已产出字符数 + usage），区分「模型写长文」与「reasoning 烧预算」 | `tests/summarizer.test.mjs`「截断错误附可归因证据（v0.8.2）…」 | ✔ 已实测 |
 | A67 | **线上（症状消失级）**：三个 pending 桶全部压成概要、原料冷归档，缺口消失 | ✔ **线上实测**（19:54:21 scan → 19:55:26 `day 2026-09-13` compressed（归档 6 / 12,233 字 / 64.8s）→ 19:56:05 `day 2026-09-14`（归档 15 / 12,919 字 / 38.5s）→ 19:57:35 `week 2026-W37`（归档 6 / 17,436 字 / 90.4s）→ `end`）；库内 681→684 条（+3 概要）、归档 180→207（+27 原料） | ✔ 已实测 |
+| A68 | `applyTextMode` 三模式：`replace`（沿用 v0.8 语义：title=首行、body=**全文**）/ `append`（追加到正文末尾，标题不动）/ `patch`（正文命中则替换，正文不中退到标题） | `tests/prune-merge.test.mjs`「A68 applyTextMode…」 | ✔ 已实测 |
+| A69 | **patch 唯一性**：多命中（正文 2 处）/ 未命中（正文与标题各 0 处）/ 空 `find` / 空 `append` 文本一律 fail loud 且报出实际处数；`countOccurrences` 非重叠计数 | `tests/prune-merge.test.mjs`「A69 patch 唯一性判据…」 | ✔ 已实测 |
+| A70 | `selectForgetTargets`：去重 / 已归档剔除 / 不存在计入 `skipped` / 超上限按 `truncated` 如实回报（不静默吞） | `tests/prune-merge.test.mjs`「A70 selectForgetTargets…」 | ✔ 已实测 |
+| A71 | `pushRevision`：保留最近 `MAX_REVISIONS`(3) 条、顺序旧→新、mode 与 `by` 落盘（超出丢最旧） | `tests/prune-merge.test.mjs`「A71 pushRevision…」 | ✔ 已实测 |
+| A72 | **零回归**：`forget` 单条模式的字段（`id` 回填 / `archived=true` / `archivedCount=1`）与 render 文案「已归档记忆条目 <id>」逐字不变；`reason` 仍入 `source` | `tests/prune-merge.test.mjs`「A72 forget 单条模式零回归…」 | ✔ 已实测 |
+| A73 | **批量 + dryRun**：`dryRun=true` 库内活跃数不变（不写库）；去掉后真归档并自动记 `forget: bulk（N 条）`；超上限回报 `truncated` | `tests/prune-merge.test.mjs`「A73 forget 批量…」 | ✔ 已实测 |
+| A74 | **分档批量**：`tier=ARCHIVE` 走 `memory_audit` 引擎选中候选并回报命中数；**`tier=KEEP` 被拒**（承重档护栏，尸体样本）；未知 tier fail loud | `tests/prune-merge.test.mjs`「A74 forget tier…」 | ✔ 已实测 |
+| A75 | 单条未命中的旧语义保持（`未找到 id=...` 抛错）且**无选择器时报错**（不许空调用静默返回） | `tests/prune-merge.test.mjs`「A75 forget 单条未命中…」 | ✔ 已实测 |
+| A76 | `memory_merge`：canonical 正文追加「合并自 <id>（<title>）」+ 被并入者正文**不丢**、随后软归档（`reason=merged into <canonical>`）、canonical 落修订快照；跳过分支（canonical 自身 / 列表内重复 / 不存在 / 已归档）逐条回报；canonical 不存在 ⇒ 抛错 | `tests/prune-merge.test.mjs`「A76 memory_merge…」 | ✔ 已实测 |
+| A77 | `update` `append`/`patch` 经工具层真写库并落 `revisions`（prevBody 逐字）；**失败改写不留痕**；未知 mode fail loud | `tests/prune-merge.test.mjs`「A77 update append/patch…」 | ✔ 已实测 |
 
-> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=67, proven=66, pending=1`（仅 A30 待线上复核）。
+> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=77, proven=75, pending=2`（A17 周期补压 / A30 memoryApi 写入待线上复核）。
 > **A64–A67 的事故背景（U10 定案）**：证据层首跑即指出三桶判定正确、失败在总结调用——真因两段：① `GenerateOptions` 未带 `sessionId` ⇒ 宿主插件 `dsh-x-opencode-session` 不加 `x-opencode-session` 头 ⇒ 网关拒单（`Request is missing x-opencode-session…`）；② 路由通了以后输出触 16,000 token 上限被 fail-closed——实测单份概要 12,233 / 12,919 / 17,436 字符（≈18–26k token），**提示词的 6000 字预算没绑住（超写 2×）⇒ 硬约束只能来自 token 上限**（`maxTokens` 16000 → 32000）。
 > **A53 的诚实旁注**：重心把「话题相关性」做上去了（相关度翻倍、命中与本次会话主题一致），但**唤醒消息本身该不该注入**仍存疑——`[守护] web 已重启` 触发注入时给到的仍是运维类条目。两条可查方向：① 唤醒类消息是否应触发注入（它是系统事件、不是对话）；② 需要「命中质量」而非「命中数量」的度量（现指标只数条数与次数）。**均未决**，见 §10 U9。
 > A29 旁注（诚实）：`by_preset` 预设映射分支本次**未在线上观测到**（该子代理会话头未带 `agentPreset`，走的是派生缺省）——该分支由 A20 单测覆盖。
@@ -519,6 +530,11 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
     - **为什么值得记为「实践修订」**：它验证了 §5.22 的规则顺序——**先补证据层再修业务逻辑**。当时三个候选解释（没扫到 / 无原料 / 压了没写）**都说得通**，若跳过 instrumentation 直接猜修，最可能是在判定层白改一晚（而判定层本来就是对的）。
     - **被修正的两个认知**：① 「后台/定时任务里的 LLM 调用与前台等价」——**不等价**：网关类 provider 需要的会话头由宿主插件按 `GenerateOptions.sessionId` 注入，**不传就是拒单**（对外部插件的隐式依赖必须显式满足）；② 「提示词写「不要超过 N 字」就能约束输出」——**约束不住**（实测超写 2×），**输出上的硬边界只能落在 token 上限**；提示词预算只能当倾向。
     - **观测自身的教训**：`memory_health` 的「最近待压」读的是首扫快照（U13）；`error` 记录只带 `message` 不带 `usage`——本次能归因靠的是「已产出字符数」这一条临时加的字段（v0.8.2），说明**错误路径的证据同样要设计**，不能只把成功路径做完整。
+
+13. **2026-09-17 · v0.9 遗忘与修改的执行闭环（主人指令：「记忆插件缺少遗忘与修改机制」）**
+    - 语义**被补充**：v0.8 前「遗忘」只有单条 `forget`（未知 id 报错）、「修改」只有整文覆盖 `update`（**旧值即弃**）。同日实测缺口（`memory_audit` 读数）：**ARCHIVE 候选 254 条 / 216,024 字符**，而逐条清理需 254 次调用 ⇒ 机制上「知道该忘，但忘不动」；REVIEW 标出 3 个近重复簇却**无合并手段**；改错无历史可回溯。
+    - 补齐三件事：① `forget` 三选择器（`id` / `ids[]` / `tier` 分档）+ `max` 护栏 + `dryRun` 预览；② `update` 三模式（`replace` / `append` / `patch`，patch 要求唯一命中否则拒绝）+ `revisions` 修订快照（保留最近 3 条）；③ 新工具 `memory_merge`（近重复簇：正文追加带来源标注 + 被并入者软归档，信息不丢）。
+    - 教训：**只读提案器不是机制**——「能看见该忘什么」与「能一次忘掉」之间隔着执行原语；提案面与执行面必须成对交付，否则规则正确却落不了地（同 §5.14「机制送达信号、决策归我」的组合缺失）。
 
 ## 10 · 未决问题
 

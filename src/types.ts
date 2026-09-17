@@ -71,6 +71,23 @@ export interface Entry {
   role?: string
   /** 写入者溯源（v0.5）：谁写的（会话 id / 委派深度 / 预设名）——与可见性无关，只作溯源 */
   author?: { sessionId?: string; delegationDepth?: number; preset?: string }
+  /**
+   * 修订留痕（v0.9）：每次 update 前的快照（保留最近 MAX_REVISIONS 条，旧→新）。
+   * 动机：v0.8 前 `update` 是整文覆盖且**旧值即弃**——「修改机制」缺历史，改错无法回溯。
+   */
+  revisions?: Revision[]
+}
+
+/** 修订快照（v0.9）：让「修改」可回溯（与 forget 的软归档对称——一个管改、一个管忘） */
+export interface Revision {
+  /** 修订时刻（ISO） */
+  at: string
+  prevTitle: string
+  prevBody: string
+  /** 触发本次修订的模式 */
+  mode: 'replace' | 'append' | 'patch'
+  /** 修订者（会话 id），缺省不记 */
+  by?: string
 }
 
 /** 项目记忆配置（.dsh/memory.yml，缺省走默认） */

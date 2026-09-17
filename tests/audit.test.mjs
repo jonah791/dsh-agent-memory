@@ -115,11 +115,13 @@ function seedRaw(kv, entries) {
 
 // ---------- A42 工具面 ----------
 
-test('A42 工具面：memory_audit 已注册（共 11 个工具）', () => {
+test('A42 工具面：memory_audit 已注册（共 12 个工具）', () => {
   const { byName } = setup()
-  assert.equal(byName.size, 11)
+  assert.equal(byName.size, 12)
   assert.ok(byName.has('memory_audit'))
   assert.ok(byName.get('memory_audit').description.includes('只读'))
+  // v0.9：合并原语进工具面（近重复簇从「只标记」到「可执行」）
+  assert.ok(byName.has('memory_merge'))
 })
 
 // ---------- A32 承重原料必为 KEEP（反例） ----------

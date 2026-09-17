@@ -60,6 +60,11 @@ export interface EntryPatch {
   title?: string
   body?: string
   tags?: string[]
+  /**
+   * 修订留痕（v0.9）：由工具层算好的**完整** revisions 数组。
+   * 存储层不实现截断策略（避免「谁算上限」两处各算——判据单一真源）。
+   */
+  revisions?: Entry['revisions']
 }
 
 /** 存储层统计（memory_stats 工具用） */
@@ -202,6 +207,7 @@ export class MemoryStore {
       ...(patch.title !== undefined ? { title: patch.title } : {}),
       ...(patch.body !== undefined ? { body: patch.body } : {}),
       ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
+      ...(patch.revisions !== undefined ? { revisions: patch.revisions } : {}),
       updatedAt: now,
       accessedAt: now,
     }

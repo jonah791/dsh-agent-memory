@@ -11,7 +11,7 @@
 # dsh-agent-memory
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.8.0-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.9.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
   <img src="https://img.shields.io/badge/tests-125%20passed-brightgreen" alt="tests">
@@ -23,7 +23,7 @@
 
 ## 能力
 
-11 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
+12 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
 
 | 工具 | 用途 |
 |------|------|
@@ -31,8 +31,9 @@
 | `recall` | 检索：关键词/层级/标签/时间过滤，相关度（标签 3 > 标题 2 > 正文 1）+ 新鲜度排序；每个结果附 `related` 关联链；结果标注来源 scope 与压缩层级。**v0.5：受角色视野约束**（见「角色视野」），可用 `role` 参数切换视角 |
 | `memory_relate` | 联想导航：按 id 展开关联网络；`depth>1` 走 BFS 多跳记忆社区（`hop` 标注层级、visited 防环、每跳 `limit` 扇出） |
 | `memory_browse` | 时间金字塔浏览（年/月/周/日分桶 + 层级/标签/时间过滤 + 分页）。与 `recall` 互补——「不知道有什么」时的发现路径 |
-| `update` | 按 id 修订：`text` 首行作新标题、全文替换正文；`tags` 整体替换 |
-| `forget` | 软归档（`archived=true` + 记 `reason`）：不再进活跃检索，`includeArchive` 可找回 |
+| `update` | 按 id 修订。**v0.9 三模式**：`replace`（缺省·`text` 首行作标题、全文作正文）/ `append`（追加到正文末尾）/ `patch`（`find`→`replace`，**要求唯一命中**，0 处或多处一律拒绝）——内容真变即落**修订快照**（`revisions`，保留最近 3 条，改错可回溯）；`tags` 整体替换 |
+| `forget` | 软归档（`archived=true` + 记 `reason`）：不再进活跃检索，`includeArchive` 可找回。**v0.9 三种选择器**：`id` / `ids[]` / `tier`（按 `memory_audit` 分档批量：`ARCHIVE`/`DEMOTE`/`REVIEW`，**`KEEP` 被拒**）；`max` 护栏（缺省 100 / 上限 500）+ `dryRun` 预览 |
+| `memory_merge` | **v0.9 合并原语**：把 `ids` 的正文并入 `canonical`（带「合并自 `<id>`（`<title>`）」来源标注，信息不丢）后软归档之；`strategy=keep-canonical` 只归档不追加——用于处理 `memory_audit` 标出的 REVIEW 近重复簇 |
 | `memory_stats` | 各层级/压缩层级/时间桶计数 + 归档数（可 `scope` 限定） |
 | `memory_health` | 运行时概览：条目总数、归档数、生效读 scopes、注入开关、**生效角色（`role` / `rolesEnabled` / `roleReason`）** |
 | `memory_audit` | **价值体检（v0.6 · 只读提案器）**：四档提案 `KEEP` / `DEMOTE` / `ARCHIVE` / `REVIEW` + 证据行 + 按层级聚合的体量视图。判据序：承重（被概要 `archiveRef` 引用）＞ 新（≤ `keep_recent_days`）＞ 未引用且老且无溯源（归档候选）＞ 未引用且体量大（可降级）＞ 小体量兜底。**不归档、不删除、不刷新 `accessedAt`**；分数是序数（权重为启发式先验，非拟合值） |
@@ -215,11 +216,13 @@ npm run test:ts   # = tsc && node --test "tests/*.test.ts"   （需 node ≥ 24�
 npm run test:all  # = 两套一起
 ```
 
+**实测（2026-09-17，v0.9）：`npm test` → `# tests 199 / # pass 199 / # fail 0 / # skipped 0`**（新增 `tests/prune-merge.test.mjs` 10 项，对应 A68–A77；同时把工具面契约断言从 11 个更新为 12 个）。
+
 **实测（2026-09-15，node v24.18.0）：`npm test` → `# tests 179 / # pass 179 / # fail 0 / # skipped 0`；`npm run test:ts` → `# pass 81 / # fail 0 / # skipped 1`（跳过项为 `scope.test.ts` 的 Windows 平台条件）；`npm run test:all` → `# tests 261 / # pass 260 / # fail 0 / # skipped 1`。**无需网络、无需真实外部依赖**——LLM 总结路径在测试里以桩注入，telegram 不涉及。
 
 > **双平台**：`.mjs` 套件在 **WSL（node v22.22.1）侧同样全绿 `179/179`**（2026-09-15 修掉三处夹具硬编码派生值之后；此前有 12 个 A 测试在 POSIX 侧**静默红**——夹具写死 `c:/Users/Alice/proj`，POSIX 下 `workspaceIdOf` 解析不出同值 ⇒ 作用域不匹配、整组用例变成 0 命中。详见 `docs/semantic.md` §10 U12。）
 
-覆盖范围（`tests/` 共 17 个文件；`npm test` 跑其中 12 个 `.mjs`）：
+覆盖范围（`tests/` 共 18 个文件；`npm test` 跑其中 13 个 `.mjs`）：
 
 - `store.test.mjs` — 条目 CRUD、写去重三态（`created`/`updated`/`merged`）、L1 key 覆盖、标题指纹合并
 - `search.test.mjs` — 打分与排序、过滤、截断；**联想层**（related 链强度降序）与 **BFS 多跳闭包**（hop 标注/防环/每跳 limit）
@@ -233,6 +236,7 @@ npm run test:all  # = 两套一起
 - `centroid.test.mjs` — **v0.7 重心/度量/提案日志**：重心衰减与锚点、同轮去重、封顶与退化、**重心召回落字面召不回的历史话题**、零回归逐字节一致、素材挑选、轨迹汇总口径、提案日志两类记录可 join + 吞错 + 开关、`memory_health` 命中率信号、`proposal_log` 配置
 - `compress-pipeline.test.mjs` — **v0.8 压缩判定与轨迹发射**：逐桶判定四档命名与优先级、**判据单一真源**（`findPendingCompressions` ≡ `explainCompressions` 的 pending 投影）、首轮 `scan`（候选/待压/非待压分布/逐桶样本）、`unit`/`end` 事件序列、**零回归**（不给 sink ⇒ 结果逐字段一致）、**抛错先落 `error` 再原样上抛**
 - `compress-trace.test.mjs` — **v0.8 侧车落盘纪律**：只追加、坏行/异形行跳过不抛、超限轮转 `.1`、样本截断、**不可写路径 ⇒ 返回 `false` 且不抛**（尸体样本）、`audit.compress_trace` 配置（缺省/可关/fail-loud）
+- `prune-merge.test.mjs` — **v0.9 遗忘与修改闭环**（A68–A77）：三模式文本改写与 patch 唯一性、批量目标选择（去重/已归档/截断）、修订留痕上限、`forget` 单条零回归 + `dryRun` + 分档护栏（含 `KEEP` 尸体样本）、`memory_merge` 合并语义与跳过分支
 
 `.ts` 套件（5 个文件：`browse` / `compaction-sink` / `config` / `scope` / `tools`）需 node ≥ 24（原生类型剥离）：2026-09-15 在 **node v24.18.0** 实测 `# pass 81 / # fail 0 / # skipped 1`（跳过为 Windows 平台条件）。`config.test.ts` 覆盖 `roles` 段的缺省/完整/4 条非法 fail-loud 用例。
 

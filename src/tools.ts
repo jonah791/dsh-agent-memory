@@ -17,7 +17,7 @@ import { readFileSync, statSync } from 'node:fs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { Entry, EntryKind, MemoryConfig, RememberResult } from './types.ts'
+import type { Entry, EntryKind, MemoryConfig, RememberResult, Revision } from './types.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import { resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
@@ -114,7 +114,7 @@ function roleStampOf(
 function recordAction(
   deps: MemoryToolDeps,
   config: MemoryConfig,
-  record: { action: 'forget' | 'update'; id: string; reason?: string },
+  record: { action: 'forget' | 'update'; id: string; reason?: string; mode?: string },
 ): void {
   if (config.audit?.proposalLog?.enabled !== true || deps.recordProposal === undefined) return
   void deps.recordProposal({ atMs: Date.now(), kind: 'action', ...record })
@@ -339,14 +339,146 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
-/** 构建 update 工具 */
+// ---------- v0.9：遗忘与修改的执行原语（纯函数，单测直接测） ----------
+
+/** 批量遗忘单次上限（护栏：误传 tier 不会一次清空全库） */
+export const MAX_BULK_FORGET = 500
+/** 批量遗忘缺省上限 */
+export const DEFAULT_BULK_FORGET = 100
+/** 每条例目保留的修订快照数（旧→新，超出丢最旧） */
+export const MAX_REVISIONS = 3
+
+/** 子串出现次数（patch 唯一性判据） */
+export function countOccurrences(haystack: string, needle: string): number {
+  if (needle === '') return 0
+  let count = 0
+  let from = 0
+  for (;;) {
+    const at = haystack.indexOf(needle, from)
+    if (at === -1) return count
+    count += 1
+    from = at + needle.length
+  }
+}
+
+/**
+ * 文本改写模式（v0.9 纯函数）：
+ * - `replace`：text 首行 → 标题、其余 → 正文（v0.8 行为，零回归）
+ * - `append`：text 追加到正文末尾（标题不动）
+ * - `patch`：在正文（正文不中则标题）把 find 换成 replace——**要求唯一命中**，
+ *   0 处或多处一律 fail loud（宁可拒绝也不改错位置）
+ */
+export function applyTextMode(
+  existing: { title: string; body: string },
+  options: { mode: 'replace' | 'append' | 'patch'; text?: string; find?: string; replace?: string },
+): { title: string; body: string } {
+  if (options.mode === 'append') {
+    const added = options.text ?? ''
+    if (added.trim() === '') throw new Error('update: append 模式需要非空 text')
+    return { title: existing.title, body: `${existing.body}\n\n${added}` }
+  }
+  if (options.mode === 'patch') {
+    const find = options.find
+    if (find === undefined || find === '') {
+      throw new Error('update: patch 模式必须提供非空 find')
+    }
+    const to = options.replace ?? ''
+    const inBody = countOccurrences(existing.body, find)
+    if (inBody === 1) return { title: existing.title, body: existing.body.replace(find, to) }
+    if (inBody > 1) {
+      throw new Error(`update: patch 在正文匹配到 ${inBody} 处（要求唯一）——请给出更长的上下文`)
+    }
+    const inTitle = countOccurrences(existing.title, find)
+    if (inTitle === 1) return { title: existing.title.replace(find, to), body: existing.body }
+    if (inTitle > 1) {
+      throw new Error(`update: patch 在标题匹配到 ${inTitle} 处（要求唯一）`)
+    }
+    throw new Error('update: patch 未命中 find（正文与标题各 0 处）——先读原文再改')
+  }
+  if (options.text === undefined) throw new Error('update: replace 模式需要 text')
+  const { title, body } = splitText(options.text)
+  return { title, body }
+}
+
+/** 修订留痕（v0.9）：把「改前快照」推入 revisions，保留最近 MAX_REVISIONS 条（旧→新） */
+export function pushRevision(
+  existing: { title: string; body: string; revisions?: Revision[] },
+  mode: 'replace' | 'append' | 'patch',
+  by?: string,
+): Revision[] {
+  const prev = existing.revisions ?? []
+  const snapshot: Revision = {
+    at: new Date().toISOString(),
+    prevTitle: existing.title,
+    prevBody: existing.body,
+    mode,
+    ...(by !== undefined ? { by } : {}),
+  }
+  return [...prev, snapshot].slice(-MAX_REVISIONS)
+}
+
+/**
+ * 批量遗忘目标选择（v0.9 纯函数）：去重 → 只留**存在且未归档**者 → 截断到上限。
+ * `skipped` 计「重复 / 不存在 / 已归档」；`truncated` 计被上限挡下的条数（两者都如实回报）。
+ */
+export function selectForgetTargets(
+  entries: readonly Entry[],
+  requestedIds: readonly string[],
+  max: number,
+): { targets: Entry[]; skipped: number; truncated: number } {
+  const alive = new Map<string, Entry>()
+  for (const entry of entries) {
+    if (entry.archived === true) continue
+    alive.set(entry.id, entry)
+  }
+  const seen = new Set<string>()
+  const picked: Entry[] = []
+  let skipped = 0
+  for (const id of requestedIds) {
+    if (seen.has(id)) {
+      skipped += 1
+      continue
+    }
+    seen.add(id)
+    const entry = alive.get(id)
+    if (entry === undefined) {
+      skipped += 1
+      continue
+    }
+    picked.push(entry)
+  }
+  const truncated = Math.max(0, picked.length - max)
+  return { targets: picked.slice(0, max), skipped, truncated }
+}
+
+/** 合并正文（v0.9 纯函数）：把 others 的正文并入 canonical（带来源标注，信息不丢） */
+export function mergeBodies(
+  canonical: Entry,
+  others: readonly Entry[],
+  strategy: 'append-sources' | 'keep-canonical',
+): { body: string; charsAdded: number } {
+  if (strategy === 'keep-canonical') return { body: canonical.body, charsAdded: 0 }
+  let body = canonical.body
+  for (const other of others) {
+    body += `\n\n## 合并自 ${other.id}（${other.title}）\n${other.body}`
+  }
+  return { body, charsAdded: body.length - canonical.body.length }
+}
+
+/**
+ * 构建 update 工具（v0.9：三模式 + 修订留痕）。
+ * 修改机制的最小闭环：能改（replace/append/patch）→ 改前留痕（revisions）→ 改错可回溯。
+ */
 function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'update',
-    description: '修订一条记忆条目（按 id）。text 的首行替换标题、全文替换正文；tags 整体替换。仅改需要改的字段。',
+    description: '修订一条记忆条目（按 id）。mode=replace（缺省）：text 首行作标题、其余作正文；mode=append：text 追加到正文末尾；mode=patch：把 find 替换成 replace（要求在正文或标题中**唯一命中**，否则拒绝）。每次内容真变都留一条修订快照（最多 3 条，可回溯）。tags 整体替换。',
     parameters: {
       id: { type: 'string', required: true, description: '目标条目 id（来自 remember/recall 返回）。' },
-      text: { type: 'string', description: '新内容（首行作标题，其余作正文）；缺省不改正文。' },
+      mode: { type: 'string', description: '改写模式：replace（缺省·整文替换）/ append（追加到正文）/ patch（局部替换）。' },
+      text: { type: 'string', description: 'replace 模式：新内容（首行作标题，其余作正文）；append 模式：要追加的片段。' },
+      find: { type: 'string', description: 'patch 模式：要被替换的原文片段（须唯一命中）。' },
+      replace: { type: 'string', description: 'patch 模式：替换成的文本（缺省空串 = 删除该片段）。' },
       tags: { type: 'array', items: { type: 'string' }, description: '替换后的标签；缺省不动。' },
     },
     output: {
@@ -368,52 +500,231 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       if (entry === undefined) {
         throw new Error(`update: 未找到 id="${args.id}" 的记忆条目（当前视野内）`)
       }
+      const rawMode = args.mode ?? 'replace'
+      if (rawMode !== 'replace' && rawMode !== 'append' && rawMode !== 'patch') {
+        throw new Error(`update: 未知 mode="${rawMode}"（允许 replace / append / patch）`)
+      }
+      const mode: 'replace' | 'append' | 'patch' = rawMode
       const patch: EntryPatch = {}
-      if (args.text !== undefined) {
-        const { title, body } = splitText(args.text)
-        patch.title = title
-        patch.body = body
+      const touchesText = mode === 'append' || mode === 'patch' || args.text !== undefined
+      if (touchesText) {
+        const next = applyTextMode(
+          { title: entry.title, body: entry.body },
+          {
+            mode,
+            ...(args.text !== undefined ? { text: args.text } : {}),
+            ...(args.find !== undefined ? { find: args.find } : {}),
+            ...(args.replace !== undefined ? { replace: args.replace } : {}),
+          },
+        )
+        if (next.title !== entry.title || next.body !== entry.body) {
+          patch.title = next.title
+          patch.body = next.body
+          // 只有内容真的变了才记快照——空改写不产生噪音历史
+          patch.revisions = pushRevision(entry, mode, sessionIdOf(exec as unknown as RoleCarrierLike))
+        }
       }
       if (args.tags !== undefined) patch.tags = args.tags
       await deps.store.update(entry.scope, args.id, patch)
-      recordAction(deps, config, { action: 'update', id: args.id })
+      recordAction(deps, config, { action: 'update', id: args.id, mode })
       return { id: args.id }
     },
   })
 }
 
-/** 构建 forget 工具 */
+/**
+ * 构建 forget 工具（v0.9：从「一条」到「能执行一次遗忘决策」）。
+ * 旧形态的实际缺陷（2026-09-17 实测）：memory_audit 给出 ARCHIVE 候选 254 条，
+ * 而 forget 一次只吃一个 id ⇒ 清完要 254 次调用 = 机制上「知道该忘但忘不动」。
+ * 新形态：id / ids[] / tier（按体检分档）任选，带 max 护栏与 dryRun 预览。
+ */
 function buildForget(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'forget',
-    description: '归档一条记忆条目（软删除：不再进活跃检索，可从 includeArchive 找回）。需要理由时填 reason 记入溯源。',
+    description: '归档记忆条目（软删除：不再进活跃检索，可从 includeArchive 找回）。三种选择器任一：id（单条）/ ids[]（批量）/ tier（按 memory_audit 分档批量，ARCHIVE|DEMOTE|REVIEW）。批量请先 dryRun=true 看清单；max 护栏缺省 100、上限 500。reason 记入条目 source。',
     parameters: {
-      id: { type: 'string', required: true, description: '目标条目 id（来自 remember/recall 返回）。' },
-      reason: { type: 'string', description: '归档原因（可选，记入条目 source）。' },
+      id: { type: 'string', description: '单条模式：目标条目 id（来自 remember/recall/audit 返回）。' },
+      ids: { type: 'array', items: { type: 'string' }, description: '批量模式：目标条目 id 列表。' },
+      tier: { type: 'string', description: '分档批量：按 memory_audit 的档位选目标（ARCHIVE / DEMOTE / REVIEW；KEEP 被拒绝）。' },
+      max: { type: 'integer', description: `批量上限（缺省 ${DEFAULT_BULK_FORGET}，硬上限 ${MAX_BULK_FORGET}）。` },
+      dryRun: { type: 'boolean', description: 'true = 只列清单不写库（批量前必做）。' },
+      reason: { type: 'string', description: '归档原因（记入条目 source）。' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          id: { type: 'string', required: true },
+          id: { type: 'string' },
           archived: { type: 'boolean', required: true },
+          archivedCount: { type: 'integer', required: true },
+          ids: { type: 'array', required: true, items: { type: 'string' } },
+          skipped: { type: 'integer', required: true },
+          truncated: { type: 'integer', required: true },
+          dryRun: { type: 'boolean', required: true },
+          notes: { type: 'array', required: true, items: { type: 'string' } },
         },
       },
-      render: (_args, value) => [{ type: 'text', text: `已归档记忆条目 ${value.id}` }],
+      render: (_args, value) => {
+        if (value.dryRun) {
+          const tail = value.truncated > 0 ? ` · 超出上限未列 ${value.truncated} 条` : ''
+          return [{ type: 'text', text: `dry-run：将归档 ${value.ids.length} 条（跳过 ${value.skipped}${tail}）——确认后去掉 dryRun 再调` }]
+        }
+        if (value.archivedCount === 1 && value.id !== undefined) {
+          return [{ type: 'text', text: `已归档记忆条目 ${value.id}` }]
+        }
+        return [{ type: 'text', text: `已归档 ${value.archivedCount} 条（跳过 ${value.skipped}）` }]
+      },
     },
     async execute(args, exec) {
       const { config, cwd, view } = await resolveRuntime(exec, deps)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
       // 视野内定位：视野外的条目不可归档（v0.5，同 update）
-      const { entries } = gatherReadable(deps, { readScopes, includeArchive: true, view })
-      const entry = entries.find((candidate) => candidate.id === args.id)
-      if (entry === undefined) {
-        throw new Error(`forget: 未找到 id="${args.id}" 的记忆条目（当前视野内）`)
+      const { entries: universe } = gatherReadable(deps, { readScopes, includeArchive: true, view })
+      const max = Math.max(1, Math.min(args.max ?? DEFAULT_BULK_FORGET, MAX_BULK_FORGET))
+      const notes: string[] = []
+      const requested: string[] = []
+      if (args.id !== undefined) requested.push(args.id)
+      if (args.ids !== undefined) requested.push(...args.ids)
+
+      if (args.tier !== undefined) {
+        const tier = args.tier
+        if (tier === 'KEEP') {
+          throw new Error('forget: tier=KEEP 是承重档（被概要引用 / 新 / 有角色归属）——禁止批量归档；确需请逐条显式给 id')
+        }
+        if (tier !== 'ARCHIVE' && tier !== 'DEMOTE' && tier !== 'REVIEW') {
+          throw new Error(`forget: 未知 tier="${tier}"（允许 ARCHIVE / DEMOTE / REVIEW）`)
+        }
+        const usage = deps.readAccess === undefined ? undefined : await deps.readAccess()
+        const audit = auditMemory({
+          entries: universe.filter((entry) => entry.archived !== true),
+          indexEntries: universe,
+          ...(config.audit !== undefined ? { config: config.audit } : {}),
+          ...(usage !== undefined ? { usage } : {}),
+          query: { topN: max + 1, minChars: 0 },
+        })
+        const tierIds = audit.candidates.filter((candidate) => candidate.bucket === tier).map((candidate) => candidate.id)
+        notes.push(`tier=${tier}：体检命中 ${tierIds.length} 条（候选窗口 ${max + 1}）`)
+        requested.push(...tierIds)
       }
-      await deps.store.forget(entry.scope, args.id, args.reason)
-      recordAction(deps, config, { action: 'forget', id: args.id, ...(args.reason !== undefined ? { reason: args.reason } : {}) })
-      return { id: args.id, archived: true }
+
+      if (requested.length === 0) {
+        throw new Error('forget: 需要 id / ids / tier 之一（批量归档请先 dryRun=true 看清单）')
+      }
+
+      const { targets, skipped, truncated } = selectForgetTargets(universe, requested, max)
+      const singleMode = args.id !== undefined && args.ids === undefined && args.tier === undefined
+      if (singleMode && targets.length === 0) {
+        throw new Error(`forget: 未找到 id="${args.id}" 的记忆条目（当前视野内，或已归档）`)
+      }
+      if (truncated > 0) {
+        notes.push(`目标共 ${targets.length + truncated} 条超上限 ${max}，本次只处理前 ${max} 条（其余下次再来）`)
+      }
+
+      const ids = targets.map((entry) => entry.id)
+      const idField = singleMode && args.id !== undefined ? { id: args.id } : {}
+      if (args.dryRun === true) {
+        return { ...idField, archived: false, archivedCount: 0, ids, skipped, truncated, dryRun: true, notes }
+      }
+      const reason = args.reason ?? (targets.length > 1 ? `forget: bulk（${targets.length} 条）` : undefined)
+      for (const target of targets) {
+        await deps.store.forget(target.scope, target.id, reason)
+        recordAction(deps, config, {
+          action: 'forget',
+          id: target.id,
+          ...(reason !== undefined ? { reason } : {}),
+        })
+      }
+      return { ...idField, archived: ids.length > 0, archivedCount: ids.length, ids, skipped, truncated, dryRun: false, notes }
+    },
+  })
+}
+
+/**
+ * 构建 memory_merge 工具（v0.9）：近重复簇的**合并原语**。
+ * 动机：memory_audit 只标出「近重复簇」（REVIEW）却不提供合并手段，只能人工逐条处理。
+ * 语义：信息不丢——被并入者正文追加进 canonical（带来源标注），随后软归档（可找回）。
+ */
+function buildMerge(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_merge',
+    description: '合并近重复条目（处理 memory_audit 的 REVIEW 簇）：把 ids 的正文并入 canonical（带「合并自 <id>」来源标注，信息不丢），并把被并入者软归档（includeArchive 可找回）。strategy=keep-canonical 时只归档、不动正文。',
+    parameters: {
+      canonical: { type: 'string', required: true, description: '保留的条目 id（合并目标，正文被追加）。' },
+      ids: { type: 'array', items: { type: 'string' }, required: true, description: '被并入并归档的条目 id 列表。' },
+      strategy: { type: 'string', description: 'append-sources（缺省·正文追加带来源）/ keep-canonical（只归档不追加）。' },
+      reason: { type: 'string', description: '归档原因（记入被并入者 source）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          canonical: { type: 'string', required: true },
+          merged: { type: 'integer', required: true },
+          archived: { type: 'array', required: true, items: { type: 'string' } },
+          charsAdded: { type: 'integer', required: true },
+          notes: { type: 'array', required: true, items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => [
+        { type: 'text', text: `已合并 ${value.merged} 条 → ${value.canonical}（正文 +${value.charsAdded} 字符，被并入者已归档）` },
+      ],
+    },
+    async execute(args, exec) {
+      const { config, cwd, view } = await resolveRuntime(exec, deps)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
+      const { entries: universe } = gatherReadable(deps, { readScopes, includeArchive: true, view })
+      const canonical = universe.find((entry) => entry.id === args.canonical)
+      if (canonical === undefined) {
+        throw new Error(`memory_merge: 未找到 canonical id="${args.canonical}"（当前视野内）`)
+      }
+      if (canonical.archived === true) {
+        throw new Error(`memory_merge: canonical id="${args.canonical}" 已归档——先决定是否取消归档再合并`)
+      }
+      const strategy = args.strategy ?? 'append-sources'
+      if (strategy !== 'append-sources' && strategy !== 'keep-canonical') {
+        throw new Error(`memory_merge: 未知 strategy="${strategy}"（允许 append-sources / keep-canonical）`)
+      }
+      const notes: string[] = []
+      const merged: Entry[] = []
+      const seen = new Set<string>()
+      for (const id of args.ids) {
+        if (id === canonical.id) {
+          notes.push(`跳过 ${id}：canonical 自身`)
+          continue
+        }
+        if (seen.has(id)) {
+          notes.push(`跳过 ${id}：列表内重复`)
+          continue
+        }
+        seen.add(id)
+        const other = universe.find((entry) => entry.id === id)
+        if (other === undefined) {
+          notes.push(`跳过 ${id}：视野内不存在`)
+          continue
+        }
+        if (other.archived === true) {
+          notes.push(`跳过 ${id}：已归档`)
+          continue
+        }
+        merged.push(other)
+      }
+      const { body, charsAdded } = mergeBodies(canonical, merged, strategy)
+      if (charsAdded > 0) {
+        await deps.store.update(canonical.scope, canonical.id, {
+          body,
+          revisions: pushRevision(canonical, 'append', sessionIdOf(exec as unknown as RoleCarrierLike)),
+        })
+      }
+      const reason = args.reason ?? `merged into ${canonical.id}`
+      const archived: string[] = []
+      for (const other of merged) {
+        await deps.store.forget(other.scope, other.id, reason)
+        recordAction(deps, config, { action: 'forget', id: other.id, reason })
+        archived.push(other.id)
+      }
+      return { canonical: canonical.id, merged: merged.length, archived, charsAdded, notes }
     },
   })
 }
@@ -942,6 +1253,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildRelate(deps),
     buildUpdate(deps),
     buildForget(deps),
+    buildMerge(deps),
     buildStats(deps),
     buildAudit(deps),
     buildCheck(),
