@@ -27,6 +27,7 @@ import type { CompressSummary } from './compress-trace.ts'
 import { formatSkipped } from './compress-trace.ts'
 import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
+import { findNearDuplicates, formatDuplicateHint } from './dedupe.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
 import { auditMemory } from './audit.ts'
 
@@ -173,7 +174,7 @@ function mergeCounts(target: Record<string, number>, source: Record<string, numb
 function buildRemember(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'remember',
-    description: '记录一条记忆。适用于：事实（主人偏好/环境事实/决策结论）、可复用知识（项目知识/学习沉淀/教训）、有结果的情景（重要事件/经历时间线）。不记录：临时状态、文件可索引内容（代码/文档全文）、凭证（密钥/口令）。L1 事实可用 key 精确覆盖（同 key 再次写入=更新）；L2/L3 同标题自动合并（标签并集+正文追加）。',
+    description: '记录一条记忆。适用于：事实（主人偏好/环境事实/决策结论）、可复用知识（项目知识/学习沉淀/教训）、有结果的情景（重要事件/经历时间线）。不记录：临时状态、文件可索引内容（代码/文档全文）、凭证（密钥/口令）。L1 事实可用 key 精确覆盖（同 key 再次写入=更新）；L2/L3 同标题自动合并（标签并集+正文追加）。**写入前会做近重复检测**：命中高度相似的既有条目时返回 `similar[]` + `hint`——此时优先 `update` 补写或 `memory_merge` 合流，不要新建平行条目（§5.8 先搜再写）。',
     parameters: {
       text: { type: 'string', required: true, description: '记忆内容（markdown；首行自动作为标题）。' },
       key: { type: 'string', description: 'L1 精确覆盖键：同一 (scope, key) 再次写入 = 覆盖更新。' },
@@ -189,11 +190,14 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         properties: {
           id: { type: 'string', required: true },
           action: { type: 'string', enum: ['created', 'updated', 'merged'], required: true },
+          similar: { type: 'array', items: { type: 'string' }, description: '高度相似的既有条目（id — 标题（强度 N））；无命中时省略该键' },
+          hint: { type: 'string', description: '近重复提示（建议 update/merge）；无命中时省略该键' },
         },
       },
       render: (args, value) => [{
         type: 'text',
-        text: `已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`,
+        text: `已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`
+          + (typeof value.hint === 'string' && value.hint.length > 0 ? `\n${value.hint}` : ''),
       }],
     },
     async execute(args, exec) {
@@ -218,7 +222,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       if (wouldCreate && active.length >= config.maxEntries) {
         throw new Error(`remember: ${writeScope} 已达 max_entries(${config.maxEntries})，请先 forget 归档旧条目或调高配置`)
       }
-      return deps.store.remember({
+      const written = await deps.store.remember({
         kind,
         key: args.key,
         title,
@@ -229,6 +233,17 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         bucket: null,
         ...roleStampOf(exec, config, args.role),
       })
+      // 近重复提示（2026-09-17 主人「存记忆时先搜索记忆」的机制层）：
+      // 用写入前的既有条目快照做检测，复用 search.ts 的打分（判据单一真源）；
+      // 无命中时不带任何额外键（无损 JSON 纪律）。
+      const dups = findNearDuplicates(active, { title, body, tags, kind, scope: writeScope })
+      const hint = formatDuplicateHint(dups)
+      return {
+        id: written.id,
+        action: written.action,
+        ...(dups.length > 0 ? { similar: dups.map((d) => `${d.id} — ${d.title}（强度 ${d.strength}）`) } : {}),
+        ...(hint.length > 0 ? { hint } : {}),
+      }
     },
   })
 }
