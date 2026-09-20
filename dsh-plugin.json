@@ -1,0 +1,19 @@
+{
+  "$schema": "https://example.invalid/dsh-community-fabric/dsh-plugin.schema.v0.1.draft.json",
+  "manifestVersion": "0.1.0",
+  "id": "com.jonah791.agent-memory",
+  "name": "dsh-agent-memory",
+  "version": "0.9.0",
+  "apiVersion": ">=0.1.0 <0.2.0",
+  "entrypoints": {
+    "host": "lib/fabric.js"
+  },
+  "capabilities": {
+    "required": {},
+    "optional": {}
+  },
+  "subscriptions": [],
+  "contributes": {
+    "commands": []
+  }
+}

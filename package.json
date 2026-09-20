@@ -13,7 +13,8 @@
     "./package.json": "./package.json"
   },
   "files": [
-    "lib"
+    "lib",
+    "dsh-plugin.json"
   ],
   "license": "MIT",
   "peerDependencies": {
