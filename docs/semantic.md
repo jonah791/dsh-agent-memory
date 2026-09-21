@@ -14,7 +14,7 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 67 项：见 §7 汇总行；`pending>0` 故**不得**标 verified） |
+| 状态 | **implemented**（验收 A1–A78 共 **78 行**；解析器现算 `total=77`——差 1 已挂账，见 §7 汇总行；`pending=2>0` 故**不得**标 verified） |
 | 版本 | v0.7（文档）· 对应插件 v0.8.2（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；v0.8 压缩流水线证据层；**v0.8.1/v0.8.2 修 U10 真因**（总结调用补会话 id；输出预算与可归因证据） |
 | 实现落点 | `self-plugins/dsh-agent-memory/src/`（19 个模块，见 §8） |
 | 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>侧车：`${DSH_HOME}/memory-access-trace.jsonl`（v0.6 用量）、`${DSH_HOME}/memory-audit-proposals.jsonl`（v0.7 提案）、`${DSH_HOME}/memory-compress-trace.jsonl`（v0.8 压缩流水线）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（**`config.maxTokens: 32000`**——2026-09-15 由 16000 抬高，见 §7 A64–A67 旁注） |
@@ -387,7 +387,7 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | A27 | 写路径盖章：启用 roles → 盖调用者角色 + 记 `author`；未启用且未显式指定 → **不盖章（共享记忆）** | `tests/role.test.mjs`「A27 工具层写路径盖章…」 | ✔ 已实测 |
 | A28 | `roles` 段的配置解析：缺省/完整/非法（未知键、空角色名、非字符串预设映射）fail loud | `tests/config.test.ts`「roles：缺省段…」「roles：完整段…」+ 4 条非法用例 | ✔ 已实测 |
 | A29 | 生产会话按角色取数：主会话（`session-<uuid>`）→ `main`；派生会话（子代理 / 队员）→ 派生角色；启用 roles 后注入面与工具面同一视野 | ✔ **线上实测**（2026-09-15 17:4x，插件 v0.5.0 + `E:\alice\.dsh\memory.yml` 已启用）：主会话 `memory_health` → `角色 main（角色维度已启用；判据：人类会话（session-<uuid>））`；**真实子代理会话**（subagent `7756cf92`，`delegationDepth=1`）→ `角色 worker（角色维度已启用；判据：派生会话（delegationDepth=1））`；两次 `memory_version` 均报 `0.5.0（build 2026-09-15T09:43:04）` | ✔ 已实测 |
-| A30 | 其他插件经 `ctx.memoryApi.remember` 写入仍为共享记忆（不被静默划入某隔间） | 代码路径：`index.ts` 的 `memoryApi` 不传 `role`（`author` 亦不伪造）；待线上复核（下次插件回流时核对 `role` 字段缺省） | **待线上复核** |
+| A30 | 其他插件经 `ctx.memoryApi.remember` 写入仍为共享记忆（不被静默划入某隔间） | 代码路径：`index.ts` 的 `memoryApi` 不传 `role`（`author` 亦不伪造）；待线上复核（下次插件回流时核对 `role` 字段缺省） | **待线上验收** |
 | A31 | **只读**：`memory_audit` 跑完库内容逐字不变、`accessedAt` 不被刷新；体检自身不写用量轨迹 | `tests/audit.test.mjs`「A31 只读：…（零写入）」「A31b memory_audit 不写轨迹…」 | ✔ 已实测 |
 | A32 | **承重必 KEEP（反例）**：被 `archiveRef` 引用的原料即使又老又无溯源也判 KEEP——不得建议归档掉自己赖以回溯的原料 | `tests/audit.test.mjs`「A32 承重原料必为 KEEP…（反例）」 | ✔ 已实测 |
 | A33 | recency 单调：其余相同，越新分数越高（exp(−age/30)） | `tests/audit.test.mjs`「A33 recency 单调…」 | ✔ 已实测 |
@@ -436,8 +436,11 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | A75 | 单条未命中的旧语义保持（`未找到 id=...` 抛错）且**无选择器时报错**（不许空调用静默返回） | `tests/prune-merge.test.mjs`「A75 forget 单条未命中…」 | ✔ 已实测 |
 | A76 | `memory_merge`：canonical 正文追加「合并自 <id>（<title>）」+ 被并入者正文**不丢**、随后软归档（`reason=merged into <canonical>`）、canonical 落修订快照；跳过分支（canonical 自身 / 列表内重复 / 不存在 / 已归档）逐条回报；canonical 不存在 ⇒ 抛错 | `tests/prune-merge.test.mjs`「A76 memory_merge…」 | ✔ 已实测 |
 | A77 | `update` `append`/`patch` 经工具层真写库并落 `revisions`（prevBody 逐字）；**失败改写不留痕**；未知 mode fail loud | `tests/prune-merge.test.mjs`「A77 update append/patch…」 | ✔ 已实测 |
+| A78 | 压缩存档标题**自带时区标注**（本地时间 + 显式 UTC 偏移），且从标题可折回 UTC 等于建档时刻 | `tests/compaction-sink.test.ts` 三条：「标题自带时区标注（… · 读数范围可判）」round-trip 断言、「utcOffsetLabel 尸体样本：正 / 负 / 半小时时区（平台无关）」、「formatLocalStamp：分钟精度」 | ✔ 已实测 |
 
-> 测量口径：`pending = total − proven`（fail-closed）。本表 `total=77, proven=75, pending=2`（A17 周期补压 / A30 memoryApi 写入待线上复核）。
+> 测量口径：`pending = total − proven`（fail-closed）。解析器现算 `total=77, proven=75, pending=2`（A17 周期补压 / A30 memoryApi 写入待线上验收）。
+> ⚠ **仪器挂账（2026-09-22 实测，未定位）**：本表**实际有 78 个 A 行**（`Select-String '^\| A\d+ \|'` 计数 = 78，编号 A1–A78 连续无缺），而解析器报 `total=77`——**差 1，原因未定位**。⇒ 查清之前，该 `total` 不得当作「验收条目总数」使用；`verified` 判据（`pending==0`）可能因此偏松（若被漏算的那行恰为 pending，会误判可晋升）。
+> ⚠ **状态词有两个消费者（2026-09-22 实测）**：状态列的**词表精确匹配只影响细分标签**（「待线上验收」计数），**不影响 `pending` 判定**（非「已实测」即 pending）——由 A30 实验定案：把「待线上复核」改为「待线上验收」后，`pending` 仍为 2，而「其中显式标『待线上验收』」由 1 条变 2 条。⇒ 2026-09-15「词对列错 = 等于没写」的教训**收窄**为：**列错致命；词表外的词只丢细分标签，不丢 pending**。
 > **A64–A67 的事故背景（U10 定案）**：证据层首跑即指出三桶判定正确、失败在总结调用——真因两段：① `GenerateOptions` 未带 `sessionId` ⇒ 宿主插件 `dsh-x-opencode-session` 不加 `x-opencode-session` 头 ⇒ 网关拒单（`Request is missing x-opencode-session…`）；② 路由通了以后输出触 16,000 token 上限被 fail-closed——实测单份概要 12,233 / 12,919 / 17,436 字符（≈18–26k token），**提示词的 6000 字预算没绑住（超写 2×）⇒ 硬约束只能来自 token 上限**（`maxTokens` 16000 → 32000）。
 > **A53 的诚实旁注**：重心把「话题相关性」做上去了（相关度翻倍、命中与本次会话主题一致），但**唤醒消息本身该不该注入**仍存疑——`[守护] web 已重启` 触发注入时给到的仍是运维类条目。两条可查方向：① 唤醒类消息是否应触发注入（它是系统事件、不是对话）；② 需要「命中质量」而非「命中数量」的度量（现指标只数条数与次数）。**均未决**，见 §10 U9。
 > A29 旁注（诚实）：`by_preset` 预设映射分支本次**未在线上观测到**（该子代理会话头未带 `agentPreset`，走的是派生缺省）——该分支由 A20 单测覆盖。
@@ -535,6 +538,18 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
     - 语义**被补充**：v0.8 前「遗忘」只有单条 `forget`（未知 id 报错）、「修改」只有整文覆盖 `update`（**旧值即弃**）。同日实测缺口（`memory_audit` 读数）：**ARCHIVE 候选 254 条 / 216,024 字符**，而逐条清理需 254 次调用 ⇒ 机制上「知道该忘，但忘不动」；REVIEW 标出 3 个近重复簇却**无合并手段**；改错无历史可回溯。
     - 补齐三件事：① `forget` 三选择器（`id` / `ids[]` / `tier` 分档）+ `max` 护栏 + `dryRun` 预览；② `update` 三模式（`replace` / `append` / `patch`，patch 要求唯一命中否则拒绝）+ `revisions` 修订快照（保留最近 3 条）；③ 新工具 `memory_merge`（近重复簇：正文追加带来源标注 + 被并入者软归档，信息不丢）。
     - 教训：**只读提案器不是机制**——「能看见该忘什么」与「能一次忘掉」之间隔着执行原语；提案面与执行面必须成对交付，否则规则正确却落不了地（同 §5.14「机制送达信号、决策归我」的组合缺失）。
+
+14. **2026-09-22 · 压缩存档标题的时区被修正（UTC 冒充本地时间）**
+    - 语义**被修正**：`compaction-sink.ts` 原用 `new Date().toISOString().slice(0, 16)` 生成存档标题——**`toISOString()` 恒为 UTC**，而标题不带时区标注，读者会当成本地时间。实测：本地 **09-22 05:35** 的压缩在存档里写成「**2026-09-21 21:35**」（差整 8 小时；本机 `China Standard Time` / UTC+8）⇒ 我把「40 分钟前刚发生的事」读成了「昨天晚上的事」。
+    - 语义**被补充**：改为 `formatLocalStamp()`——本地时间 **+ 显式 UTC 偏移**，形如「会话压缩检查点 2026-09-22 05:35 UTC+08:00」。环境依赖（`getTimezoneOffset`）与格式化拆为两个纯函数（`utcOffsetLabel` / `formatLocalStamp`），使正/负/半小时时区可离线测（A78）。
+    - 教训：**「读数必须自带范围标注」（AGENTS.md §5.9 规则 6）落到时间上就是「必须带时区」**——不带时区的时间戳是虚数，与「余量不带口径」同类。同族缺陷：任务板归档文件名 `archive/terminal-YYYY-MM-DD.json` 亦为 UTC 分桶。
+    - **回写来源（D3 的样本价值）**：本次修复是被 `semantic_check` 的 **D3（实现比文档新）** 提示发现的——我改了实现却忘了回写文档，正是 D3 想抓的东西。⇒ 至少本次 D3 不是噪音而是真信号（抽样定性见任务 `t-32cd8d4d`）。
+    - 顺带修正：`tests/tools.test.ts` 的工具清单夹具缺 `memory_merge`（工具早已存在、清单未同步）⇒ 长期假红，会掩盖未来的真红。
+
+15. **2026-09-22 · 回写 §7 时抓到解析器的两处读数范围问题（先挂账，未改代码）**
+    - **发现 1（`total` 差 1，原因未定位）**：本表实际有 **78** 个 A 行（`Select-String '^\| A\d+ \|'` 计数 = 78，A1–A78 连续无缺），而解析器报 `total=77`。⇒ 已写进 §7 汇总行的「仪器挂账」：在查清之前该数字**不得当作「验收条目总数」使用**——若被漏算的那行恰为 pending，`verified` 判据（`pending==0`）会**偏松**。
+    - **发现 2（同一个状态列有两个消费者）**：A30 的状态词原为「待线上复核」（不在解析器词表内）。改成「待线上验收」后测得：`pending` **仍为 2**（判定规则是「非『已实测』即 pending」），而细分标签「其中显式标『待线上验收』」由 1 条变 2 条。⇒ 旧教训**收窄**为：**列错致命（曾把 18 条判作 0/18）；词表外的词只丢细分标签，不丢 pending**。
+    - 方法（§5.9 规则 6）：**这两个问题的性质都不是「文档写错」，而是「读仪器的姿势」**——先量（数行 + 对照实验）再下结论，不直接接受仪器报出的数字。
 
 ## 10 · 未决问题
 
