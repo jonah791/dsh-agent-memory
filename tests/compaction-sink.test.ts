@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import type { Context } from '@deepseek-ai/cordis'
-import { installCompactionSink } from '../lib/compaction-sink.js'
+import { installCompactionSink, formatLocalStamp, utcOffsetLabel } from '../lib/compaction-sink.js'
 import type { MemoryStore } from '../lib/store.js'
 
 /** 记录 store.remember 调用的假存储 */
@@ -97,4 +97,34 @@ test('非 compaction 事件不影响状态', () => {
     assert.equal(store.remembered.length, 0)
     assert.equal(sent.length, 0)
   })()
+})
+
+test('标题自带时区标注（本地时间 + UTC 偏移 · 读数范围可判）', () => {
+  const firedAt = Date.now()
+  const { store, fire } = harness()
+  fire({ type: 'compaction/start', data: { compactionId: 'c1' } })
+  fire({ type: 'compaction/summary', data: { compactionId: 'c1', summary: [{ type: 'text', text: '摘要' }] } })
+  fire({ type: 'compaction/end', data: { compactionId: 'c1' } })
+  return (async () => {
+    await new Promise((r) => setImmediate(r))
+    const title = store.remembered[0]!.title
+    const m = /^会话压缩检查点 (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC([+-])(\d{2}):(\d{2})$/.exec(title)
+    if (m === null) assert.fail('标题缺时区标注：' + title)
+    // round-trip：标题里的「本地时间 + 偏移」折回 UTC 必须等于建档时刻（分钟精度 ⇒ 容差 90s）
+    const offMinutes = (m[6]! === '-' ? -1 : 1) * (Number(m[7]) * 60 + Number(m[8]))
+    const utc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])) - offMinutes * 60_000
+    assert.ok(Math.abs(utc - firedAt) < 90_000, '标题时刻与建档时刻不符：' + title)
+  })()
+})
+
+test('utcOffsetLabel 尸体样本：正 / 负 / 半小时时区（平台无关）', () => {
+  assert.equal(utcOffsetLabel(480), 'UTC+08:00')
+  assert.equal(utcOffsetLabel(-300), 'UTC-05:00')
+  assert.equal(utcOffsetLabel(330), 'UTC+05:30')
+  assert.equal(utcOffsetLabel(0), 'UTC+00:00')
+})
+
+test('formatLocalStamp：分钟精度（秒与毫秒截断）· 偏移取自同一真源', () => {
+  const d = new Date(2026, 8, 22, 5, 35, 47, 123)
+  assert.equal(formatLocalStamp(d), '2026-09-22 05:35 ' + utcOffsetLabel(-d.getTimezoneOffset()))
 })

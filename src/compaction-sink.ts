@@ -31,6 +31,34 @@ export interface CompactionSinkDeps {
 }
 
 /**
+ * 把「本地相对 UTC 的偏移分钟数」渲染为显式时区标注。
+ * @param offsetMinutes - 东正西负（如 UTC+8 → `480`，UTC-5 → `-300`，UTC+5:30 → `330`）
+ * @returns 形如 `UTC+08:00` / `UTC-05:00` / `UTC+05:30` 的标注
+ */
+export function utcOffsetLabel(offsetMinutes: number): string {
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const sign = offsetMinutes < 0 ? '-' : '+'
+  const abs = Math.abs(offsetMinutes)
+  return `UTC${sign}${p2(Math.floor(abs / 60))}:${p2(abs % 60)}`
+}
+
+/**
+ * 把时刻渲染为「本地时间 + 显式时区」的标题片段。
+ *
+ * 不用 `toISOString()`：它恒为 UTC 却长得像本地时间——读者会把「09-22 05:35 发生的压缩」
+ * 读成「09-21 21:35」（2026-09-22 实测，我自己被误导过一次）。判据（AGENTS.md §5.9 规则 6）：
+ * 读数必须自带范围标注 ⇒ 时间必须带时区，否则是虚数。
+ * @param d - 目标时刻
+ * @returns 形如 `2026-09-22 05:35 UTC+08:00`（分钟精度；秒及以下截断）
+ */
+export function formatLocalStamp(d: Date): string {
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const ymd = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`
+  const hm = `${p2(d.getHours())}:${p2(d.getMinutes())}`
+  return `${ymd} ${hm} ${utcOffsetLabel(-d.getTimezoneOffset())}`
+}
+
+/**
  * 安装压缩即记忆联动。
  * @param ctx - 插件上下文（session/event firehose）
  * @param deps - 存储依赖
@@ -78,7 +106,7 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
     if (text === undefined || text.trim().length === 0) return
     const cwd = session.header?.cwd
     const scope = cwd === undefined ? 'global' : workspaceIdOf(cwd)
-    const title = `会话压缩检查点 ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`
+    const title = `会话压缩检查点 ${formatLocalStamp(new Date())}`
     // 保底存档（fire-and-forget：失败静默，压缩幂等下次再试）
     const notify = (entryId: string) => {
       // 智能体核心（2026-08-16 主人定调：压缩完成自动送达）：wakeup=true——
