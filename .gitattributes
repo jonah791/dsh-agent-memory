@@ -1,0 +1,10 @@
+# 行尾统一为 LF。
+#
+# 背景（2026-09-22 实测）：本机 `core.autocrlf=true` 是 **system 级**设置，
+# 而插件仓此前**没有** .gitattributes ⇒ git 在提交时警告
+# `LF will be replaced by CRLF the next time Git touches it`，
+# 即工作区文件会在下次 checkout 被改写成 CRLF——而 DSH 插件生态按 LF 消费
+# （BOM/CRLF 曾造成构建与测试假红，见技能 `dsh-plugin-pitfalls`）。
+#
+# 判据（改完怎么证明生效）：任一提交不再出现该警告，且 `git status --short` 为空。
+* text=auto eol=lf
