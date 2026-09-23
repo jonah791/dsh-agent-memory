@@ -1,5 +1,9 @@
 /**
  * L3 测试：自动 recall 注入（node:test，离线）——lastUserMessageText + buildAutoRecallDigest
+ *
+ * 0.1.7 契约（2026-09-23 修）：`MessageSourceMap.plugin` 已移除，生产者按自身 kind 声明来源
+ * （dsh-agent-telegram 现发 `source: { kind: 'dsh-agent-telegram' }`，证据 dsh-agent-telegram/src/index.ts:767）；
+ * `tool/result` 消息的 role 由 'user' 变 'tool'、块上提到 message 顶层。夹具已同步，并含 v3 形状**尸体样本**。
  */
 
 import { test } from 'node:test'
@@ -26,7 +30,7 @@ function entry(partial) {
 test('lastUserMessageText：取最后一条真实用户消息（kind=user）', () => {
   const messages = [
     { id: 'a', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '旧消息' }] },
-    { id: 'b', role: 'user', source: { kind: 'tool' }, content: [{ type: 'tool-result', toolCallId: 't1' }] },
+    { id: 'b', role: 'tool', source: { kind: 'tool' }, toolCallId: 't1', content: [{ type: 'text', text: '工具结果' }] },
     { id: 'c', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '新消息' }] },
   ]
   const found = lastUserMessageText(messages)
@@ -36,7 +40,7 @@ test('lastUserMessageText：取最后一条真实用户消息（kind=user）', (
 
 test('lastUserMessageText：无真实用户消息返回 undefined', () => {
   const messages = [
-    { id: 'a', role: 'user', source: { kind: 'tool' }, content: [] },
+    { id: 'a', role: 'tool', source: { kind: 'tool' }, toolCallId: 't0', content: [] },
     { id: 'b', role: 'assistant', source: { kind: 'model', provider: 'x', model: 'y' }, content: [] },
   ]
   assert.equal(lastUserMessageText(messages), undefined)
@@ -59,19 +63,26 @@ test('lastUserMessageText：多 text block 拼接', () => {
   assert.equal(found.text, '第一段\n第二段')
 })
 
-test('lastUserMessageText：Telegram 收件可触发（plugin=dsh-agent-telegram）', () => {
+test('lastUserMessageText：Telegram 收件可触发（kind=dsh-agent-telegram，0.1.7 形状）', () => {
   const messages = [
-    { id: 't', role: 'user', source: { kind: 'plugin', plugin: 'dsh-agent-telegram' }, content: [{ type: 'text', text: '[telegram] 启动comfyUI' }] },
+    { id: 't', role: 'user', source: { kind: 'dsh-agent-telegram' }, content: [{ type: 'text', text: '[telegram] 启动comfyUI' }] },
   ]
   const found = lastUserMessageText(messages)
   assert.equal(found.id, 't')
   assert.equal(found.text, '启动comfyUI') // [telegram] 前缀被剥掉
 })
 
-test('lastUserMessageText：其他 plugin 注入不触发（不要什么消息都返回记忆）', () => {
+test('尸体样本：v3 形状（kind=plugin + plugin 字段）**不**触发——0.1.7 已移除该 source 形状', () => {
   const messages = [
-    { id: 'x', role: 'user', source: { kind: 'plugin', plugin: 'dsh-agent-other' }, content: [{ type: 'text', text: '其他插件消息' }] },
-    { id: 'y', role: 'user', source: { kind: 'tool' }, content: [{ type: 'tool-result', toolCallId: 't2' }] },
+    { id: 'v3', role: 'user', source: { kind: 'plugin', plugin: 'dsh-agent-telegram' }, content: [{ type: 'text', text: '[telegram] 旧形状' }] },
+  ]
+  assert.equal(lastUserMessageText(messages), undefined)
+})
+
+test('lastUserMessageText：其他插件注入不触发（不要什么消息都返回记忆）', () => {
+  const messages = [
+    { id: 'x', role: 'user', source: { kind: 'dsh-agent-other' }, content: [{ type: 'text', text: '其他插件消息' }] },
+    { id: 'y', role: 'tool', source: { kind: 'tool' }, toolCallId: 't2', content: [{ type: 'text', text: '工具结果' }] },
   ]
   assert.equal(lastUserMessageText(messages), undefined)
 })
@@ -79,7 +90,7 @@ test('lastUserMessageText：其他 plugin 注入不触发（不要什么消息�
 test('lastUserMessageText：GUI 与 Telegram 混合 → 取最新一条可触发来源', () => {
   const messages = [
     { id: 'g', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'GUI 消息' }] },
-    { id: 't', role: 'user', source: { kind: 'plugin', plugin: 'dsh-agent-telegram' }, content: [{ type: 'text', text: '[telegram] 电报消息' }] },
+    { id: 't', role: 'user', source: { kind: 'dsh-agent-telegram' }, content: [{ type: 'text', text: '[telegram] 电报消息' }] },
   ]
   const found = lastUserMessageText(messages)
   assert.equal(found.id, 't')

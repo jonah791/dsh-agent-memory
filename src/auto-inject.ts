@@ -29,6 +29,12 @@ import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
 import { recallEntries } from './search.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-agent-memory': { kind: 'dsh-agent-memory' }
+  }
+}
+
 /** 注入依赖：存储 + 配置加载（测试注入 mock） */
 export interface AutoRecallInjectDeps {
   store: MemoryStore
@@ -47,7 +53,7 @@ const QUERY_MAX = 200
  * 从消息批次中提取最后一条真实主人消息（role=user）。
  * 触发来源严格限定为两种（主人 2026-09-01 反馈「不要什么消息都返回记忆」）：
  * 1. GUI/Web 直接发送：source.kind === 'user'
- * 2. Telegram 收件：source.kind === 'plugin' && source.plugin === 'dsh-agent-telegram'
+ * 2. Telegram 收件：source.kind === 'dsh-agent-telegram'
  *    （dsh-agent-telegram 注入，文本带 '[telegram] ' 前缀，检索前剥掉）
  * 其余一律不触发（tool 结果 / 其他 plugin 注入 / model 消息）。
  * 倒序遍历找「最新」的真实主人消息；内容取全部 text block 拼接后 trim。
@@ -64,7 +70,7 @@ export function lastUserMessageText(
     if (m?.role !== 'user') continue
     const kind = m.source?.kind
     const isGui = kind === 'user'
-    const isTelegram = kind === 'plugin' && m.source?.plugin === 'dsh-agent-telegram'
+    const isTelegram = kind === 'dsh-agent-telegram'
     if (!isGui && !isTelegram) continue
     if (typeof m.id !== 'string') continue
     let text = (m.content ?? [])
@@ -189,7 +195,7 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
     signal.throwIfAborted()
     const message = createUserMessage({
       content: [{ type: 'text', text: digest }],
-      source: { kind: 'plugin', plugin: 'dsh-agent-memory', form: 'recall' },
+      source: { kind: 'dsh-agent-memory', form: 'recall' },
     })
     // 尾追加（缓存友好）：动态注入统一放在批次末尾，避免插在历史中部破坏前缀缓存
     return { kind: 'enter', messages: [...decision.messages, message] }
