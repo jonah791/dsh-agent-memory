@@ -139,9 +139,9 @@ test('A47 未给重心 ⇒ 完全走原路径（同一输入同一输出）', ()
 test('A48 重心素材：排除工具结果与插件注入，保留主人消息与模型回答，取最后 N 条', () => {
   const messages = [
     { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '第一句' }] },
-    { role: 'user', source: { kind: 'tool' }, content: [{ type: 'text', text: '工具结果不该进重心' }] },
+    { role: 'tool', source: { kind: 'tool' }, toolCallId: 't1', content: [{ type: 'text', text: '工具结果不该进重心' }] },
     { role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text: '模型回答' }] },
-    { role: 'user', source: { kind: 'plugin', plugin: 'dsh-agent-memory' }, content: [{ type: 'text', text: '注入不该进重心' }] },
+    { role: 'user', source: { kind: 'dsh-agent-memory' }, content: [{ type: 'text', text: '注入不该进重心' }] },
     { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '最新一句' }] },
   ]
   const texts = recentTurnTexts(messages, 4)

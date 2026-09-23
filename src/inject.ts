@@ -20,6 +20,12 @@ import type { MemoryStore } from './store.ts'
 import { workspaceIdOf, GLOBAL_SCOPE } from './scope.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, type RoleCarrier } from './role.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-agent-memory': { kind: 'dsh-agent-memory' }
+  }
+}
+
 /** 注入依赖：存储 + 配置加载（测试注入 mock） */
 export interface MemoryInjectDeps {
   store: MemoryStore
@@ -132,7 +138,7 @@ export function installMemoryInject(ctx: Context, deps: MemoryInjectDeps): void 
     signal.throwIfAborted()
     const message = createUserMessage({
       content: [{ type: 'text', text: digest }],
-      source: { kind: 'plugin', plugin: 'dsh-agent-memory' },
+      source: { kind: 'dsh-agent-memory' },
     })
     injected.add(agent.session.id)
     // 尾部追加（缓存友好）：动态注入统一放在批次末尾，避免插在历史中部破坏前缀缓存。

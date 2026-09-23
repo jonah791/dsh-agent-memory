@@ -99,7 +99,8 @@ export function recentTurnTexts(messages: readonly unknown[], limit = 4): string
     }
     if (m.role !== 'user' && m.role !== 'assistant') continue
     const kind = m.source?.kind
-    // 工具结果（tool）与插件注入（plugin）不是对话内容；主人消息（user）与模型回答（model/assistant）才是
+    // 工具结果（tool）与插件注入（0.1.7 起按生产者分立的 kind，非 user/model）不是对话内容；
+    // 主人消息（user）与模型回答（model/assistant）才是
     if (kind !== undefined && kind !== 'user' && kind !== 'model') continue
     const text = (m.content ?? [])
       .filter((block) => block?.type === 'text')

@@ -20,6 +20,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MemoryStore } from './store.ts'
 import { workspaceIdOf } from './scope.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-agent-memory': { kind: 'dsh-agent-memory' }
+  }
+}
+
 /** 单个压缩事务的跟踪记录 */
 interface CompactionRecord {
   summary?: string
@@ -118,7 +124,7 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
         + '（scope=' + scope + '）。是否提炼记忆版、如何组织，由你决定。'
       try {
         agent.send(
-          createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'plugin', plugin: 'dsh-agent-memory' } }),
+          createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'dsh-agent-memory' } }),
           'next-turn',
           true, // wakeup=true：压缩完成即自动送达（主人 2026-08-16：不等主人下一条消息）
         )

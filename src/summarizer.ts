@@ -20,6 +20,12 @@ import type {
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { CompressionLevel, SummarizeInput } from './timeline.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-agent-memory': { kind: 'dsh-agent-memory' }
+  }
+}
+
 /** 直调配置：provider/model 均可留空走会话路由；maxTokens 缺省 2000 */
 export interface SummarizerConfig {
   /** 显式 provider 路由；空字符串 = 跟随会话当前路由 */
@@ -138,7 +144,7 @@ export async function summarizeEntries(
   const messages: Message[] = [
     createUserMessage({
       content: [{ type: 'text', text: prompt }],
-      source: { kind: 'plugin', plugin: 'dsh-agent-memory' },
+      source: { kind: 'dsh-agent-memory' },
     }),
   ]
   const options: GenerateOptions = {
