@@ -372,7 +372,18 @@ test('A41b 无 audit 段的历史配置：auditMemory 走缺省先验，不崩',
   seedRaw(kv, [entry({ id: 'x', title: '历史配置下的条目', body: 'x'.repeat(120) })])
   const result = await byName.get('memory_audit').execute({}, exec)
   assert.equal(result.summary.total, 1)
-  assert.equal(result.candidates[0].bucket, 'KEEP')
+  // ⚠ 不断言具体桶：桶是「真实 now − 夹具 createdAt」的函数，会随时间漂移。
+  //   本条曾写死 'KEEP'（写测试时 age≈5 ≤ keep_recent_days 7）；11 天后 age=16 ≥ archive_min_age_days(14)
+  //   且无 source ⇒ 正确判 ARCHIVE ⇒ **假红**。这不是实现 bug，是**判据把时间相关的结果写死了**。
+  //   （本文件其余桶断言都不脆：它们直接调 auditMemory({ …, now: NOW }) 注入了固定时钟；
+  //     而这里走的是工具层，工具不接 now —— 结构差异就是脆性的来源。）
+  //   改为断言「缺省先验真的被用上」：14 / 7 / 3000 这三个数值只可能来自 DEFAULT_AUDIT_CONFIG。
+  const why = result.candidates[0].reasons.join(' · ')
+  assert.match(
+    why,
+    /archive_min_age_days\(14\)|keep_recent_days 7|demote_min_chars\(3000\)/,
+    `分档理由须引用缺省先验的数值（证明历史配置回落到 DEFAULT_AUDIT_CONFIG），实际：${why}`,
+  )
 })
 
 // ---------- 只读工具不进写路径 ----------
