@@ -8,7 +8,7 @@
 
 import { describe, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { buildSummaryPrompt, summarizeEntries } from '../lib/summarizer.js'
+import { buildSummaryPrompt, summarizeEntries, DEFAULT_SUMMARY_MAX_CHARS } from '../lib/summarizer.js'
 
 /** 标准压缩入参（与 timeline 的 SummarizeInput 同形） */
 function makeInput(overrides = {}) {
@@ -37,7 +37,7 @@ function makeInput(overrides = {}) {
 
 test('buildSummaryPrompt：maxChars 参数逐次覆盖（重压用更严的尺子）', () => {
   const p = buildSummaryPrompt(makeInput(), 4000)
-  assert.ok(p.includes('正文不超过 4000 字'), 'per-call 预算生效（缺省 6000 被覆盖）')
+  assert.ok(p.includes('正文不超过 4000 字'), 'per-call 预算生效（压过缺省）')
   assert.ok(p.includes('原始条目：'), '首压模式的标签')
   assert.ok(!p.includes('待重压的概要：'))
 })
@@ -110,9 +110,12 @@ describe('buildSummaryPrompt 提示词构建', () => {
     assert.ok(!prompt.includes('周记模板'))
   })
 
-  test('长度上限（v0.8.1）：缺省 6000 字，且显式劝阻搬运原文', () => {
+  // ⚠ 断言引用**常量**而非硬编码数字（v0.11.6 修）：上限的**具体数值是实现细节**，
+  // 本用例要保证的是「提示词里有长度上限 + 劝阻搬运原文」。硬编码会让改值即假红
+  // （2026-09-27 实测：6000→4000 时本用例红，而实现完全正确）——测行为，不测实现。
+  test('长度上限：缺省取 DEFAULT_SUMMARY_MAX_CHARS，且显式劝阻搬运原文', () => {
     const prompt = buildSummaryPrompt(makeInput())
-    assert.ok(prompt.includes('正文不超过 6000 字'))
+    assert.ok(prompt.includes(`正文不超过 ${DEFAULT_SUMMARY_MAX_CHARS} 字`), '上限来自常量，单一真源')
     assert.ok(prompt.includes('导航层'))
     assert.ok(prompt.includes('不要逐字搬运原文'))
   })
@@ -120,7 +123,7 @@ describe('buildSummaryPrompt 提示词构建', () => {
   test('长度上限可覆盖（第二参数）', () => {
     const prompt = buildSummaryPrompt(makeInput(), 2500)
     assert.ok(prompt.includes('正文不超过 2500 字'))
-    assert.ok(!prompt.includes('正文不超过 6000 字'))
+    assert.ok(!prompt.includes(`正文不超过 ${DEFAULT_SUMMARY_MAX_CHARS} 字`), '显式参数压过缺省')
   })
 })
 
