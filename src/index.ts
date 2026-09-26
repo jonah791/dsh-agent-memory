@@ -268,7 +268,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       // ——那个缓存在「懒压缩还没跑过」时是空的，实测首次调用直接 fail-loud「缺少 provider/model」。
       // 与 periodic 补压同一策略：**实时解析活跃会话路由优先，lastRoute 兜底**（复用 resolveActiveRoute）。
       const route = resolveActiveRoute() ?? lastRoute
-      const result = await summarizeEntries(ctx, toSummarizerConfig(config), input, undefined, undefined, route)
+      // ⚠ sessionId 必须**显式**传到第 7 参，不能靠 fallbackTarget 捎带（v0.11.5 修）：
+      // 网关类 provider（opencode.ai）要求 `x-opencode-session` 头，而该头只能由
+      // `GenerateOptions.sessionId` 触发注入 —— 实测漏传直接 400 `MissingSessionID`。
+      // 这正是 summarizer.ts L122–128 注释里记着的 2026-09-15 事故同款坑（当时时间压缩 100% 失败）。
+      // agent 路径（compress）由 `agent.session.id` 自动兜住；recompress 无 agent ⇒ 必须手传。
+      const fallback = route !== undefined ? { provider: route.provider, model: route.model } : undefined
+      const result = await summarizeEntries(ctx, toSummarizerConfig(config), input, undefined, undefined, fallback, route?.sessionId)
       return result.body
     }
     const compressor = new TimelineCompressor(store, cfg, summarize, undefined)
