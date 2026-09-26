@@ -264,7 +264,11 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
     const cfg = await loadConfig(hitScope)
     const summarize: SummarizeFn = async (input) => {
-      const result = await summarizeEntries(ctx, toSummarizerConfig(config), input, undefined, undefined, lastRoute)
+      // 路由来源（v0.11.4 修）：recompress 是**工具触发**、没有 agent 上下文 ⇒ 不能只靠 lastRoute
+      // ——那个缓存在「懒压缩还没跑过」时是空的，实测首次调用直接 fail-loud「缺少 provider/model」。
+      // 与 periodic 补压同一策略：**实时解析活跃会话路由优先，lastRoute 兜底**（复用 resolveActiveRoute）。
+      const route = resolveActiveRoute() ?? lastRoute
+      const result = await summarizeEntries(ctx, toSummarizerConfig(config), input, undefined, undefined, route)
       return result.body
     }
     const compressor = new TimelineCompressor(store, cfg, summarize, undefined)

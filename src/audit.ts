@@ -386,8 +386,13 @@ export function auditMemory(input: AuditInput): AuditResult {
       const changedAt = Date.parse(entry.updatedAt ?? entry.createdAt)
       if (!Number.isNaN(changedAt) && markedAt >= changedAt) {
         bucket = 'KEEP'
+        // ⚠ 用**本地**日期渲染，不用 `toISOString()`（v0.11.4 修）：后者恒为 UTC，
+        // 本地凌晨会把今天显示成昨天（实测 01:30 的裁决显示为 2026-09-26）。
+        // 与 compress 侧 `formatLocalStamp` 同一纪律：时间必须带对时区，否则是虚数（§5.9 规则 6）。
+        const markedDay = new Date(markedAt)
+        const pad2 = (n: number) => String(n).padStart(2, '0')
         reasons = [
-          `已裁决（${new Date(markedAt).toISOString().slice(0, 10)}）——保持现状；条目若再变动会自动重新纳入`,
+          `已裁决（${markedDay.getFullYear()}-${pad2(markedDay.getMonth() + 1)}-${pad2(markedDay.getDate())}）——保持现状；条目若再变动会自动重新纳入`,
         ]
       }
     }

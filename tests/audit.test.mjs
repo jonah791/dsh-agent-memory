@@ -131,7 +131,12 @@ test('A42 工具面：memory_audit 已注册（共 14 个工具）', () => {
 // ---------- A54 已裁决标记（v0.11.2） ----------
 
 test('A54 已裁决标记：命中 ⇒ 归 KEEP 并标注；条目再变动 ⇒ 自动重新纳入（防永久免检）', () => {
-  const reviewedAt = NOW - 1 * DAY
+  // ★ 刻意取一个「**UTC 日 ≠ 本地日**」的时刻（本地 09-15 04:00 = UTC 09-14 20:00）：
+  //   这样 v0.11.4 的「本地日期渲染」断言才有**分辨力**——若实现退回 toISOString（UTC），
+  //   理由里会显示 09-14 而断言期待本地日 09-15 ⇒ **必红**。
+  //   （最初用 NOW-1d 时两者同一天，断言恒真 = 无分辨力；判据要会亮。）
+  //   ⚠ 在 UTC 机器上本地日 = UTC 日，该断言退化为恒真——但它仍正确，只是无差可测。
+  const reviewedAt = Date.parse('2026-09-14T20:00:00.000Z')
   const target = aged(30, { id: 'marked', title: '已裁决的超大条目', body: 'x'.repeat(15000) })
   const stale = aged(0.5, { id: 'changed', title: '裁决后又被改过的条目', body: 'x'.repeat(15000) })
 
@@ -145,6 +150,16 @@ test('A54 已裁决标记：命中 ⇒ 归 KEEP 并标注；条目再变动 ⇒ 
   const hit = after.candidates.find((c) => c.id === 'marked')
   assert.equal(hit.bucket, 'KEEP', '已裁决 ⇒ 保持现状（KEEP）')
   assert.ok(hit.reasons[0].includes('已裁决'), `理由应点名已裁决，实得：${hit.reasons[0]}`)
+  // ★ 本地日期渲染（v0.11.4）：断言「理由里的日期 = 标记时刻的**本地**日」。
+  //   刻意不硬编码日期——那会让夹具依赖运行平台的时区（UTC 机器上会差一天，
+  //   违反技能 dsh-plugin-testability 的「夹具不得依赖运行平台」纪律）。
+  const md = new Date(reviewedAt)
+  const p2 = (n) => String(n).padStart(2, '0')
+  const localDay = `${md.getFullYear()}-${p2(md.getMonth() + 1)}-${p2(md.getDate())}`
+  assert.ok(
+    hit.reasons[0].includes(localDay),
+    `理由里的日期应是本地日 ${localDay}（用 toISOString 会显示成 UTC 日），实得：${hit.reasons[0]}`,
+  )
   // 对账不变量（A37）不破：候选仍在（★ 刻意不剔除，否则 candidates 与 byBucket 会对不上）
   assert.equal(after.candidates.length, 1, '★ 已裁决的条目仍出现在候选里（只是改判 KEEP）')
   assert.equal(after.summary.chars, target.body.length, '各档字符合计仍等于总量')
