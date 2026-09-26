@@ -209,6 +209,12 @@ export interface AuditConfig {
   reviewMinChars: number
   /** 未被引用且体量 ≥ 此字符数即判 DEMOTE */
   demoteMinChars: number
+  /**
+   * summary 类正文预算（字符，v0.11.0）。
+   * 概要是压缩流水线**自动生成**的，其长度上限由 `summarizer.summaryMaxChars`
+   * 决定（缺省 6000）——审计必须用**它自己的尺子**量它，不能借用通用体量门槛。
+   */
+  summaryMaxChars: number
   /** 侧车用量轨迹（只追加、吞错、按体积轮转；绝不改条目） */
   accessTrace: { enabled: boolean; maxBytes: number }
   /** 提案日志（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join） */

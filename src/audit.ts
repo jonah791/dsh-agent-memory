@@ -56,6 +56,15 @@ export const DEFAULT_AUDIT_CONFIG: AuditConfig = Object.freeze({
   reviewMinChars: 12000,
   /** 未引用且体量 ≥ 此字符数 → DEMOTE（可降级/压缩） */
   demoteMinChars: 3000,
+  /**
+   * summary 类正文预算（字符）——概要是压缩流水线**自动生成**的，其上限由
+   * `summarizer.summaryMaxChars` 决定（缺省 6000），审计必须用**它自己的尺子**量它。
+   *
+   * 为什么单独给（2026-09-26 实测）：此前只按统一的 `reviewMinChars(12000)` 判，
+   * 等于对概要**放行 2 倍超标**——月概要 39,842 字（= 预算 6.6 倍）直到体量翻过 12000
+   * 才被 REVIEW 抓到；6000～11999 之间的超预算概要则一路滑到 KEEP/DEMOTE，无人知会。
+   */
+  summaryMaxChars: 6000,
   accessTrace: Object.freeze({ enabled: true, maxBytes: 2_000_000 }),
   /** 提案日志（v0.7）：让提案有历史——audit 候选 + forget/update 动作同文件可 join */
   proposalLog: Object.freeze({ enabled: true, maxBytes: 1_000_000 }),
@@ -270,6 +279,16 @@ export function classify(
 
   if (e.dupCluster !== undefined) {
     reasons.push(`近重复簇 #${e.dupCluster}（canonical=${e.dupOf ?? '?'}）——交人裁决合并或归档`)
+    return { bucket: 'REVIEW', reasons }
+  }
+  // 概要超预算（v0.11.0）：summary 是压缩流水线**自动生成**的，预算 = summaryMaxChars（缺省 6000）。
+  // 必须放在通用体量门槛**之前**判——否则 6000～11999 区间的超预算概要一路滑到 KEEP/DEMOTE，
+  // 没有任何告警（2026-09-26 实测：月概要 39,842 字 = 预算 6.6 倍，翻过 12000 才被看见）。
+  if (entry.kind === 'summary' && e.chars > config.summaryMaxChars) {
+    const times = Math.round((e.chars / config.summaryMaxChars) * 10) / 10
+    reasons.push(
+      `概要超预算：${e.chars} 字符 > summary_max_chars(${config.summaryMaxChars})，达 ${times} 倍——需重压`,
+    )
     return { bucket: 'REVIEW', reasons }
   }
   if (e.chars >= config.reviewMinChars) {

@@ -208,6 +208,30 @@ test('A36 分档顺序可复现：REVIEW > KEEP(承重) > KEEP(新) > ARCHIVE > 
   assert.deepEqual([...new Set(order)], ['REVIEW', 'ARCHIVE', 'DEMOTE', 'KEEP'])
 })
 
+// ---------- A43 概要超预算（v0.11.0 判据 + 双向对照） ----------
+
+test('A43 概要超预算 → REVIEW：判据专属 summary，且用概要自己的尺子（summary_max_chars）', () => {
+  const auditOne = (e) => auditMemory({ entries: [e], now: NOW }).candidates.find((c) => c.id === e.id)
+
+  // ① 尸体样本（正）：summary 且 7000 字 > 预算 6000，但**未达**通用门槛 12000。
+  //    没有这条判据时它会滑到 KEEP(新)/DEMOTE——超预算却无人知会（2026-09-26 实测缺口）。
+  const over = auditOne(entry({ id: 'over', kind: 'summary', title: '月概要 超预算', body: 'x'.repeat(7000) }))
+  assert.equal(over.bucket, 'REVIEW')
+  assert.ok(
+    over.reasons[0].includes('概要超预算'),
+    `理由应点名超预算（而非笼统「体量大」），实得：${over.reasons[0]}`,
+  )
+
+  // ② 对照组：**同样 7000 字**但 kind=knowledge——预算判据不得越界管普通条目。
+  //    否则「摘要预算」会伪装成全局体量门槛，把一切条目的门槛一并收紧。
+  const plain = auditOne(entry({ id: 'plain', title: '普通条目 同长度', body: 'x'.repeat(7000) }))
+  assert.notEqual(plain.bucket, 'REVIEW')
+
+  // ③ 对照组：summary 但在预算内（5000 < 6000）——不得因预算进 REVIEW。
+  const within = auditOne(entry({ id: 'within', kind: 'summary', title: '日概要 预算内', body: 'x'.repeat(5000) }))
+  assert.notEqual(within.bucket, 'REVIEW')
+})
+
 // ---------- A37 对账 ----------
 
 test('A37 对账：各档字符合计 = 总字符；各档条数合计 = 总条数', () => {

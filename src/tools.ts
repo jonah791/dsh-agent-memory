@@ -252,7 +252,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
 function buildRecall(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'recall',
-    description: '检索记忆。按关键词/层级/标签/时间过滤，按相关度（标签命中 > 标题命中 > 正文命中）与新鲜度排序；每个结果附带「相关链」（related：共享标签/标题/正文关联的记忆，因果留痕维度）。结果标注来源作用域（global 或 workspaceId）与压缩层级（周概要/月概要等）。缺省检索当前项目 + global（全局记忆永远附加，来源在 scope 字段标注）。',
+    description: '检索记忆。按关键词/层级/标签/时间过滤，按相关度（标签命中 > 标题命中 > 正文命中）与新鲜度排序；每个结果附带「相关链」（related：共享标签/标题/正文关联的记忆，因果留痕维度）。**每条都带 id**（主条目与相关链都有，可直接用于 update / forget / memory_merge）。结果标注来源作用域（global 或 workspaceId）与压缩层级（周概要/月概要等）。缺省检索当前项目 + global（全局记忆永远附加，来源在 scope 字段标注）。',
     parameters: {
       query: { type: 'string', description: '检索关键词（多个词空格分隔，任一命中即计分；省略则按新鲜度排序）。' },
       kind: { type: 'array', items: { type: 'string', enum: ['fact', 'knowledge', 'episodic', 'summary'] }, description: '层级过滤（任一命中）。' },
@@ -311,9 +311,12 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         const lines = value.results.map((item) => {
           const levelNote = item.level !== null ? `（${item.level}概要）` : ''
           const relatedNote = item.related !== undefined && item.related.length > 0
-            ? ' → 关联: ' + item.related.map((r) => r.title).join(' / ')
+            ? ' → 关联: ' + item.related.map((r) => `${r.title}(id=${r.id})`).join(' / ')
             : ''
-          return `- [${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}${relatedNote}`
+          // 渲染 id（v0.11.0）：id 本就在 output schema 里（数据层一直有），此前只在 render 层漏掉，
+          // 导致「知道标题却拿不到 id」⇒ update / forget / memory_merge 全部缺入口
+          // （2026-09-26 实测：为找一条已知标题的条目花掉 5 轮仍未取到 id）。
+          return `- [${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${relatedNote}`
         })
         return [{
           type: 'text',
@@ -793,7 +796,7 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
 function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_browse',
-    description: '浏览记忆档案：按时间桶分组翻看记忆（年/月/周/日），支持按层级/类型/标签/时间过滤与分页。与 recall 互补——recall 用于「知道要找什么」，memory_browse 用于「不知道有什么、翻档案发现」。概要通过 archiveRef 关联原始条目，可用 recall 展开。',
+    description: '浏览记忆档案：按时间桶分组翻看记忆（年/月/周/日），支持按层级/类型/标签/时间过滤与分页。与 recall 互补——recall 用于「知道要找什么」，memory_browse 用于「不知道有什么、翻档案发现」。**每条都带 id**（可直接用于 update / forget / memory_merge）。概要通过 archiveRef 关联原始条目，可用 recall 展开。',
     parameters: {
       kind: { type: 'array', items: { type: 'string', enum: ['fact', 'knowledge', 'episodic', 'summary'] }, description: '条目类型过滤（任一命中）。' },
       tags: { type: 'array', items: { type: 'string' }, description: '标签过滤（全部命中）。' },
@@ -850,7 +853,9 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       render: (args, value) => {
         const lines = value.groups.map((group) => {
           const levelNote = group.level !== null ? `（${group.level}概要）` : ''
-          const items = group.items.map((item) => `  - [${item.kind}] ${item.title}`).join('\n')
+          // 渲染 id（v0.11.0）：同 recall——id 一直在 output schema 里，此前 render 层漏掉，
+          // 使「翻档案看到标题却无法对它做 update/forget/merge」
+          const items = group.items.map((item) => `  - [${item.kind}] ${item.title}(id=${item.id})`).join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
         })
         return [{
@@ -1129,7 +1134,7 @@ function buildCheck(): ToolDefinition {
 function buildAudit(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_audit',
-    description: '价值体检（只读）：回答「哪些条目值得继续占位置、哪些该降级/归档」。输出四档提案——KEEP（承重：被概要 archiveRef 引用 / 新 / 有角色归属）、DEMOTE（未引用且体量大，可降级压缩）、ARCHIVE（未引用 + 老 + 无溯源，归档候选）、REVIEW（近重复簇 / 超大条目，交人裁决）——每条带证据行，并给出按层级聚合的体量视图。**只读**：不归档、不删除、不刷新 accessedAt；分数是序数（权重为启发式先验，非拟合值）。',
+    description: '价值体检（只读）：回答「哪些条目值得继续占位置、哪些该降级/归档」。输出四档提案——KEEP（承重：被概要 archiveRef 引用 / 新 / 有角色归属）、DEMOTE（未引用且体量大，可降级压缩）、ARCHIVE（未引用 + 老 + 无溯源，归档候选）、REVIEW（近重复簇 / 超大条目 / 概要超预算，交人裁决）——每条带证据行，并给出按层级聚合的体量视图。**只读**：不归档、不删除、不刷新 accessedAt；分数是序数（权重为启发式先验，非拟合值）。',
     parameters: {
       scope: { type: 'string', description: '作用域覆盖（缺省当前 workspace + global；受调用者角色视野约束）。' },
       role: { type: 'string', description: '角色视角覆盖（缺省按调用者会话身份推导）。' },

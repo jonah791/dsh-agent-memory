@@ -12,6 +12,11 @@
  *   当前 turn 结束，空闲立即处理）；压缩时 agent 必醒着（活跃期决策发起），
  *   不存在睡眠被打断的场景（2026-08-16 主人定调：完成即送达，不等主人下一条消息）
  * 失败（end 带 error）不落库不通知；落库失败静默（幂等，下次压缩再试）。
+ *
+ * **v0.11.0 存档粒度修正（2026-09-26 实测）**：标题此前带精确时刻 ⇒ 每次压缩都躲过
+ * `store.remember` 的 title 指纹查重（store.ts L167：knowledge/episodic 同标题自动合并），
+ * 8.5 小时内落下 6 条内容层层包含的平行快照。现改为**日粒度合并键**，同日多次压缩
+ * 自动并入一条；精确时刻移入正文抬头，合并后仍能分清哪段是哪次。
  */
 
 import type { Context } from '@deepseek-ai/cordis'
@@ -65,6 +70,23 @@ export function formatLocalStamp(d: Date): string {
 }
 
 /**
+ * 把时刻渲染为**日粒度**（本地日 + 显式时区），用作 checkpoint 存档的**合并键**。
+ *
+ * 为什么需要它（2026-09-26 实测）：`store.remember` 对 episodic 走 title 指纹查重
+ * （store.ts L167），标题带精确时刻 ⇒ 每次压缩都算「新标题」⇒ 8.5 小时落 6 条平行快照，
+ * 内容层层包含。日粒度让同日多次压缩落到同一条（标签并集 + 正文追加）。
+ *
+ * 时区必须显式（§5.9 规则 6）：**日界随时区而变**——不标时区的「2026-09-26」是虚数。
+ * @param d - 目标时刻
+ * @returns 形如 `2026-09-26 UTC+08:00`
+ */
+export function dayStampOf(d: Date): string {
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  const ymd = `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`
+  return `${ymd} ${utcOffsetLabel(-d.getTimezoneOffset())}`
+}
+
+/**
  * 安装压缩即记忆联动。
  * @param ctx - 插件上下文（session/event firehose）
  * @param deps - 存储依赖
@@ -112,7 +134,9 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
     if (text === undefined || text.trim().length === 0) return
     const cwd = session.header?.cwd
     const scope = cwd === undefined ? 'global' : workspaceIdOf(cwd)
-    const title = `会话压缩检查点 ${formatLocalStamp(new Date())}`
+    const now = new Date()
+    // 标题 = 日粒度合并键（同日多次压缩并入一条）；精确时刻进正文抬头（见文件头 v0.11.0 说明）
+    const title = `会话压缩检查点 · ${dayStampOf(now)}`
     // 保底存档（fire-and-forget：失败静默，压缩幂等下次再试）
     const notify = (entryId: string) => {
       // 智能体核心（2026-08-16 主人定调：压缩完成自动送达）：wakeup=true——
@@ -133,7 +157,7 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
     void deps.store.remember({
       kind: 'episodic',
       title,
-      body: text,
+      body: `> 压缩于 ${formatLocalStamp(now)}\n\n${text}`,
       tags: ['compaction'],
       scope,
       level: null,

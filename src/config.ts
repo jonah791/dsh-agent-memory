@@ -53,6 +53,7 @@ const AUDIT_KEYS: ReadonlySet<string> = new Set([
   'archive_min_age_days',
   'review_min_chars',
   'demote_min_chars',
+  'summary_max_chars',
   'access_trace',
   'proposal_log',
   'compress_trace',
@@ -438,7 +439,7 @@ function auditOrDefault(value: unknown): AuditConfig {
   if (value === undefined || value === null) return DEFAULT_AUDIT_CONFIG
   if (!isPlainObject(value)) {
     throw new MemoryConfigError(
-      'memory.yml: audit 必须是映射（weights/keep_recent_days/archive_min_age_days/review_min_chars/demote_min_chars/access_trace）',
+      'memory.yml: audit 必须是映射（weights/keep_recent_days/archive_min_age_days/review_min_chars/demote_min_chars/summary_max_chars/access_trace）',
     )
   }
   assertNoUnknownKeys(value, AUDIT_KEYS, 'memory.yml.audit')
@@ -448,6 +449,7 @@ function auditOrDefault(value: unknown): AuditConfig {
     archiveMinAgeDays: nonNegativeNumberOrDefault(value.archive_min_age_days, DEFAULT_AUDIT_CONFIG.archiveMinAgeDays, 'audit.archive_min_age_days'),
     reviewMinChars: nonNegativeIntOrDefault(value.review_min_chars, DEFAULT_AUDIT_CONFIG.reviewMinChars, 'audit.review_min_chars'),
     demoteMinChars: nonNegativeIntOrDefault(value.demote_min_chars, DEFAULT_AUDIT_CONFIG.demoteMinChars, 'audit.demote_min_chars'),
+    summaryMaxChars: nonNegativeIntOrDefault(value.summary_max_chars, DEFAULT_AUDIT_CONFIG.summaryMaxChars, 'audit.summary_max_chars'),
     accessTrace: accessTraceOrDefault(value.access_trace),
     proposalLog: proposalLogOrDefault(value.proposal_log),
     compressTrace: compressTraceOrDefault(value.compress_trace),
