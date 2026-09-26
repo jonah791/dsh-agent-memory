@@ -8,7 +8,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { lastUserMessageText, buildAutoRecallDigest } from '../lib/auto-inject.js'
+import { lastUserMessageText, buildAutoRecallDigest, filterFresh, worthInjecting } from '../lib/auto-inject.js'
 
 function entry(partial) {
   return {
@@ -24,6 +24,57 @@ function entry(partial) {
     ...partial,
   }
 }
+
+// ---------- filterFresh（v0.8 会话级去重）----------
+// 动机（2026-09-26 实测）：646 次 auto 注入共 1930 条目计次、唯一仅 432 ⇒ 77.6% 重复，
+// 最高一条被注入 158 次。去重后只有新信息占上下文。
+
+test('filterFresh：剔除本会话已注入过的条目，未注入的保序保留', () => {
+  const entries = [
+    entry({ id: 'a', title: 'A', createdAt: '2026-09-26T00:00:00.000Z' }),
+    entry({ id: 'b', title: 'B', createdAt: '2026-09-26T00:00:00.000Z' }),
+    entry({ id: 'c', title: 'C', createdAt: '2026-09-26T00:00:00.000Z' }),
+  ]
+  // 修复前：不剔除 ⇒ ['a','b','c'] 每次全量重注（判据的区分力所在）
+  assert.deepEqual(filterFresh(entries, new Set(['a', 'c'])).map((e) => e.id), ['b'])
+})
+
+test('filterFresh：全部命中都是旧的 → 空数组（调用方据此静默跳过，零 token 浪费）', () => {
+  const entries = [entry({ id: 'hot', title: 'Hot', createdAt: '2026-09-26T00:00:00.000Z' })]
+  assert.deepEqual(filterFresh(entries, new Set(['hot'])), [])
+})
+
+test('filterFresh：空注入集不改变输入（会话首轮行为与去重前一致）', () => {
+  const entries = [
+    entry({ id: 'a', title: 'A', createdAt: '2026-09-26T00:00:00.000Z' }),
+    entry({ id: 'b', title: 'B', createdAt: '2026-09-26T00:00:00.000Z' }),
+  ]
+  assert.deepEqual(filterFresh(entries, new Set()).map((e) => e.id), ['a', 'b'])
+})
+
+// ---------- worthInjecting（v0.9 最低分门）----------
+// 门槛来源（可复核）：874 条真实语料上 9 个查询的分布——
+//   无指向：继续 8.4 / 相关度算法可以再改进改进 18.4 / 看看这个项目 25.0
+//   有指向：哨兵重启静默不生效 38.2 / auto-recall 去重 57.5 / MemOS 评估 82.5 / 技能生命周期 106.3
+// 间隔落在 25–38 之间 ⇒ 取 30。样本量有限，已在源码里标注「需重新校准」的条件。
+
+test('worthInjecting：top1 低于门槛 ⇒ 不注入（宁可不打扰）', () => {
+  assert.equal(worthInjecting([{ score: 18.4 }, { score: 18.1 }], 30), false, '实测「相关度算法可以再改进改进」18.4')
+  assert.equal(worthInjecting([{ score: 25.0 }], 30), false, '实测「看看这个项目」25.0')
+})
+
+test('worthInjecting：达到门槛 ⇒ 注入（含边界）', () => {
+  assert.equal(worthInjecting([{ score: 38.2 }], 30), true, '实测「哨兵重启静默不生效」38.2')
+  assert.equal(worthInjecting([{ score: 30 }], 30), true, '等于门槛应放行')
+})
+
+test('worthInjecting：门槛 ≤0 ⇒ 关闭该门（全放行）', () => {
+  assert.equal(worthInjecting([{ score: 0 }], 0), true)
+})
+
+test('worthInjecting：空结果 ⇒ 不注入', () => {
+  assert.equal(worthInjecting([], 30), false)
+})
 
 // ---------- lastUserMessageText ----------
 

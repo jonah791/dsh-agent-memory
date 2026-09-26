@@ -128,6 +128,59 @@ export function buildAutoRecallDigest(
 }
 
 /**
+ * 过滤掉本次会话已注入过的条目（v0.8 会话级去重）。
+ *
+ * **为什么**：2026-09-26 用 `memory-access-trace.jsonl` 实测——646 次 auto 注入共
+ * **1930 条目计次，唯一仅 432 条 ⇒ 77.6% 是重复**；最高一条（「双重重启事故修复：
+ * web 生命周期租约」）被注入 **158 次**。根因不是检索乱来——话题长时间集中时
+ * （当晚连谈四小时「重启/哨兵」）同一批记忆自然反复命中，但**系统不知道「我已经看过它了」**，
+ * 于是把同一份内容一遍遍塞进上下文。
+ *
+ * 去重后：只有新信息才占上下文；全部命中都是旧的 ⇒ 返回空 ⇒ 调用方静默跳过（零 token 浪费）。
+ *
+ * **边界（诚实标注）**：去重集是**进程内存态**——web 重启即清空，重启后首轮会重新注入一遍
+ * 「最近相关」的记忆。这是**有意**的：重启后上下文感知重置，重看一遍热点记忆是合理的；
+ * 真正的浪费发生在**同一会话的连续消息**之间（实测 158 次那类），那正是本机制治的地方。
+ * 若要跨重启去重，需把集合按会话落盘——当前不做（复杂度 > 收益）。
+ * @param entries - 候选条目（保序）
+ * @param injected - 本会话已注入的条目 id 集合
+ * @returns 未注入过的条目
+ */
+export function filterFresh(entries: readonly Entry[], injected: ReadonlySet<string>): Entry[] {
+  return entries.filter((entry) => !injected.has(entry.id))
+}
+
+/**
+ * 自动注入的最低分门（v0.9）：top1 分数不到门槛 ⇒ 判定「本次没有足够相关的记忆」⇒ 不注入。
+ *
+ * **动机**（2026-09-26 用 874 条真实语料实测 9 个查询的分布）：
+ * ```
+ * 无指向查询：继续 8.4 ／ 相关度算法可以再改进改进 18.4 ／ 看看这个项目 25.0
+ * 有指向查询：哨兵重启静默不生效 38.2 ／ 记忆插件 auto-recall 去重 57.5 ／
+ *            MemOS 记忆操作系统评估 82.5 ／ 技能贝叶斯生命周期 106.3
+ * ```
+ * 间隔落在 25–38 之间，取 30。**这是「宁可不打扰」的一侧**：靠 bigram 泛词（如「改进」）
+ * 命中的条目拿不到 30 分，于是不再把无关内容塞进上下文。
+ *
+ * ⚠ **样本量诚实标注**：门槛由 **9 个查询**的分布定出，非充分统计——真实语料若出现介于
+ * 25–38 的查询类别需重新校准。传 0 可关闭该门。
+ */
+const MIN_TOP_SCORE = 30
+
+/**
+ * 判「本次命中是否值得自动注入」（纯函数；**只用于自动注入路径，不影响 recall 工具**——
+ * 主动检索时不该被阉割）。
+ * @param results - recall 命中（已按分数降序）
+ * @param minTopScore - 门槛；≤0 表示关闭
+ * @returns 达到门槛返回 true
+ */
+export function worthInjecting(results: readonly { score: number }[], minTopScore = MIN_TOP_SCORE): boolean {
+  if (minTopScore <= 0) return true
+  const top = results[0]?.score ?? 0
+  return top >= minTopScore
+}
+
+/**
  * 安装自动 recall 注入：每条新主人消息注入 top 命中（尾追加，缓存友好）。
  * 与 agent-instructions / inject.ts 同款瀑布监听器：await next() 后合并入批次。
  * @param ctx - 插件上下文（需要 agents 会话事件；pre-step 由 agent-loop 触发）
@@ -136,6 +189,8 @@ export function buildAutoRecallDigest(
 export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps): void {
   // per-session 已处理消息 id（去重：同一消息只注入一次）
   const processed = new Map<string, Set<string>>()
+  // per-session 已注入条目 id（v0.8 会话级去重：同一记忆不重复塞进同一会话，见 filterFresh）
+  const injectedIds = new Map<string, Set<string>>()
 
   ctx.on('agent/pre-step', async ({ agent, step, signal }, next) => {
     const decision = await next()
@@ -166,6 +221,15 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
     const view = roleViewOf(config, { agent } as unknown as RoleCarrier)
     const scopes = narrowReadScopes([scope, GLOBAL_SCOPE], view, undefined)
     const merged = applyRoleView(scopes.flatMap((s) => deps.store.list(s)), view)
+    // v0.8 会话级去重：先剔除本会话已注入过的条目——只有新信息才值得占上下文。
+    // 全部命中都是旧的 ⇒ 静默跳过（不注入任何东西，零 token 浪费）。
+    let injected = injectedIds.get(sessionId)
+    if (injected === undefined) {
+      injected = new Set()
+      injectedIds.set(sessionId, injected)
+    }
+    const fresh = filterFresh(merged, injected)
+    if (fresh.length === 0) return decision
     // 上下文重心（v0.7）：注入查询 =「此刻这段对话在谈什么」，而不是最后一条消息的字面。
     // 锚点那条已由 lastUserMessageText 取出，从历史里剔除以免重复计权。
     const history = recentTurnTexts(decision.messages, 4)
@@ -174,23 +238,26 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
       ? [...history.slice(0, anchorIndex), ...history.slice(anchorIndex + 1)]
       : history
     const weightedTerms = buildCentroid(turns, found.text)
-    const digest = buildAutoRecallDigest(merged, found.text, {
+    // 检索一次（确定性）：既供 v0.9 最低分门判断，又供去重登记与侧车复用。
+    const queryLimit = found.text.length > QUERY_MAX ? found.text.slice(0, QUERY_MAX) : found.text
+    const probe = recallEntries(fresh, {
+      ...(weightedTerms.length > 0 ? { weightedTerms } : { query: queryLimit }),
+      limit: config.autoInject.maxEntries,
+    })
+    // v0.9 最低分门：没有足够相关的记忆就不打扰（比塞一堆泛词命中更诚实）
+    if (!worthInjecting(probe.results)) return decision
+    const digest = buildAutoRecallDigest(fresh, found.text, {
       maxEntries: config.autoInject.maxEntries,
       maxBytes: config.autoInject.maxBytes,
       ...(weightedTerms.length > 0 ? { weightedTerms } : {}),
     })
-    // 侧车用量轨迹（v0.6）：auto-recall 命中同样是「被用到」的证据；失败静默
-    if (digest.length > 0 && config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
-      const queryLimit = found.text.length > QUERY_MAX ? found.text.slice(0, QUERY_MAX) : found.text
-      const hitIds = recallEntries(merged, {
-        ...(weightedTerms.length > 0 ? { weightedTerms } : { query: queryLimit }),
-        limit: config.autoInject.maxEntries,
-      }).results.map((item) => item.id)
-      if (hitIds.length > 0) {
-        void deps.recordAccess({ atMs: Date.now(), source: 'auto', role: view.role, ids: hitIds })
-      }
-    }
     if (digest.length === 0) return decision
+    // 本次命中的条目：与 buildAutoRecallDigest 内部同参同源（确定性 ⇒ 结果一致）
+    const hitIds = probe.results.map((item) => item.id)
+    for (const id of hitIds) injected.add(id)
+    if (hitIds.length > 0 && config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
+      void deps.recordAccess({ atMs: Date.now(), source: 'auto', role: view.role, ids: hitIds })
+    }
 
     signal.throwIfAborted()
     const message = createUserMessage({

@@ -85,7 +85,11 @@ describe('recallEntries · 相关度排序（标签>标题>正文）', () => {
     ]
     const result = recallEntries(entries, { query: 'alpha' })
     assert.deepEqual(result.results.map((r) => r.id), ['tag-hit', 'title-hit', 'body-hit'])
-    assert.deepEqual(result.results.map((r) => r.score), [3, 2, 1])
+    // v0.9（IDF）：绝对分值 = 原权重 × idf(查询词)，随语料文档频率浮动 ⇒ 不再断言 [3,2,1]。
+    // 语义是**相对权重**（标签 3 : 标题 2 : 正文 1）；同一词的 idf 相同 ⇒ 比例不变，断言比例。
+    const [tagScore, titleScore, bodyScore] = result.results.map((r) => r.score)
+    assert.ok(Math.abs(tagScore / bodyScore - 3) < 1e-9, `标签 : 正文 应为 3 : 1（实得 ${tagScore} / ${bodyScore}）`)
+    assert.ok(Math.abs(titleScore / bodyScore - 2) < 1e-9, `标题 : 正文 应为 2 : 1（实得 ${titleScore} / ${bodyScore}）`)
   })
 
   test('多词累加：一词命中标签+标题 → 5 分，高于单点命中', () => {
@@ -105,8 +109,13 @@ describe('recallEntries · 相关度排序（标签>标题>正文）', () => {
     ]
     const result = recallEntries(entries, { query: 'dsh' })
     assert.deepEqual(result.results.map((r) => r.id), ['multi', 'single'])
-    assert.equal(result.results[0].score, 6) // 标签3 + 标题2 + 正文1
-    assert.equal(result.results[1].score, 3)
+    // v0.9（IDF）：同一词 'dsh' 的 idf 相同 ⇒ 比值不变。
+    // 语义 = 「同一词多位置命中累加」6（标签3+标题2+正文1）相对「单点命中」3（只看标签）= 2 : 1。
+    const [multiScore, singleScore] = result.results.map((r) => r.score)
+    assert.ok(multiScore > singleScore, `多位置命中应高于单点（实得 ${multiScore} vs ${singleScore}）`)
+    assert.ok(Math.abs(multiScore / singleScore - 2) < 1e-9, `应为 2 : 1（实得 ${multiScore} / ${singleScore}）`)
+    // （原 `assert.equal(results[1].score, 3)` 已删：单点分值 = 3 × idf('dsh')，绝对值随语料浮动，
+    //   其语义已被上面的 2 : 1 比例断言完整覆盖）
   })
 
   test('同分按 accessedAt 新→旧（新鲜度打破平局）', () => {
@@ -132,8 +141,33 @@ describe('recallEntries · 相关度排序（标签>标题>正文）', () => {
     ]
     const result = recallEntries(entries, { query: '插件开发' })
     assert.deepEqual(result.results.map((r) => r.id), ['zh'])
-    // 2026-09-01 CJK bigram 增强后：'插件开发' → 插件开发(整段+2) + 插件(+2标题/+1正文) + 件开(+2) + 开发(+2) = 9
-    assert.equal(result.results[0].score, 9)
+    // v0.9（IDF）：各 bigram 的 idf 不同 ⇒ 不再是固定 9（原注释：整段+2、插件+2/+1、件开+2、开发+2）。
+    // 改用**累加性**断言：'插件开发' 的词项集合是 '插件' 的超集，各项非负 ⇒ 得分不应低于子集查询。
+    const broad = result.results[0].score
+    const narrow = recallEntries(entries, { query: '插件' }).results[0].score
+    assert.ok(broad >= narrow, `整段+bigram 累加 (${broad}) 应 ≥ 单 bigram (${narrow})`)
+  })
+
+  test('IDF：同位置命中罕见词 > 命中高频泛词（治「改进」类泛词主导排序）', () => {
+    // 动机（2026-09-26 主人「相关度算法可以再改进改进」）：查询里的高频泛词（改进/可以/需要）
+    // 与特征词同权时，命中泛词的条目会挤掉真正相关的条目。
+    // 构造：20 条含「改进」抬高其文档频率；两条待比较条目**同位置**（标题）各命中一个查询词，
+    // 且高频词那条的 accessedAt **更新**——旧实现下二者同分 ⇒ 由新鲜度决定 ⇒ 高频词胜（判据会失败）；
+    // IDF 下罕见词 idf 更大 ⇒ 罕见词条目胜。
+    const T = '2026-09-26T00:00:00.000Z'
+    const entries = [
+      ...Array.from({ length: 20 }, (_, i) => entry(`generic${i}`, { title: `改进记录 ${i}`, accessedAt: T })),
+      entry('hi-freq', { title: '改进', accessedAt: '2026-09-01T00:00:00.000Z' }),
+      entry('lo-freq', { title: '词频算法', accessedAt: '2026-08-01T00:00:00.000Z' }),
+    ]
+    // limit 覆盖全集（N=22）：hi-freq 与 20 条 generic 同分（都只命中「改进」）且更旧，
+    // 用默认 limit 会被截断在榜外（indexOf = -1）。故用**分数比较**而非榜单位次。
+    const { results } = recallEntries(entries, { query: '改进 词频', limit: 30 })
+    const scoreOf = (id) => results.find((r) => r.id === id)?.score ?? 0
+    assert.ok(
+      scoreOf('lo-freq') > scoreOf('hi-freq'),
+      `罕见词条目的分数应高于高频泛词条目（实得 ${scoreOf('lo-freq')} vs ${scoreOf('hi-freq')}）`,
+    )
   })
 })
 

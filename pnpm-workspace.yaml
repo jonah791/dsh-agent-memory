@@ -1,0 +1,12 @@
+# 本机约定（2026-09-26 立）：禁止把 peerDependencies 装成真实副本。
+#
+# 背景：插件的 peer 范围（如 @deepseek-ai/dsh-tools 的 ^0.1.0-rc.6）**匹配不到**
+# 工作区版本 0.1.7-rc.x（semver 预发布规则：^0.1.0-rc.6 只匹配 0.1.0 元组的预发布版），
+# 于是 pnpm 从 registry 拉回 0.1.0-rc.8 落到 node_modules/@deepseek-ai，
+# **遮蔽宿主链接层**（E:\alice\node_modules\@deepseek-ai）⇒ 同一插件内新旧版本混搭。
+#
+# ⚠️ 不要用 .npmrc —— pnpm 11.7.0 已不再从 .npmrc 读取该设置
+#    （auto-install-peers 与 autoInstallPeers 两种写法实测均无效）。
+#    必须在 pnpm-workspace.yaml 里用 camelCase 的 autoInstallPeers。
+#    实验矩阵见 E:\alice\reports\dsh-升级-0.1.7-rc.2-2026-09-26.md 第 4.2 节。
+autoInstallPeers: false

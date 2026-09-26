@@ -20,6 +20,68 @@ const SCORE_TAG = 3
 const SCORE_TITLE = 2
 const SCORE_BODY = 1
 
+/**
+ * 文档频率：包含该 token 的条目数（大小写不敏感；标签/标题/正文任一命中即计）。
+ *
+ * 用于 IDF —— **「相关度算法」的核心改进（2026-09-26 主人指令「相关度算法可以再改进改进」）**。
+ * 原打分对每个词项等权，于是「改进 / 可以 / 需要」这类高频泛词与「相关度算法」这类特征词
+ * 同权，泛词主导排序。当晚实例：主人那句话触发的注入三条，全是靠 bigram「改进」命中的
+ * 无关条目（技能熔炉改进 / freelance-radar 改进 / 20+ 项改进），与「相关度算法」无关。
+ * @param entries - 候选全集（打分上下文）
+ * @param token - 查询词项
+ * @returns 命中该词的条目数
+ */
+function documentFrequency(entries: readonly Entry[], token: string): number {
+  const needle = token.toLowerCase()
+  let count = 0
+  for (const entry of entries) {
+    if (entry.title.toLowerCase().includes(needle)) count += 1
+    else if (entry.tags.some((tag) => tag.toLowerCase().includes(needle))) count += 1
+    else if (entry.body.toLowerCase().includes(needle)) count += 1
+  }
+  return count
+}
+
+/**
+ * IDF 权重：`log(1 + N / (1 + df))`（平滑；df=0 时取最大）。
+ * 罕见词（「相关度算法」）权重高，高频泛词（「改进」）权重低。
+ * @param total - 候选条目总数
+ * @param df - 该词的文档频率
+ */
+function idfOf(total: number, df: number): number {
+  return Math.log(1 + total / (1 + df))
+}
+
+/** 泛词门阈值：df ≥ 绝对下限 **且** df/N 超过比例线 ⇒ 该词无区分力（idf 置 0，不参与打分）。
+ *  绝对下限用于**保护小语料**——测试夹具里 df/N 也会到 100%，但那里的词其实有区分力。 */
+const GENERIC_MIN_DF = 50
+const GENERIC_DF_RATIO = 0.1
+
+/**
+ * 为查询词集合预算 IDF 表（每词一次 DF 扫描，O(T×N)；recall 为低频操作，实测耗时无感）。
+ * @param entries - 候选全集
+ * @param tokens - 查询词项（可含重复）
+ * @returns token → IDF
+ */
+function buildIdf(entries: readonly Entry[], tokens: readonly string[]): Map<string, number> {
+  const out = new Map<string, number>()
+  const total = entries.length
+  for (const raw of tokens) {
+    // 统一小写做键：scoreEntry* 查表用小写 token（tokenizeQuery 已小写，但 v0.7 重心项
+    // 来自对话原文，未小写——不在此归一就会查空、静默退化为等权）
+    const token = raw.toLowerCase()
+    if (out.has(token)) continue
+    const df = documentFrequency(entries, token)
+    // 泛词门（v0.9）：无区分力的词置 idf=0 ⇒ 不贡献分数。动机（2026-09-26 实测）：
+    // 主人说「相关度算法可以再改进改进」时命中 135 条、top5 分数并列（旧实现 6/6/6/6），
+    // 全是靠 bigram「改进」命中的无关条目——泛词盖过了查询的真实意图。
+    // 过滤后若无人得分 ⇒ 结果为空 ⇒ 上游静默跳过（**没有相关记忆就不打扰**）。
+    const generic = total > 0 && df >= GENERIC_MIN_DF && df / total > GENERIC_DF_RATIO
+    out.set(token, generic ? 0 : idfOf(total, df))
+  }
+  return out
+}
+
 /** snippet 最大长度（字符） */
 const SNIPPET_MAX = 140
 
@@ -134,9 +196,13 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
     : undefined
   const tokens = tokenizeQuery(query.query)
   const hasQuery = weighted !== undefined || tokens.length > 0
+  // v0.9：IDF 表——罕见词（特征词）权重高、高频泛词权重低。
+  // 在**过滤后**的候选集上算 DF（比较基准就是本次检索范围）。
+  const idfTokens = weighted !== undefined ? weighted.map((item) => item.term) : tokens
+  const idf = hasQuery ? buildIdf(filtered, idfTokens) : new Map<string, number>()
   let scored = filtered.map((entry) => ({
     entry,
-    score: weighted !== undefined ? scoreEntryWeighted(entry, weighted) : scoreEntry(entry, tokens),
+    score: weighted !== undefined ? scoreEntryWeighted(entry, weighted, idf) : scoreEntry(entry, tokens, idf),
   }))
   // 带查询时剔除零分条目（无关内容不进结果）；无查询词时全量按新鲜度排序
   if (hasQuery) scored = scored.filter(({ score }) => score > 0)
@@ -228,36 +294,44 @@ function cjkBigrams(token: string): string[] {
 }
 
 /**
- * 打分：逐词累加——标签子串命中 +3，标题子串命中 +2，正文子串命中 +1。
+ * 打分：逐词累加——标签子串命中 +3，标题子串命中 +2，正文子串命中 +1，**再乘该词的 IDF**。
  * 无查询词时全部 0 分（纯新鲜度排序）。
+ *
+ * v0.9（IDF）：乘权后「罕见特征词」压过「高频泛词」——查询「相关度算法 改进」时，
+ * 含「相关度算法」的条目得分远高于只含「改进」的条目（后者 df 大 ⇒ idf 小）。
+ * @param entry - 候选条目
+ * @param tokens - 查询词项（小写）
+ * @param idf - token → IDF；缺项回退 1（等权，与原行为一致，避免静默变差）
  */
-function scoreEntry(entry: Entry, tokens: string[]): number {
+function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>): number {
   if (tokens.length === 0) return 0
   const title = entry.title.toLowerCase()
   const body = entry.body.toLowerCase()
   let score = 0
   for (const token of tokens) {
-    if (entry.tags.some((tag) => tag.toLowerCase().includes(token))) score += SCORE_TAG
-    if (title.includes(token)) score += SCORE_TITLE
-    if (body.includes(token)) score += SCORE_BODY
+    const w = idf.get(token) ?? 1
+    if (entry.tags.some((tag) => tag.toLowerCase().includes(token))) score += SCORE_TAG * w
+    if (title.includes(token)) score += SCORE_TITLE * w
+    if (body.includes(token)) score += SCORE_BODY * w
   }
   return score
 }
 
 /**
- * 加权打分（v0.7 上下文重心）：逐词累加 `权重 × (标签 3 / 标题 2 / 正文 1)`。
- * 与 `scoreEntry` 同构，只是词项带权重——这样「话题重心」比「最后一个词」更有话语权。
+ * 加权打分（v0.7 上下文重心 + v0.9 IDF）：逐词累加 `IDF × 重心权重 × (标签 3 / 标题 2 / 正文 1)`。
+ * 与 `scoreEntry` 同构，只是词项带重心权重——这样「话题重心」比「最后一个词」更有话语权。
  */
-function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[]): number {
+function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>): number {
   if (terms.length === 0) return 0
   const title = entry.title.toLowerCase()
   const body = entry.body.toLowerCase()
   let score = 0
   for (const { term, weight } of terms) {
     const token = term.toLowerCase()
-    if (entry.tags.some((tag) => tag.toLowerCase().includes(token))) score += SCORE_TAG * weight
-    if (title.includes(token)) score += SCORE_TITLE * weight
-    if (body.includes(token)) score += SCORE_BODY * weight
+    const w = (idf.get(token) ?? 1) * weight
+    if (entry.tags.some((tag) => tag.toLowerCase().includes(token))) score += SCORE_TAG * w
+    if (title.includes(token)) score += SCORE_TITLE * w
+    if (body.includes(token)) score += SCORE_BODY * w
   }
   return Math.round(score * 1000) / 1000
 }
