@@ -115,13 +115,49 @@ function seedRaw(kv, entries) {
 
 // ---------- A42 工具面 ----------
 
-test('A42 工具面：memory_audit 已注册（共 12 个工具）', () => {
+test('A42 工具面：memory_audit 已注册（共 13 个工具）', () => {
   const { byName } = setup()
-  assert.equal(byName.size, 12)
+  assert.equal(byName.size, 13)
   assert.ok(byName.has('memory_audit'))
   assert.ok(byName.get('memory_audit').description.includes('只读'))
   // v0.9：合并原语进工具面（近重复簇从「只标记」到「可执行」）
   assert.ok(byName.has('memory_merge'))
+  // v0.11.2：裁决留痕原语进工具面（体检候选从「每次重报」到「可标记已审」）
+  assert.ok(byName.has('memory_review_mark'))
+})
+
+// ---------- A54 已裁决标记（v0.11.2） ----------
+
+test('A54 已裁决标记：命中 ⇒ 归 KEEP 并标注；条目再变动 ⇒ 自动重新纳入（防永久免检）', () => {
+  const reviewedAt = NOW - 1 * DAY
+  const target = aged(30, { id: 'marked', title: '已裁决的超大条目', body: 'x'.repeat(15000) })
+  const stale = aged(0.5, { id: 'changed', title: '裁决后又被改过的条目', body: 'x'.repeat(15000) })
+
+  // ① 基线：无标记时，体量 ≥ review_min_chars ⇒ REVIEW
+  const before = auditMemory({ entries: [target], now: NOW })
+  assert.equal(before.candidates[0].bucket, 'REVIEW')
+
+  // ② 有标记且条目**未变动** ⇒ 归 KEEP + 理由点名「已裁决」
+  const reviewed = new Map([['marked', reviewedAt]])
+  const after = auditMemory({ entries: [target], reviewed, now: NOW })
+  const hit = after.candidates.find((c) => c.id === 'marked')
+  assert.equal(hit.bucket, 'KEEP', '已裁决 ⇒ 保持现状（KEEP）')
+  assert.ok(hit.reasons[0].includes('已裁决'), `理由应点名已裁决，实得：${hit.reasons[0]}`)
+  // 对账不变量（A37）不破：候选仍在（★ 刻意不剔除，否则 candidates 与 byBucket 会对不上）
+  assert.equal(after.candidates.length, 1, '★ 已裁决的条目仍出现在候选里（只是改判 KEEP）')
+  assert.equal(after.summary.chars, target.body.length, '各档字符合计仍等于总量')
+
+  // ③ 尸体样本（防「已审」变永久免检）：条目在标记**之后**被改过 ⇒ 标记自动失效、照常分档
+  const reviewedBoth = new Map([['marked', reviewedAt], ['changed', reviewedAt]])
+  const revived = auditMemory({ entries: [stale], reviewed: reviewedBoth, now: NOW })
+  const back = revived.candidates.find((c) => c.id === 'changed')
+  assert.equal(back.bucket, 'REVIEW', '★ updatedAt 晚于标记时刻 ⇒ 重新纳入常规分档')
+  assert.ok(!back.reasons[0].includes('已裁决'), '失效的标记不该留下已裁决字样')
+
+  // ④ 对照：同一批里没被标记的同类条目不受影响（判据不越界）
+  const other = aged(30, { id: 'plain', title: '普通超大条目', body: 'x'.repeat(15000) })
+  const mixed = auditMemory({ entries: [target, other], reviewed, now: NOW })
+  assert.equal(mixed.candidates.find((c) => c.id === 'plain').bucket, 'REVIEW')
 })
 
 // ---------- A32 承重原料必为 KEEP（反例） ----------

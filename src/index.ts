@@ -23,7 +23,7 @@ import { installAutoRecallInject } from './auto-inject.ts'
 import { installCompactionSink } from './compaction-sink.ts'
 import { installPeriodicCompress } from './periodic.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
-import { appendAccessTrace, appendProposalRecord, readAccessIndex, readAccessSummary as readAccessSummaryFromTrace } from './access-trace.ts'
+import { appendAccessTrace, appendProposalRecord, readAccessIndex, readAccessSummary as readAccessSummaryFromTrace, readReviewMarks as readReviewMarksFromTrace } from './access-trace.ts'
 import { appendCompressTrace, readCompressSummary as readCompressSummaryFromTrace, type CompressTraceSink } from './compress-trace.ts'
 import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
 import { join } from 'node:path'
@@ -140,6 +140,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const accessTracePath = join(dshHome, 'memory-access-trace.jsonl')
   // 提案日志（v0.7 §5.11）：audit 候选 + forget/update 动作同文件、可按 id join ⇒ 校准样本
   const proposalLogPath = join(dshHome, 'memory-audit-proposals.jsonl')
+  // 已裁决标记（v0.11.2）：体检候选的裁决留痕 ⇒ 同一批候选不再**每次体检重报**。
+  // 复用提案日志的 append 原语（同纪律：只追加 / 吞错 / 按体积轮转）。
+  const reviewLogPath = join(dshHome, 'memory-review-marks.jsonl')
   // 压缩流水线轨迹（v0.8 §5.12）：回答「这一轮扫描看到了什么、**为什么这个桶没压**」
   // ——跨条目巡检发现 09-13/09-14 日概要与 W37 周概要缺失，而当时五问③「断在哪一段」答不了。
   const compressTracePath = join(dshHome, 'memory-compress-trace.jsonl')
@@ -150,6 +153,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     readAccessSummaryFromTrace(accessTracePath)
   const recordProposal: NonNullable<MemoryToolDeps['recordProposal']> = (record) =>
     appendProposalRecord(proposalLogPath, record, DEFAULT_AUDIT_CONFIG.proposalLog.maxBytes)
+  const recordReviewMark: NonNullable<MemoryToolDeps['recordReviewMark']> = (id, note) =>
+    appendProposalRecord(reviewLogPath, { atMs: Date.now(), kind: 'review-mark', id, note }, DEFAULT_AUDIT_CONFIG.proposalLog.maxBytes)
+  const readReviewMarks: NonNullable<MemoryToolDeps['readReviewMarks']> = () => readReviewMarksFromTrace(reviewLogPath)
   const readCompressSummary: NonNullable<MemoryToolDeps['readCompressSummary']> = () =>
     readCompressSummaryFromTrace(compressTracePath)
 
@@ -234,7 +240,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
 
   // 4. 注册记忆工具（remember/recall/update/forget/browse/relate/stats/audit/health/version/check）
-  registerMemoryTools(ctx, { store, loadConfig, compress, recordAccess, readAccess, readAccessSummary, recordProposal, readCompressSummary })
+  registerMemoryTools(ctx, { store, loadConfig, compress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })

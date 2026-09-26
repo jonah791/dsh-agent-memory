@@ -210,3 +210,41 @@ export async function readAccessIndex(filePath: string): Promise<Map<string, Acc
     return undefined
   }
 }
+
+/**
+ * 解析「已裁决标记」侧车文本 → id → **最后一次**裁决时刻（纯函数，离线可测）。
+ *
+ * 坏行（非 JSON / 缺字段 / 非标记行）**跳过不抛**——侧车是旁证，永远不能成为故障源（同 §5.22 §3）。
+ * @param text - jsonl 全文
+ * @returns id → atMs（同 id 多次标记取**最大** atMs，即最近一次裁决）
+ */
+export function parseReviewMarks(text: string): Map<string, number> {
+  const out = new Map<string, number>()
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    try {
+      const rec = JSON.parse(trimmed) as { kind?: unknown; id?: unknown; atMs?: unknown }
+      if (rec.kind !== 'review-mark') continue
+      if (typeof rec.id !== 'string' || rec.id.length === 0) continue
+      if (typeof rec.atMs !== 'number' || !Number.isFinite(rec.atMs)) continue
+      const prev = out.get(rec.id)
+      if (prev === undefined || rec.atMs > prev) out.set(rec.id, rec.atMs)
+    } catch { /* 坏行跳过 */ }
+  }
+  return out
+}
+
+/**
+ * 读取已裁决标记（**吞错**）：文件不存在或不可读 ⇒ 返回 undefined（调用方按「无标记信号」处理）。
+ * 与 `readAccessIndex` 同一分工：IO 只负责取文本，解析在纯函数里。
+ */
+export async function readReviewMarks(filePath: string): Promise<Map<string, number> | undefined> {
+  try {
+    const text = await readFile(filePath, 'utf8')
+    const marks = parseReviewMarks(text)
+    return marks.size > 0 ? marks : undefined
+  } catch {
+    return undefined
+  }
+}

@@ -90,6 +90,14 @@ export interface AuditInput {
   config?: AuditConfig
   /** 逻辑轨迹索引：id → 命中次数/最后命中（缺省 = 无轨迹，usage 恒 0） */
   usage?: Map<string, { hits: number; lastAtMs: number }>
+  /**
+   * 已裁决标记（v0.11.2）：id → 该次裁决的时刻（ms）。**由调用方从侧车读好后注入**
+   * （同 `usage` 的模式 —— 本函数保持纯、不碰 IO）。
+   *
+   * 语义：**标记只对「当时那一版」有效**。若条目此后被改动（`updatedAt` 晚于标记时刻），
+   * 标记自动失效、重新纳入常规分档 —— 否则「标记已审」会变成**永久免检**，反而制造盲区。
+   */
+  reviewed?: ReadonlyMap<string, number>
   /** 当前时刻（缺省 Date.now()；测试注入固定时钟） */
   now?: number
   /** 查询选项 */
@@ -364,7 +372,26 @@ export function auditMemory(input: AuditInput): AuditResult {
       dups,
       nowMs,
     })
-    const { bucket, reasons } = classify(entry, breakdown, config)
+    const verdict = classify(entry, breakdown, config)
+    let bucket = verdict.bucket
+    let reasons = verdict.reasons
+
+    // 已裁决标记（v0.11.2）：命中 ⇒ 归入 KEEP 并改写理由。
+    // **刻意不从候选里剔除** —— 剔除会让 candidates 与 byBucket 对不上，破坏 A37 的对账不变量。
+    // 标记只对「当时那一版」有效：条目 updatedAt 晚于标记时刻、或时间戳不可解析（保守），
+    // 一律**重新纳入常规分档** —— 否则「已审」会变成永久免检，反而制造盲区
+    // （§5.9 的保守方向在审计里是「多看」而非「少看」）。
+    const markedAt = input.reviewed?.get(entry.id)
+    if (markedAt !== undefined) {
+      const changedAt = Date.parse(entry.updatedAt ?? entry.createdAt)
+      if (!Number.isNaN(changedAt) && markedAt >= changedAt) {
+        bucket = 'KEEP'
+        reasons = [
+          `已裁决（${new Date(markedAt).toISOString().slice(0, 10)}）——保持现状；条目若再变动会自动重新纳入`,
+        ]
+      }
+    }
+
     const chars = breakdown.evidence.chars
     totalChars += chars
     byBucket[bucket] += 1

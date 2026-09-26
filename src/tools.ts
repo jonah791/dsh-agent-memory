@@ -51,6 +51,14 @@ export interface MemoryToolDeps {
   /** 提案日志写入（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join；吞错） */
   recordProposal?: (record: unknown) => Promise<boolean> | void
   /**
+   * 已裁决标记写入（v0.11.2）：记「这条体检候选我已裁决过」，使下次体检不再反复报同一条
+   * （今晚实测：同一批 15 条 REVIEW 会在每次体检里重复出现）。
+   * 与 `recordProposal` 同纪律：只追加 / 吞错 / 按体积轮转。
+   */
+  recordReviewMark?: (id: string, note: string) => Promise<boolean> | void
+  /** 已裁决标记读取（体检用；缺省/读失败 ⇒ undefined = 无标记信号，全部条目照常分档） */
+  readReviewMarks?: () => Promise<Map<string, number> | undefined>
+  /**
    * 压缩流水线轨迹汇总（v0.8 §5.12：五问里 ③「断在哪一段」的答案面）。
    * 缺省不报——工具层只展示，不判定。
    */
@@ -614,11 +622,16 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
           throw new Error(`forget: 未知 tier="${tier}"（允许 ARCHIVE / DEMOTE / REVIEW）`)
         }
         const usage = deps.readAccess === undefined ? undefined : await deps.readAccess()
+        // 已裁决标记**必须同样传**（v0.11.2）：否则「已审 ⇒ 保持现状」只在新旧路径不一致时失效，
+        // 而 tier=REVIEW 会**真去归档**那些我已裁决为「保持现状」的条目 ——
+        // 这是**动数据**的路径（forget），判据必须与体检主路径一致（单一真源）。
+        const reviewed = deps.readReviewMarks === undefined ? undefined : await deps.readReviewMarks()
         const audit = auditMemory({
           entries: universe.filter((entry) => entry.archived !== true),
           indexEntries: universe,
           ...(config.audit !== undefined ? { config: config.audit } : {}),
           ...(usage !== undefined ? { usage } : {}),
+          ...(reviewed !== undefined ? { reviewed } : {}),
           query: { topN: max + 1, minChars: 0 },
         })
         const tierIds = audit.candidates.filter((candidate) => candidate.bucket === tier).map((candidate) => candidate.id)
@@ -1231,11 +1244,15 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
       const { entries: universe } = gatherReadable(deps, { readScopes, includeArchive: true, view, explicitScope: args.scope })
       const entries = includeArchive ? universe : universe.filter((entry) => !entry.archived)
       const usage = deps.readAccess === undefined ? undefined : await deps.readAccess()
+      // 已裁决标记（v0.11.2）：读侧车后注入 —— 命中 ⇒ 该条归 KEEP 并标注「已裁决」，
+      // 使同一批候选不再每次体检重复出现（今晚实测：同一批 15 条 REVIEW 每次体检都重报）。
+      const reviewed = deps.readReviewMarks === undefined ? undefined : await deps.readReviewMarks()
       const result = auditMemory({
         entries,
         indexEntries: universe,
         ...(config.audit !== undefined ? { config: config.audit } : {}),
         ...(usage !== undefined ? { usage } : {}),
+        ...(reviewed !== undefined ? { reviewed } : {}),
         query: { topN: args.topN, minChars: args.minChars, includeArchive },
       })
       // 提案日志（v0.7 §5.11）：让提案有历史——与后续 forget/update 动作同文件、可按 id join。
@@ -1261,9 +1278,61 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
 }
 
 /**
- * 构建六个记忆工具定义（纯函数，单测可直接取 execute 跑行为）。
+ * 构建 memory_review_mark 工具：给体检候选打「已裁决」标记（v0.11.2）。
+ *
+ * 存在的理由（今晚实测）：同一批 REVIEW 候选会在**每次体检**里重复出现（15 条），
+ * 而裁决结果无处留痕 ⇒ 只能拿记忆条目当 workaround。本工具把裁决写进侧车，
+ * `memory_audit` 读它后不再把这些条目当待办反复报。
+ *
+ * 硬约束：**只写侧车，绝不改条目**（不刷新 accessedAt/updatedAt ⇒ A31 的只读判据不受影响）。
+ */
+function buildReviewMark(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_review_mark',
+    description: '给一条体检候选打「已裁决」标记：此后 memory_audit 不再把它当待办反复报（归 KEEP，理由里标注已裁决时刻）。**只写侧车，绝不改条目**——不刷新 accessedAt/updatedAt。⚠ 标记只对「当时那一版」有效：条目若再变动（updatedAt 晚于标记时刻）会自动重新纳入常规分档，因此它**不会**变成永久免检。',
+    parameters: {
+      id: { type: 'string', description: '条目 id（来自 memory_audit 的候选，或 recall / memory_browse 的输出）。' },
+      note: { type: 'string', description: '裁决说明（为什么保持现状 / 怎么处理的），写入侧车供回溯——**必填**：无理由的裁决等于没裁决。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          id: { type: 'string', required: true },
+        },
+      },
+      render: (args, value) => [{
+        type: 'text',
+        text: value.ok
+          ? `已标记「已裁决」：${value.id}（下次体检起不再作为待办反复报；条目若再变动会自动重新纳入）`
+          : `标记失败：${value.id}`,
+      }],
+    },
+    async execute(args) {
+      if (deps.recordReviewMark === undefined) {
+        throw new Error('memory_review_mark: 未接线（deps.recordReviewMark 缺失）——侧车不可写时不假装成功')
+      }
+      // 参数在 schema 层是可选的，**必填性由这里在运行时保证**（fail-loud，§5.30 规则 4）：
+      // 类型收窄与语义校验一并在入口做完，后续代码拿到的是确定值。
+      const id = args.id
+      if (typeof id !== 'string' || id.length === 0) throw new Error('memory_review_mark: id 必填')
+      const rawNote = args.note
+      if (typeof rawNote !== 'string') throw new Error('memory_review_mark: note 必填')
+      const note = rawNote.trim()
+      if (note.length === 0) throw new Error('memory_review_mark: note 必填（无理由的裁决等于没裁决）')
+      const ok = (await deps.recordReviewMark(id, note)) !== false
+      if (!ok) throw new Error(`memory_review_mark: 侧车写入失败（${id}）`)
+      return { ok: true, id }
+    },
+  })
+}
+
+/**
+ * 构建记忆工具定义（纯函数，单测可直接取 execute 跑行为）。
  * @param deps - 存储 + 配置加载依赖
- * @returns 六条 registry-ready 工具定义
+ * @returns registry-ready 工具定义（十三件）
  */
 export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
   return [
@@ -1276,6 +1345,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildMerge(deps),
     buildStats(deps),
     buildAudit(deps),
+    buildReviewMark(deps),
     buildCheck(),
     buildHealth(deps),
     buildVersion(),
