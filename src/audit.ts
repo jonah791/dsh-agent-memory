@@ -145,8 +145,11 @@ export function tagReuseIndex(entries: readonly Entry[]): Map<string, number> {
 }
 
 /**
- * 近重复簇：标题归一化后相同（或互相为前缀）的条目归为一簇。
+ * 近重复簇：**活跃**条目中标题归一化后**完全相同**的归为一簇。
+ * 判据是**精确相等**（非前缀匹配）——2026-09-26 订正旧注释「或互相为前缀」与实现不符之处。
  * 簇内 canonical = 最新的一条（保留最新、其余进 REVIEW 交人裁决）。
+ *
+ * **归档条目不参与判定**（v0.11.1）：理由见循环内注释。
  * @returns 每个条目 → { cluster 序号, canonicalId }（非重复条目不在返回值中）
  */
 export function duplicateClusters(
@@ -154,6 +157,11 @@ export function duplicateClusters(
 ): Map<string, { cluster: number; canonicalId: string }> {
   const groups = new Map<string, Entry[]>()
   for (const entry of entries) {
+    // 归档条目**不参与**重复判定：「活跃 vs 已归档同名」**不是重复**，而是**时间压缩的正常终态**
+    // ——原料被概要吸收后归档，活跃的那条是幸存副本。此前用含归档的 indexScope 判簇
+    // ⇒ 同名前身被反复报「交人裁决合并或归档」，而 `memory_merge` 又会拒绝（canonical 已归档）
+    // ⇒ 纯噪声 + 误导（2026-09-26 实测 3 条）。「重复」只在**活跃集合**内成立。
+    if (entry.archived) continue
     const key = (entry.title ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
     if (key.length === 0) continue
     const list = groups.get(key)

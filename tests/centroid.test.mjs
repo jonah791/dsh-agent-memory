@@ -193,9 +193,14 @@ test('A50 提案日志：两类记录同文件可 join；memory_audit 仍不写�
 
   // 落盘而不仅是内存回调（写入是 fire-and-forget 的设计，等一拍）
   await new Promise((resolve) => setTimeout(resolve, 50))
-  const lines = readFileSync(logPath, 'utf8').trim().split('\n')
-  assert.equal(lines.length, 2)
-  const auditRecord = JSON.parse(lines[0])
+  const records = readFileSync(logPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  assert.equal(records.length, 2)
+  // ⚠ 不按行序取记录（2026-09-27 修 flaky）：recordProposal 是 fire-and-forget（不 await），
+  // 两次写的**落盘顺序不确定**——依赖「lines[0] 必是 audit」会让本用例偶发崩在
+  // `auditRecord.candidates.some`（TypeError: Cannot read properties of undefined）。
+  // 按 kind 取才是**测行为**而非测实现（写入顺序是实现细节）。
+  const auditRecord = records.find((r) => r.kind === 'audit')
+  assert.ok(auditRecord !== undefined, '提案日志里应有 audit 记录')
   assert.ok(auditRecord.candidates.some((c) => c.id === 'e1'), '可按 id join：提案里出现了 e1')
 
   // A31 不破：记忆库唯一变化是 forget 导致的 archived=true；accessedAt 没被体检刷新

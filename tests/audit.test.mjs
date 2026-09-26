@@ -183,6 +183,35 @@ test('A35 近重复簇：同标题条目同簇且 canonical 为最新，全部�
   }
 })
 
+// ---------- A44 归档条目不参与重复簇（v0.11.1 修复） ----------
+
+test('A53 归档条目不参与重复簇判定：双活跃同名仍抓，活跃 vs 已归档不误报', () => {
+  // 正样本：两条**都活跃**且同标题 ⇒ 仍是真重复，该判同簇
+  const liveOld = aged(20, { id: 'live-old', title: '同一个标题' })
+  const liveNew = aged(1, { id: 'live-new', title: '同一个标题' })
+  const liveDups = duplicateClusters([liveOld, liveNew])
+  assert.equal(liveDups.get('live-old').cluster, liveDups.get('live-new').cluster, '双活跃同名 ⇒ 仍判同簇')
+  assert.equal(liveDups.get('live-old').canonicalId, 'live-new', 'canonical 仍取最新者')
+
+  // 尸体样本（本次修复的形状）：「活跃 vs 已归档同名」**不是**重复——
+  // 归档那条是被时间压缩吸收的原料，活跃的是幸存副本，当前终态本就正确。
+  const survivor = aged(20, { id: 'survivor', title: '前身留下的同名条目' })
+  const absorbed = aged(40, { id: 'absorbed', title: '前身留下的同名条目', archived: true })
+  assert.equal(duplicateClusters([survivor, absorbed]).size, 0, '★ 归档者不参与 ⇒ 不产生簇')
+
+  // 端到端：活跃那条不该因「与已归档者同名」被判 REVIEW
+  const result = auditMemory({ entries: [survivor, absorbed], now: NOW })
+  const found = result.candidates.find((c) => c.id === 'survivor')
+  assert.notEqual(found.bucket, 'REVIEW', `不应因已归档同名进 REVIEW，实得：${(found.reasons ?? []).join('；')}`)
+
+  // 对照（防「修过头」）：两条都活跃时，端到端仍须判 REVIEW —— 真重复的检测力没被削弱
+  const liveResult = auditMemory({ entries: [liveOld, liveNew], now: NOW })
+  for (const candidate of liveResult.candidates) {
+    assert.equal(candidate.bucket, 'REVIEW')
+    assert.ok(candidate.reasons[0].includes('近重复簇'))
+  }
+})
+
 // ---------- A36 分档顺序 ----------
 
 test('A36 分档顺序可复现：REVIEW > KEEP(承重) > KEEP(新) > ARCHIVE > DEMOTE > KEEP(小兜底)', () => {
