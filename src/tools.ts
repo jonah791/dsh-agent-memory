@@ -31,6 +31,18 @@ import { findNearDuplicates, formatDuplicateHint } from './dedupe.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
 import { auditMemory } from './audit.ts'
 
+/** 概要重压的外部结果（工具层回报用；与 timeline.RecompressResult 解耦，界面只认这几个读数） */
+export interface RecompressOutcome {
+  /** 重压前正文长度（字符） */
+  beforeChars: number
+  /** 重压后正文长度（字符） */
+  afterChars: number
+  /** true = 未执行（原因见 note） */
+  skipped: boolean
+  /** 人类可读说明（含原因码） */
+  note: string
+}
+
 /** 工具依赖：存储 + 配置加载（单测注入 mock 用） */
 export interface MemoryToolDeps {
   /** 记忆存储（T7 用 storage-domain kv 表构造 MemoryStore） */
@@ -58,6 +70,12 @@ export interface MemoryToolDeps {
   recordReviewMark?: (id: string, note: string) => Promise<boolean> | void
   /** 已裁决标记读取（体检用；缺省/读失败 ⇒ undefined = 无标记信号，全部条目照常分档） */
   readReviewMarks?: () => Promise<Map<string, number> | undefined>
+  /**
+   * 概要重压（v0.11.3）：把一条已超预算的概要压回预算内。
+   * 实现在 index.ts（需要 LLM 直调 + 压缩器）——工具层只负责解析参数与回报读数。
+   * 缺省不接线 ⇒ 工具抛错（不假装成功）。
+   */
+  recompress?: (input: { summaryId: string; maxChars?: number }) => Promise<RecompressOutcome | undefined>
   /**
    * 压缩流水线轨迹汇总（v0.8 §5.12：五问里 ③「断在哪一段」的答案面）。
    * 缺省不报——工具层只展示，不判定。
@@ -1330,9 +1348,59 @@ function buildReviewMark(deps: MemoryToolDeps): ToolDefinition {
 }
 
 /**
+ * 构建 memory_recompress 工具：把一条已超预算的概要压回预算内（v0.11.3）。
+ *
+ * 存在的理由：audit 自 v0.11.0 起能**看见**超预算概要，但看见了也没法修——
+ * 常规压缩对已存在的桶一律 skip（`already-summarized`），那个幂等反过来**保护**了超预算版本。
+ * 本工具是它的显式出口。
+ */
+function buildRecompress(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_recompress',
+    description: '重压一条已超预算的概要（正文超过 summary_max_chars）：用**它自己的正文**再压一次，压完**整体替换**（旧版进 revisions 可回溯）。⚠ 只对 kind=summary 且 level/bucket 齐全的条目有效；已在预算内则跳过（不白跑一次 LLM）。与常规时间压缩的分工：常规压缩「已存在即跳过」，本工具正是那个幂等结果的**显式出口**。',
+    parameters: {
+      id: { type: 'string', description: '概要条目 id（来自 memory_audit 的候选，或 recall / memory_browse 的输出）。' },
+      maxChars: { type: 'integer', description: '本次重压的正文上限（字符）；缺省 4000 —— 比首压预算 6000 更严，因为重压的触发条件恰恰是「它超了」。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          beforeChars: { type: 'integer', required: true },
+          afterChars: { type: 'integer', required: true },
+          skipped: { type: 'boolean', required: true },
+          note: { type: 'string', required: true },
+        },
+      },
+      render: (args, value) => [{
+        type: 'text',
+        text: value.skipped
+          ? `未重压：${value.note}（原 ${value.beforeChars} 字）`
+          : `已重压：${value.beforeChars} → ${value.afterChars} 字（省 ${value.beforeChars - value.afterChars}；旧版仍在 revisions 里可回溯）`,
+      }],
+    },
+    async execute(args) {
+      if (deps.recompress === undefined) {
+        throw new Error('memory_recompress: 未接线（deps.recompress 缺失）——不假装成功')
+      }
+      // 参数在 schema 层可选，必填性在此运行时保证（同 memory_review_mark 的理由）
+      const id = args.id
+      if (typeof id !== 'string' || id.length === 0) throw new Error('memory_recompress: id 必填')
+      const maxChars = typeof args.maxChars === 'number' && args.maxChars > 0 ? args.maxChars : undefined
+      const outcome = await deps.recompress(maxChars !== undefined ? { summaryId: id, maxChars } : { summaryId: id })
+      if (outcome === undefined) {
+        throw new Error(`memory_recompress: ${id} 不是可重压的概要（需 kind=summary、有 level/bucket，且不在 global 层）`)
+      }
+      return outcome
+    },
+  })
+}
+
+/**
  * 构建记忆工具定义（纯函数，单测可直接取 execute 跑行为）。
  * @param deps - 存储 + 配置加载依赖
- * @returns registry-ready 工具定义（十三件）
+ * @returns registry-ready 工具定义（十四件）
  */
 export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
   return [
@@ -1346,6 +1414,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildStats(deps),
     buildAudit(deps),
     buildReviewMark(deps),
+    buildRecompress(deps),
     buildCheck(),
     buildHealth(deps),
     buildVersion(),

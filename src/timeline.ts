@@ -57,6 +57,19 @@ export interface SummarizeInput {
   range: BucketRange
   /** 周记模板（建议结构，来自 memory.yml weekly_template，可为空） */
   weeklyTemplate?: string
+  /**
+   * 正文长度上限（字符）**逐次覆盖**（v0.11.3）；缺省走配置里的 `summaryMaxChars`。
+   * 用途：**重压**要用比首次生成更严的尺子（把已超预算的概要压回预算内）。
+   */
+  maxChars?: number
+  /**
+   * 调用模式（v0.11.3，缺省 `'compress'`）：
+   * - `'compress'`：把**原料条目**压成一份概要（首次生成）
+   * - `'recompress'`：把**一份已超预算的概要**再压一次 —— 此时 `entries` 是 `[现有概要]`，
+   *   提示词必须换文案：沿用「N 条**原始记忆条目**」的说法会让模型把它当原料、
+   *   继续铺陈细节，于是压完还是超预算。
+   */
+  mode?: 'compress' | 'recompress'
 }
 
 /** 总结函数：条目列表 → 概要正文（LLM 直调或测试 fake） */
@@ -73,6 +86,31 @@ export interface CompressUnitResult {
   /** 结果原因：compressed | no-sources | already-summarized */
   reason: 'compressed' | 'no-sources' | 'already-summarized'
 }
+
+/** 重压结果（v0.11.3） */
+export interface RecompressResult {
+  /** 重压后的概要条目；跳过时为现有条目或 null */
+  summary: Entry | null
+  /** true = 本次未执行 */
+  skipped: boolean
+  /** 结果原因：recompressed | no-summary | within-budget | raced（他方已改动，让位不覆盖） */
+  reason: 'recompressed' | 'no-summary' | 'within-budget' | 'raced'
+  /** 重压前正文长度（字符） */
+  beforeChars: number
+  /** 重压后正文长度（字符） */
+  afterChars: number
+}
+
+/**
+ * 重压的缺省预算（字符，v0.11.3）——**比首压预算更严**。
+ *
+ * 首压预算 6000 的取值依据是「既有日概要正文中位 6,003 字符」（实测 31 条）；
+ * 而重压的触发条件恰恰是「它超了」，若仍用 6000，模型容易贴着上限交卷
+ * （实测那批超预算概要正是这样累积出来的：15,507 / 14,134 / 9,866 / 9,101 / 8,726 / 8,449）。
+ * 取 4000 ≈ 首压的 2/3 —— 这个「2/3」是**判断**（给模型留出「明显要压」的心理余量），
+ * 不是实测最优值；真值待重压上线后用「压完是否回到预算内」的读数校准。
+ */
+export const DEFAULT_RECOMPRESS_MAX_CHARS = 4000
 
 /** 层级显示名（概要标题用） */
 const LEVEL_LABEL: Record<CompressionLevel, string> = {
@@ -430,6 +468,79 @@ ${text}`,
 
     const summary = this.store.get(scope, created.id)
     return { summary: summary ?? null, archivedIds, skipped: false, reason: 'compressed' }
+  }
+
+  /**
+   * 重压指定桶的概要（v0.11.3）：用**现有概要正文**作为输入，按更严的预算重新总结，
+   * **整体替换**正文。
+   *
+   * 为什么用现有概要而不是重跑原料：概要是**导航层**（职责是指路、不是存档），
+   * 原料的 `archiveRef` 一直可深挖 ⇒ 用概要自重压既够用又便宜得多（原料可能几千条）。
+   *
+   * ⚠ 为什么必须 `update` 而非 `remember`：同 title 走 `remember` 会命中 L2/L3 指纹合并
+   * （`mergeEntry` 把正文**追加**）⇒ 压完反而更大。`update` 是整体替换，
+   * 且 `pushRevision` 留下旧正文可回溯。
+   *
+   * **故意不做幂等**：常规压缩「已存在即跳过」是对的（避免重复 LLM 调用 + 重复归档），
+   * 但重压本身就是对那个结果的**显式否定**，由调用者（人）逐条决定压哪条。
+   * 唯一的前置检查是「已经不再超预算就别白跑一次 LLM」（`within-budget`）。
+   */
+  async recompressUnit(
+    scope: string,
+    level: CompressionLevel,
+    bucket: string,
+    opts: { maxChars?: number } = {},
+  ): Promise<RecompressResult> {
+    return withKeyLock(compressUnitKey(scope, level, bucket), () =>
+      this.recompressUnitLocked(scope, level, bucket, opts),
+    )
+  }
+
+  private async recompressUnitLocked(
+    scope: string,
+    level: CompressionLevel,
+    bucket: string,
+    opts: { maxChars?: number },
+  ): Promise<RecompressResult> {
+    const all = this.store.list(scope, { includeArchive: true })
+    const existing = all.find((e) => e.kind === 'summary' && e.level === level && e.bucket === bucket)
+    if (existing === undefined) {
+      return { summary: null, skipped: true, reason: 'no-summary', beforeChars: 0, afterChars: 0 }
+    }
+    const beforeChars = existing.body.length
+    const maxChars = opts.maxChars ?? DEFAULT_RECOMPRESS_MAX_CHARS
+    if (beforeChars <= maxChars) {
+      return { summary: existing, skipped: true, reason: 'within-budget', beforeChars, afterChars: beforeChars }
+    }
+
+    const range = bucketRange(level, bucket)
+    const text = await this.summarize({
+      entries: [existing],
+      level,
+      bucket,
+      range,
+      maxChars,
+      mode: 'recompress',
+    })
+    const trimmed = text.trim()
+    if (trimmed.length === 0) {
+      throw new Error(`概要重压失败：${level} ${bucket} 总结产出为空`)
+    }
+
+    // 写前复核（同 compressUnitLocked 的理由：多实例共享 DSH_HOME 是常态工况）：
+    // 若这段 LLM 往返期间该条目已被他方改动，本次结果基于的是**旧正文** ⇒ 让位、不覆盖。
+    const fresh = this.store.get(scope, existing.id)
+    if (fresh === undefined || fresh.body.length !== beforeChars) {
+      return { summary: fresh ?? null, skipped: true, reason: 'raced', beforeChars, afterChars: fresh?.body.length ?? 0 }
+    }
+
+    const updated = await this.store.update(scope, existing.id, {
+      body: `> 时间范围：${range.label} · 重压自 ${beforeChars} 字\n\n${trimmed}`,
+    })
+    if (updated === undefined) {
+      return { summary: null, skipped: true, reason: 'no-summary', beforeChars, afterChars: 0 }
+    }
+    return { summary: updated, skipped: false, reason: 'recompressed', beforeChars, afterChars: updated.body.length }
   }
 
   /**

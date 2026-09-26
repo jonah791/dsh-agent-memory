@@ -33,6 +33,72 @@ class MemoryKv {
   get size() { return this.map.size }
 }
 
+// ---------- v0.11.3 概要重压 ----------
+
+describe('recompressUnit：把超预算概要用它自己的正文压回去', () => {
+  const WID = 'workspace-a'
+  const BIG = 'x'.repeat(9000)
+  let store
+  let created
+
+  beforeEach(async () => {
+    store = new MemoryStore(new MemoryKv())
+    const r = await store.remember({
+      kind: 'summary', title: '日概要 2026-09-24', body: BIG, tags: ['t'],
+      scope: WID, level: 'day', bucket: '2026-09-24',
+    })
+    created = r.id
+  })
+
+  test('超预算 ⇒ 调一次 LLM、走重压模式、update 替换（不是追加）', async () => {
+    let calls = 0
+    let seen = null
+    const summarize = async (input) => { calls += 1; seen = input; return 'y'.repeat(1200) }
+    const r = await new TimelineCompressor(store, DEFAULT_CONFIG, summarize).recompressUnit(WID, 'day', '2026-09-24')
+
+    assert.equal(r.skipped, false)
+    assert.equal(r.reason, 'recompressed')
+    assert.equal(r.beforeChars, BIG.length)
+    assert.ok(r.afterChars < r.beforeChars, '确实变小了')
+    assert.equal(calls, 1, '只调一次 LLM')
+    assert.equal(seen.mode, 'recompress', '★ 必须走重压模式（否则提示词会让它继续铺陈）')
+    assert.equal(seen.entries.length, 1, '输入只有现有概要一条')
+    assert.equal(seen.entries[0].id, created, '输入就是那条概要本身')
+    assert.equal(seen.maxChars, 4000, '缺省用更严的预算')
+
+    const after = store.list(WID, { includeArchive: true }).find((e) => e.id === created)
+    assert.equal(after.id, created, '★ update 而非新建（同一条目、同 id）')
+    assert.ok(!after.body.includes(BIG), '★ 不是追加：旧正文未被整体保留')
+    assert.ok(after.body.includes('重压自 9000 字'), '抬头记录重压前的长度（可回溯）')
+  })
+
+  test('已在预算内 ⇒ 跳过且**不调 LLM**（不白跑）', async () => {
+    let calls = 0
+    const summarize = async () => { calls += 1; return 'z' }
+    const r = await new TimelineCompressor(store, DEFAULT_CONFIG, summarize)
+      .recompressUnit(WID, 'day', '2026-09-24', { maxChars: 100000 })
+    assert.equal(r.skipped, true)
+    assert.equal(r.reason, 'within-budget')
+    assert.equal(calls, 0, '★ 不白跑一次 LLM')
+  })
+
+  test('桶里没有概要 ⇒ no-summary（不抛）', async () => {
+    const r = await new TimelineCompressor(store, DEFAULT_CONFIG, async () => 'z')
+      .recompressUnit(WID, 'week', '2026-W38')
+    assert.equal(r.skipped, true)
+    assert.equal(r.reason, 'no-summary')
+  })
+
+  test('总结产出为空 ⇒ fail loud 抛错且**不落库**（失败不留痕）', async () => {
+    await assert.rejects(
+      () => new TimelineCompressor(store, DEFAULT_CONFIG, async () => '   ').recompressUnit(WID, 'day', '2026-09-24'),
+      /总结产出为空/,
+    )
+    const after = store.list(WID, { includeArchive: true }).find((e) => e.id === created)
+    assert.equal(after.body, BIG, '★ 正文原样：抛错发生在 update 之前')
+  })
+})
+
 /** 直接构造 Entry 对象（createdAt/bucket 可控，绕过 remember 的 now 戳） */
 function entry(overrides = {}) {
   const base = {

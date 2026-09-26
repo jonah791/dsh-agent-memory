@@ -33,6 +33,26 @@ function makeInput(overrides = {}) {
   }
 }
 
+// ---------- v0.11.3 重压模式与逐次预算 ----------
+
+test('buildSummaryPrompt：maxChars 参数逐次覆盖（重压用更严的尺子）', () => {
+  const p = buildSummaryPrompt(makeInput(), 4000)
+  assert.ok(p.includes('正文不超过 4000 字'), 'per-call 预算生效（缺省 6000 被覆盖）')
+  assert.ok(p.includes('原始条目：'), '首压模式的标签')
+  assert.ok(!p.includes('待重压的概要：'))
+})
+
+test('buildSummaryPrompt(recompress)：必须换文案、不注入周记模板', () => {
+  const p = buildSummaryPrompt(makeInput({ mode: 'recompress', maxChars: 4000, weeklyTemplate: '【周记模板】应被忽略' }))
+  assert.ok(p.includes('已经超长'), '必须点明输入是一份超长概要')
+  assert.ok(p.includes('更短'), '必须要求更短')
+  assert.ok(p.includes('丢失细节是可接受的'), '必须给模型「丢细节无害」的许可，否则它会继续铺陈')
+  assert.ok(p.includes('待重压的概要：'), '输入标签换掉')
+  assert.ok(!p.includes('原始记忆条目'), '★ 不得沿用「原始记忆条目」——那会让模型把它当原料继续铺陈，压完仍超预算')
+  assert.ok(!p.includes('【周记模板】应被忽略'), '★ 重压不注入周记模板（结构在首压时已成型，再给模板只会诱导它把内容铺回去）')
+  assert.ok(p.includes('正文不超过 4000 字'), 'input.maxChars 优先于函数参数缺省')
+})
+
 /** fake ctx：只提供 llm.stream（async generator） */
 function fakeCtx(chunks) {
   return {

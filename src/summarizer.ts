@@ -81,26 +81,40 @@ const LEVEL_LABEL: Record<CompressionLevel, string> = {
  */
 export function buildSummaryPrompt(input: SummarizeInput, maxChars: number = DEFAULT_SUMMARY_MAX_CHARS): string {
   const levelLabel = LEVEL_LABEL[input.level]
+  // 逐次覆盖优先（v0.11.3）：重压要用比首次生成**更严**的尺子
+  const limit = input.maxChars ?? maxChars
+  const recompress = input.mode === 'recompress'
   const lines: string[] = []
-  lines.push(
-    `你是一个长期记忆压缩引擎。下面是 ${input.entries.length} 条${levelLabel}的原始记忆条目（时间范围：${input.range.label}）。`,
-  )
-  lines.push('请将它们压缩为一份信息无损的概要，保留关键事实、决策、结论、数字、日期与引用，删除重复与琐碎细节。')
+  if (recompress) {
+    // 重压：输入是**一份已超预算的概要**（entries 只有它一条）。文案必须换——
+    // 沿用「N 条原始记忆条目」的说法，模型会把它当原料继续铺陈细节，压完还是超预算。
+    lines.push(
+      `你是一个长期记忆压缩引擎。下面是一份**已经超长**的${levelLabel}（时间范围：${input.range.label}），需要重压到预算内。`,
+    )
+    lines.push('请把它压缩为一份**更短**的概要：保留关键事实、决策、结论、数字、日期与引用，**删除铺陈与细节**。')
+    lines.push('它的原料条目已冷归档（概要自带 archiveRef 可深挖）⇒ **丢失细节是可接受的**：概要是导航层，不是存档。')
+  } else {
+    lines.push(
+      `你是一个长期记忆压缩引擎。下面是 ${input.entries.length} 条${levelLabel}的原始记忆条目（时间范围：${input.range.label}）。`,
+    )
+    lines.push('请将它们压缩为一份信息无损的概要，保留关键事实、决策、结论、数字、日期与引用，删除重复与琐碎细节。')
+  }
   lines.push('')
   lines.push('输出要求：')
   lines.push('- 使用 Markdown，按主题分节或分点，条理清晰')
   lines.push('- 保留精确信息：日期、数字、文件路径、命令、结论原文')
   lines.push('- 若有未完成事项或待办，单独列出')
-  lines.push(`- **正文不超过 ${maxChars} 字**：概要是**导航层**，原料条目已冷归档（可按 archiveRef 深挖），`)
+  lines.push(`- **正文不超过 ${limit} 字**：概要是**导航层**，原料条目已冷归档（可按 archiveRef 深挖），`)
   lines.push('  因此**不要逐字搬运原文**，也不要为追求「无损」而铺陈细节；超限会导致整份概要作废')
   lines.push('- 只输出概要正文本身，不要任何前言、解释或客套')
-  if (input.level === 'week' && input.weeklyTemplate !== undefined && input.weeklyTemplate.trim().length > 0) {
+  // 重压不注入周记模板：结构在首压时已成型，再给模板只会诱导它把内容铺回去
+  if (!recompress && input.level === 'week' && input.weeklyTemplate !== undefined && input.weeklyTemplate.trim().length > 0) {
     lines.push('')
     lines.push('周记模板（建议结构，可按实际内容取舍，无内容的小节省略）：')
     lines.push(input.weeklyTemplate.trim())
   }
   lines.push('')
-  lines.push('原始条目：')
+  lines.push(recompress ? '待重压的概要：' : '原始条目：')
   for (const [index, entry] of input.entries.entries()) {
     lines.push(`${index + 1}. **${entry.title}**${entry.tags.length > 0 ? `（标签：${entry.tags.join(', ')}）` : ''}`)
     lines.push(indentBody(entry.body))

@@ -239,8 +239,46 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     await compressor.compressPending(scope)
   }
 
+  /**
+   * 概要重压（v0.11.3）：把一条已超预算的概要压回预算内。
+   *
+   * 输入是 **summaryId**（不是 level/bucket）——因为触发它的路径是 memory_audit 的候选，
+   * 那里能拿到的就是 id；由 id 反查 scope/level/bucket 放在这一层，工具层保持薄。
+   *
+   * 三条与 `compress` 一致的边界：
+   *   ① `global` 层不启用时间压缩（DESIGN.md §五）⇒ 直接返回 undefined；
+   *   ② 只接受 `kind === 'summary'` 且 level/bucket 齐全的条目 —— 别的条目没有「桶」可重压；
+   *   ③ **不落压缩轨迹**（传 undefined sink）：重压是**手动显式动作**，不是流水线的一环，
+   *      混进 compress-trace 会让「为什么这个桶没压」的读数失真。
+   */
+  const recompress: MemoryToolDeps['recompress'] = async ({ summaryId, maxChars }) => {
+    let hitScope = ''
+    for (const s of store.scopes()) {
+      const found = store.list(s, { includeArchive: true }).find((e) => e.id === summaryId)
+      if (found !== undefined) { hitScope = s; break }
+    }
+    if (hitScope === '' || hitScope === 'global') return undefined
+    const entry = store.get(hitScope, summaryId)
+    if (entry === undefined || entry.kind !== 'summary' || entry.level === null || entry.bucket === null) {
+      return undefined
+    }
+    const cfg = await loadConfig(hitScope)
+    const summarize: SummarizeFn = async (input) => {
+      const result = await summarizeEntries(ctx, toSummarizerConfig(config), input, undefined, undefined, lastRoute)
+      return result.body
+    }
+    const compressor = new TimelineCompressor(store, cfg, summarize, undefined)
+    const r = await compressor.recompressUnit(
+      hitScope,
+      entry.level,
+      entry.bucket,
+      maxChars !== undefined ? { maxChars } : {},
+    )
+    return { beforeChars: r.beforeChars, afterChars: r.afterChars, skipped: r.skipped, note: r.reason }
+  }
+
   // 4. 注册记忆工具（remember/recall/update/forget/browse/relate/stats/audit/health/version/check）
-  registerMemoryTools(ctx, { store, loadConfig, compress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary })
+  registerMemoryTools(ctx, { store, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })
