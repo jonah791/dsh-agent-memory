@@ -211,10 +211,7 @@
 | R3 | 条目 `role` === 调用者角色 | 放行 |
 | R4 | `policy.read` 含 `'*'` 或含条目 `role` | 放行 / 否则拒绝 |
 
-**读路径**：`gatherReadable`（工具层）与注入层各自先 `narrowReadScopes`（`include_global: false` 且**未显式给 scope** 时去掉 global），再 `applyRoleView` 过滤。
-**写路径**：`role` 只在**新建**时盖章（启用 roles → 盖调用者角色；未启用 → 仅显式 `role` 生效；两者皆无 → 共享）；`author = {sessionId, delegationDepth, preset}` 无条件记录。
-**工具参数**：`recall` / `memory_browse` / `memory_relate` / `remember` 接受 `role`（视角/归属覆盖）；`update` / `forget` **不提供**越视野后门（只能改视野内条目）。
-**推荐骨架**（工作台部署，示例见 README）：`main: read ['*']`；`worker: read ['main']`；`verifier: read ['main'], kinds [fact, knowledge, summary], include_global false`；`ghost-*: read []`（隔间互不可见）。
+**读路径**：`gatherReadable`（工具层）与注入层各自先 `narrowReadScopes`（`include_global: false` 且**未显式给 scope** 时去掉 global），再 `applyRoleView` 过滤。 **写路径**：`role` 只在**新建**时盖章（启用 roles → 盖调用者角色；未启用 → 仅显式 `role` 生效；两者皆无 → 共享）；`author = {sessionId, delegationDepth, preset}` 无条件记录。 **工具参数**：`recall` / `memory_browse` / `memory_relate` / `remember` 接受 `role`（视角/归属覆盖）；`update` / `forget` **不提供**越视野后门（只能改视野内条目）。 **推荐骨架**（工作台部署，示例见 README）：`main: read ['*']`；`worker: read ['main']`；`verifier: read ['main'], kinds [fact, knowledge, summary], include_global false`；`ghost-*: read []`（隔间互不可见）。
 
 ### 5.9 价值体检器契约（v0.6 · `memory_audit`）
 
@@ -252,8 +249,7 @@ usage   = 侧车命中次数（无轨迹 ⇒ 恒 0，公式不因此失真，只
 | `ARCHIVE` | 未被引用 且 age ≥ `archive_min_age_days` 且 无 `source` 且 已被概要覆盖（同 kind 存在更晚概要） |
 | `DEMOTE` | 其余「未被引用且体量 ≥ `demote_min_chars`」（可降级：并入上级概要/压缩） |
 
-**输出形状**：`memory_audit({ scope?, role?, topN?, minChars?, includeArchive? })` →
-`{ summary: { total, chars, byBucket, charsByBucket }, groups: [{ key, kind/level/tag, count, chars, bucket }], candidates: [{ id, kind, title, bucket, score, reasons[], evidence }], notes[] }`。
+**输出形状**：`memory_audit({ scope?, role?, topN?, minChars?, includeArchive? })` → `{ summary: { total, chars, byBucket, charsByBucket }, groups: [{ key, kind/level/tag, count, chars, bucket }], candidates: [{ id, kind, title, bucket, score, reasons[], evidence }], notes[] }`。
 
 **逻辑轨迹（侧车，v0.6 起采集）**：`<DSH_HOME>/memory-access-trace.jsonl` —— 一行一次读命中：`{atMs, source:'recall'|'auto', role, ids:[…]}`。写入**只追加**（POSIX append，天然免锁）、**吞错**（失败即跳过，不影响 recall）、**按体积轮转**（超 `access_trace.max_bytes` 改名为 `.1` 重开），**绝不改条目**。审计器只读它，缺文件 ⇒ `usage=0`。
 
@@ -442,7 +438,7 @@ idf   = log(1 + N / (1 + df))
 | A62 | `audit.compress_trace` 配置：缺省开（1 MB）、可关、`max_bytes=0` = 不轮转、非法（未知键 / 非布尔 / 负值 / 非映射）fail-loud | `tests/compress-trace.test.mjs`「audit.compress_trace 配置（A62）」3 用例 | ✔ 已实测 |
 | A63 | **线上**：重启后 `<DSH_HOME>/memory-compress-trace.jsonl` 出现 `scan` / `unit` / `end` 记录，且 `memory_health` 报出压缩流水线读数（五问一条命令可答） | ✔ **线上实测**（19:41–19:57）：轨迹 4 行→19 行；`scan` 41 候选/3 待压 + 判定分布 + 逐桶样本；`error` 带 provider 原文；`unit`/`end` 齐全；`memory_health` →「压缩流水线：扫描 7 次 / 压缩 3 单元 / 非待压判定 no-sources 33, not-ended 4, already-summarized 1」 | ✔ 已实测 |
 | A64 | 总结调用带会话 id：有 `agent` ⇒ 用 `agent.session.id`；无 agent ⇒ 显式 `sessionId` 参数（周期补压路径）；**两者皆无 ⇒ options 不含该键**（零回归） | `tests/summarizer.test.mjs`「sessionId 透传」4 用例 | ✔ 已实测 |
-| A65 | 提示词含正文长度上限（缺省 6000 字，可经第二参数覆盖）并显式劝阻逐字搬运 | `tests/summarizer.test.mjs`「长度上限（v0.8.1）…」「长度上限可覆盖…」 | ✔ 已实测 |
+| A65 | 提示词含正文长度上限（**v0.11.6 起缺省 4000 字**；v0.8.1–v0.11.5 为 6000；可经第二参数覆盖）并显式劝阻逐字搬运 | `tests/summarizer.test.mjs`「长度上限（v0.8.1）…」「长度上限可覆盖…」（用例引用常量而非硬编码值，改值不再假红） | ✔ 已实测 |
 | A66 | 截断错误附**可归因证据**（已产出字符数 + usage），区分「模型写长文」与「reasoning 烧预算」 | `tests/summarizer.test.mjs`「截断错误附可归因证据（v0.8.2）…」 | ✔ 已实测 |
 | A67 | **线上（症状消失级）**：三个 pending 桶全部压成概要、原料冷归档，缺口消失 | ✔ **线上实测**（19:54:21 scan → 19:55:26 `day 2026-09-13` compressed（归档 6 / 12,233 字 / 64.8s）→ 19:56:05 `day 2026-09-14`（归档 15 / 12,919 字 / 38.5s）→ 19:57:35 `week 2026-W37`（归档 6 / 17,436 字 / 90.4s）→ `end`）；库内 681→684 条（+3 概要）、归档 180→207（+27 原料） | ✔ 已实测 |
 | A68 | `applyTextMode` 三模式：`replace`（沿用 v0.8 语义：title=首行、body=**全文**）/ `append`（追加到正文末尾，标题不动）/ `patch`（正文命中则替换，正文不中退到标题） | `tests/prune-merge.test.mjs`「A68 applyTextMode…」 | ✔ 已实测 |
@@ -580,6 +576,12 @@ idf   = log(1 + N / (1 + df))
     - **门槛 30 的来源（样本量诚实标注）**：874 条真实语料上 **9 个查询**的分布——无指向 继续 8.4／相关度算法… 18.4／看看这个项目 25.0；有指向 哨兵重启 38.2／auto-recall 去重 57.5／MemOS 评估 82.5／技能生命周期 106.3 ⇒ 间隔落在 25–38。**9 样本非充分统计**，真实语料若出现 25–38 区间查询需重新校准；传 0 可关闭。
     - **取证**：两组**尸体测试**（关闭 IDF ⇒ 只有 IDF 判据失败；`>=`→`>` ⇒ 只有边界判据失败）+ 真实语料**端到端 9/9**（「嗯」命中 874 条全库但 top1=0.0 ⇒ 跳过）。离线 **216/217**（唯一失败为既有 `A41b`，与本改动无关 → `t-0e5b7967`）。
     - **同步修正的判据**：3 条断言**绝对分值**的旧判据（`[3,2,1]`／`6`／`9`）改为**比例与累加性**断言——绝对分值 = 权重 × idf，随语料浮动；语义是相对关系。**判据与代码同时给出理由，不是为让测试变绿**。
+
+17. **2026-09-28 · 首压预算 6000 → 4000（v0.11.6）· D3 复核回写**
+    - **被修正的语义（一处）**：总结提示词的正文长度上限缺省值 **6000 → 4000**（`DEFAULT_SUMMARY_MAX_CHARS`，commit `eabbe92`）。原依据「既有日概要正文中位 6,003 字符（31 条实测）」被实跑推翻——**那是循环论证**：那批中位数本身就是「无约束时期模型自然长度」的产物，拿它当上限等于**不约束**（实测月概要 39,842 字 = 该值 6.6 倍）；且**预算 6000 ⇒ 交卷 6003**，说明「预算 → 产出」近似 **1:1**。改为 4000 后与 `timeline.DEFAULT_RECOMPRESS_MAX_CHARS` 取齐——**首压与重压同一把尺子**，产出落在 `audit.summary_max_chars(6000)` 之内。
+    - **同步的判据**：A65 已由「缺省 6000 字」改为「**v0.11.6 起缺省 4000 字**」（保留旧值区间，防止读者按旧语义理解）；第二列补记「测试用例引用常量而非硬编码值，改值不再假红」。
+    - **D3 触发背景与性质判定**：本次实现改动（2026-09-26T17:58）晚于文档（2026-09-26T12:27）⇒ `semantic_check` 报 D3。**属真实语义漂移，不是 mtime 抖动**——与第 15 条那条（行尾归一触碰 mtime、实现内容一字未改）性质相反，故处置也不同：那条只需说明，这条必须回写。
+    - **顺带发现（未修，留待插件侧单独提交）**：`src/summarizer.ts:37` 的 JSDoc 仍写「缺省 `DEFAULT_SUMMARY_MAX_CHARS`（6000）」，与同文件第 72 行的 `= 4000` 自相矛盾。属「声明与实现对账」同类缺陷；本次约束为「只改语义文档」，故**未动源码**，如实留档。
 
 ## 10 · 未决问题
 
