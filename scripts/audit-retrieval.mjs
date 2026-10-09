@@ -114,8 +114,15 @@ function runGate() {
   console.log('  要比的是**形状**：被清零的词是哪一类、以及它们是不是「最核心的概念词」。\n')
 
   // 候选概念词：tags 频次 >= minTagDf（这些是「我平时会拿来当查询词」的概念）
+  // ⚠ 键必须**按小写归并**：df 匹配本身是大小写不敏感的（源码 toLowerCase），
+  //   若按 tags 原样大小写取键，`dsh`/`DSH`、`github`/`GitHub` 会被当成两个词
+  //   各计一次 ⇒ ① 被清零清单出现重复项，受害面被虚报（2026-10-10 实测踩到）。
   const tagFreq = new Map()
-  for (const e of live) for (const t of e.tags ?? []) tagFreq.set(t, (tagFreq.get(t) ?? 0) + 1)
+  for (const e of live)
+    for (const t of e.tags ?? []) {
+      const key = t.toLowerCase()
+      tagFreq.set(key, (tagFreq.get(key) ?? 0) + 1)
+    }
   const candidates = [...tagFreq.entries()]
     .filter(([, n]) => n >= minTagDf)
     .sort((a, b) => b[1] - a[1])
