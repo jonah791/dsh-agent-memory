@@ -45,8 +45,22 @@ const optOf = (name, dflt) => {
 // ---------- 语料与门常量 ----------
 const raw = JSON.parse(fs.readFileSync(STORE, 'utf8'))
 const all = Object.values(raw.tables.entries)
-const live = all.filter((e) => !e.archived)
+
+/**
+ * --scope=all|global|workspace：**跨语料复制**用的第二语料轴。
+ * 论文纪律（arXiv 2610.10170）：单一语料上的结论可能是语料专属的——
+ * 「With one corpus we would have gotten that conclusion wrong」。
+ * 同一记忆库里恰有 global / workspace 两个天然分布不同的语料。
+ */
+const SCOPE = optOf('scope', 'all')
+const liveAll = all.filter((e) => !e.archived)
+const scopeOf = (e) => (e.scope === 'global' ? 'global' : 'workspace')
+const live = SCOPE === 'all' ? liveAll : liveAll.filter((e) => scopeOf(e) === SCOPE)
 const N = live.length
+if (N === 0) {
+  console.error(`[FATAL] --scope=${SCOPE} 过滤后活跃条目为 0 —— 请核对 entry.scope 的实际取值。`)
+  process.exit(4)
+}
 
 /**
  * 门常量**不在本器里写死**：从构建产物里解析出来。解析不到即响亮失败——
@@ -87,9 +101,17 @@ function runGate() {
   const threshold = Math.max(minDf, Math.ceil(N * ratio))
   const minTagDf = Number(optOf('min-tag-df', 20))
 
+  const dist = liveAll.reduce((m, e) => {
+    const k = scopeOf(e)
+    m[k] = (m[k] ?? 0) + 1
+    return m
+  }, {})
   console.log('=== gate · 泛词门影响面普查 ===')
-  console.log(`语料：${all.length} 条（活跃 ${N} / 归档 ${all.length - N}） · 库 ${STORE}`)
-  console.log(`门：df >= ${minDf} 且 df/N > ${ratio} ⇒ 有效阈值 df >= ${threshold}\n`)
+  console.log(`语料：${all.length} 条（活跃 ${liveAll.length} / 归档 ${all.length - liveAll.length}） · 库 ${STORE}`)
+  console.log(`作用域：--scope=${SCOPE} ⇒ 本次参与 ${N} 条` + (SCOPE === 'all' ? `（${Object.entries(dist).map(([k, v]) => k + ' ' + v).join(' / ')}）` : ''))
+  console.log(`门：df >= ${minDf} 且 df/N > ${ratio} ⇒ 有效阈值 df >= ${threshold}（N=${N}）\n`)
+  console.log('⚠ 门是**比例门**（df/N）⇒ 换语料即换阈值，两个语料的读数**不可直接比大小**，')
+  console.log('  要比的是**形状**：被清零的词是哪一类、以及它们是不是「最核心的概念词」。\n')
 
   // 候选概念词：tags 频次 >= minTagDf（这些是「我平时会拿来当查询词」的概念）
   const tagFreq = new Map()
