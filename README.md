@@ -2,7 +2,7 @@
   DSH 插件生态公约声明（plugin-ecosystem-convention · 组合优先/声明清晰/兼容优先）
   purpose: Agent 驱动的长期记忆：作用域分区（global + per-workspace）+ 分层条目（fact/knowledge/episodic）+ 时间桶压缩（日→周→月→年）+ 关联检索（related 链 / memory_relate 多跳 BFS）+ 主人消息 auto-recall 注入（CJK 2-gram、尾部追加）；内容决策全归 agent
   inject: 'storageDomain','tools','llm','agents'
-  tools: remember,recall,update,forget,memory_browse,memory_relate,memory_stats,memory_health,memory_version,memory_check
+  tools: remember,recall,update,forget,memory_browse,memory_relate,memory_stats,memory_health,memory_version,memory_check,memory_merge,memory_audit,memory_recompress,memory_review_mark
   runtime: host-only（无 client 侧）
   envDeps: 无外部服务/无网络依赖（LLM 总结走 ctx.llm；另用 yaml + zod 两个纯 JS 依赖，node:fs 只读工作区 memory.yml）
   boundary: 读写自身存储域（agent_memory.entries）与 <workspace>/.dsh/memory.yml；不隔离、不鉴权、不加密、不做内容判断；工具描述明确「不用来记凭据（密钥/口令）」；压缩只作用于 L3 episodic，fact/knowledge 永不作为原料
@@ -11,10 +11,10 @@
 # dsh-agent-memory
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.9.0-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.11.6-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-125%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-228%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：给 DSH 里的 agent 装上**跨会话的长期记忆**——把「经历过的事」结构化写入持久层，再在恰当的时机（会话启动、每条主人消息、时间桶结束、会话压缩完成）把它带回上下文，并允许 agent 检索、修订、归档、沿关系行走。
@@ -23,7 +23,7 @@
 
 ## 能力
 
-12 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
+14 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
 
 | 工具 | 用途 |
 |------|------|
@@ -39,6 +39,8 @@
 | `memory_audit` | **价值体检（v0.6 · 只读提案器）**：四档提案 `KEEP` / `DEMOTE` / `ARCHIVE` / `REVIEW` + 证据行 + 按层级聚合的体量视图。判据序：承重（被概要 `archiveRef` 引用）＞ 新（≤ `keep_recent_days`）＞ 未引用且老且无溯源（归档候选）＞ 未引用且体量大（可降级）＞ 小体量兜底。**不归档、不删除、不刷新 `accessedAt`**；分数是序数（权重为启发式先验，非拟合值） |
 | `memory_version` | 插件版本 + 构建时刻（**动态**读 `package.json` 与产物 mtime，用于 HMR 验证） |
 | `memory_check` | 「待沉淀建议」——**当前恒返回空数组**（通道 B 未接线，工具描述已如实声明） |
+| `memory_recompress` | **概要重压出口（v0.11）**：正文超预算（`summary_max_chars`）的概要条目，用**它自己的正文**再压一次并**整体替换**（旧版进 `revisions` 可回溯）。只对 `kind=summary` 且 `level`/`bucket` 齐全的条目有效；已在预算内则跳过（不白跑一次 LLM）。**与常规时间压缩的分工**：常规压缩「已存在即跳过」，本工具正是那个幂等结果的**显式出口** |
+| `memory_review_mark` | **体检裁决留痕（v0.11）**：给一条体检候选打「已裁决」标记 ⇒ `memory_audit` 不再把它当待办反复报（归 `KEEP`）。**只写侧车、绝不改条目**（不刷新 `accessedAt`/`updatedAt`）；标记只对打标那一刻的版本有效——条目再变动即自动回到常规分档 |
 
 行为侧（无工具面，自动发生）：
 
@@ -77,7 +79,7 @@
 
 > 依赖官方 storage 栈（`storage` / `storage-json` / `storage-domain`）——web-app bundle 已提供，无需额外行。
 
-**3) 30 秒验证**：调 `memory_version` → 期望返回 `name: dsh-agent-memory`、`version: 0.8.0` 与**晚于源码修改时刻**的 `buildAt`；再调 `memory_health` → 期望 `total > 0`（已有历史条目）**且尾部出现「压缩流水线：扫描 N 次 / 压缩 M 单元 / …」（无此段 ⇒ 还没重启到 v0.8）**；再调 `memory_stats` → 各 `kind` 计数与 `${DSH_HOME}/storages/agent_memory.json` 中的实际条目数一致。
+**3) 30 秒验证**：调 `memory_version` → 期望返回 `name: dsh-agent-memory`、`version: 0.11.6` 与**晚于源码修改时刻**的 `buildAt`；再调 `memory_health` → 期望 `total > 0`（已有历史条目）**且尾部出现「压缩流水线：扫描 N 次 / 压缩 M 单元 / …」（无此段 ⇒ 还没重启到 v0.8）**；再调 `memory_stats` → 各 `kind` 计数与 `${DSH_HOME}/storages/agent_memory.json` 中的实际条目数一致。
 
 ## 配置
 
@@ -192,20 +194,37 @@ console.log("⑤更新时刻",new Date(require("node:fs").statSync(process.env.D
 
 > ⚠️ 上述命令**直接读生产记忆库**——只读、不改；任何去重/删除属「动数据」类决策（须请示主人）。
 
+### 检索面体检器：`scripts/audit-retrieval.mjs`（2026-10-10 建）
+
+**为什么有它**：`recall` 的打分是「标签 3 / 标题 2 / 正文 1 × IDF」，另有一道**泛词门**（`df ≥ 50 且 df/N > 0.1` 的词被清零）。这道门会与**最该被问到的对象反相关**——实测 `插件`(510 次) / `技能`(395) / `教训`(366) / `任务板`(246) **全部返回「命中 0 条」**。v0.12 起空结果会**自报**被谁挡了（`suppressedTerms`，仅在空路径上报）；本脚本是它的**离线批量版**：不依赖会话、绝不改数据、可跨语料复算。
+
+```bash
+node scripts/audit-retrieval.mjs [gate|ablation|inject|all|timing]
+#   gate     泛词门受害者普查（--min-tag-df=N 改候选集口径）
+#   ablation 四臂 placebo 对照（real / tags 置换 / tags 清空 / ☠ title 清空 × 三类查询）
+#   inject   auto-recall 注入面
+#   timing   性能档 —— ⚠ 必须在**独立进程**里单跑（同进程混跑会让短档虚高约 6×，故 all 刻意不含它）
+#   公共选项：--scope=all|global|workspace（跨语料复制）· --per-class=N
+```
+
+**两条最容易误读的判据**：
+- `gate` 报出的受害数是**该候选集口径下的下界**，不是全貌——`--min-tag-df` 一改数字会差几倍（实测：`tags≥20` 的 22 词里 7 个被清零 → `tags≥5` 的 202 词里 **30** 个）。**报数必须带上候选集口径**。
+- `ablation` 里**对照臂不动 ⇒ 无结论**（不是「证明无效应」）。同一份读数中 cls2 的对照锚 = **0.547**（装置有分辨力）且 tags 干预 Jaccard = **1.000** ⇒ 那才是**可信的「无可测效应」**；而 cls1/cls3 的对照臂 = **1.000** ⇒ 只能写「**不可判**」。
+
 ## 生效判据与回退
 
 **生效判据**（三选一，按可靠性排序）：
 
-1. **语义级（最直接）**：调 `memory_version` → `version` 应等于 `package.json` 的 `0.8.0`，`buildAt` 应等于 `lib/index.js` 的产物 mtime（该工具是**动态**读这两处的——2026-09-01 之前它硬编码版本、`buildAt` 实为调用时刻，即「判据本身说谎」，已修）。
+1. **语义级（最直接）**：调 `memory_version` → `version` 应等于 `package.json` 的 `0.11.6`，`buildAt` 应等于 `lib/index.js` 的产物 mtime（该工具是**动态**读这两处的——2026-09-01 之前它硬编码版本、`buildAt` 实为调用时刻，即「判据本身说谎」，已修）。
 2. **进程级**：`lib/index.js` 的 mtime ≤ web 进程启动时间，且 `src/*.ts` 不新于 `lib/index.js`（源码改了没构建 = 跑的还是旧产物）。
-3. **行为级**：工具面出现 11 个 `memory_*`；把一条记忆写进库后，`${DSH_HOME}/storages/agent_memory.json` 的 `tables.entries` 条数 +1 且文件 mtime 前进。
+3. **行为级**：工具面出现 14 个 `memory_*`；把一条记忆写进库后，`${DSH_HOME}/storages/agent_memory.json` 的 `tables.entries` 条数 +1 且文件 mtime 前进。
 
 > **「重新构建 ≠ 生效」**：产物 mtime 新只证明「构建过」，**不证明进程在跑它**（AGENTS.md §5.11 §6 实测教训）。判据必须是「进程启动时间晚于产物 mtime」。另：HMR 默认可能未启用（web-app 自带行常为 `disabled`），改完源码务必 `npm run build`，必要时让宿主重载/重启后再复验同一判据。
 
 **回退三档**：
 
 - **源码级**：`git revert <commit>`（或 `git checkout <上一提交> -- src/`）→ `npm run build` → 预检 → 重启。适用于构建后行为异常。
-- **组合级**：profile patch 给 `agent-memory` 行加 `disabled: true`（或 `plugin_stop dsh-agent-memory`）→ 停用后 10 个工具消失、两条注入与周期补压停止；**数据仍在**（存储文件不受影响，重新启用即恢复）。
+- **组合级**：profile patch 给 `agent-memory` 行加 `disabled: true`（或 `plugin_stop dsh-agent-memory`）→ 停用后 14 个工具消失、两条注入与周期补压停止；**数据仍在**（存储文件不受影响，重新启用即恢复）。
 - **运行期**：无需回滚代码即可降级——`<workspace>/.dsh/memory.yml` 里把 `inject.enabled` / `auto_inject.enabled` 置 `false`（停注入）、`compressIntervalMinutes: 0`（停周期补压）、`timeline.{day,week,month,year}: false`（停时间压缩）。回退后用同一套判据复验（工具消失 / 注入帧不再出现 / 文件 mtime 不再前进）。
 
 ## 测试
@@ -216,13 +235,17 @@ npm run test:ts   # = tsc && node --test "tests/*.test.ts"   （需 node ≥ 24�
 npm run test:all  # = 两套一起
 ```
 
+**实测（2026-10-10，v0.11.6）：`npm test` → `# tests 228 / # pass 228 / # fail 0`** —— 本轮为「空结果自证」新增 2 条判据，含**尸体样本**：喂一个真不存在的词 ⇒ 必须 0 条 **且不携带** `suppressedTerms`（证明该字段真的区分了「被门挡掉」与「真的没有」，而不是恒为空）。
+
+> ⚠ **口径提示**：本节数字是**最近一次实测的快照**，改代码后请重跑 `npm test` 取权威读数。下方按版本分条的记录与覆盖细目可能滞后于最新一次运行。
+
 **实测（2026-09-17，v0.9）：`npm test` → `# tests 199 / # pass 199 / # fail 0 / # skipped 0`**（新增 `tests/prune-merge.test.mjs` 10 项，对应 A68–A77；同时把工具面契约断言从 11 个更新为 12 个）。
 
 **实测（2026-09-15，node v24.18.0）：`npm test` → `# tests 179 / # pass 179 / # fail 0 / # skipped 0`；`npm run test:ts` → `# pass 81 / # fail 0 / # skipped 1`（跳过项为 `scope.test.ts` 的 Windows 平台条件）；`npm run test:all` → `# tests 261 / # pass 260 / # fail 0 / # skipped 1`。**无需网络、无需真实外部依赖**——LLM 总结路径在测试里以桩注入，telegram 不涉及。
 
 > **双平台**：`.mjs` 套件在 **WSL（node v22.22.1）侧同样全绿 `179/179`**（2026-09-15 修掉三处夹具硬编码派生值之后；此前有 12 个 A 测试在 POSIX 侧**静默红**——夹具写死 `c:/Users/Alice/proj`，POSIX 下 `workspaceIdOf` 解析不出同值 ⇒ 作用域不匹配、整组用例变成 0 命中。详见 `docs/semantic.md` §10 U12。）
 
-覆盖范围（`tests/` 共 18 个文件；`npm test` 跑其中 13 个 `.mjs`）：
+覆盖范围（`tests/` 共 19 个文件；`npm test` 跑其中 14 个 `.mjs`）：
 
 - `store.test.mjs` — 条目 CRUD、写去重三态（`created`/`updated`/`merged`）、L1 key 覆盖、标题指纹合并
 - `search.test.mjs` — 打分与排序、过滤、截断；**联想层**（related 链强度降序）与 **BFS 多跳闭包**（hop 标注/防环/每跳 limit）
@@ -245,7 +268,7 @@ npm run test:all  # = 两套一起
 ## 设计要点
 
 - **机制不做内容决策**：框架层只保证「不丢、知道、兜底」——记什么、怎么组织、何时 recall、何时遗忘、压缩后是否提炼，全归 agent（设计总纲）。
-- **单一写入真源**：10 个工具 / `memoryApi` / 压缩存档 / 时间压缩四条写路径最终都经 `MemoryStore` → 同一张 `agent_memory.entries` 表（键 `<scope>:<kind>:<id>`）。
+- **单一写入真源**：14 个工具 / `memoryApi` / 压缩存档 / 时间压缩四条写路径最终都经 `MemoryStore` → 同一张 `agent_memory.entries` 表（键 `<scope>:<kind>:<id>`）。
 - **尾部追加而非插入**：两条注入都追加在消息批次末尾——插在中部会打断前缀缓存，代价是每轮全量重算。
 - **幂等复核必须紧贴写入之前**：`compressUnit` 用 `withKeyLock(compressUnitKey(scope,level,bucket))` 把「查概要 → await LLM → 写入」串行化，并在 `remember` **之前**二次复核。首版把复核放在 `remember` 之后 → 命中自己刚写的概要 → 提前 return → **原料永不归档**（7 项测试红拦下）。**位置本身就是语义**。
 - **锁的边界（诚实声明）**：`src/lock.ts` 只覆盖**单进程**。多实例共享同一 `DSH_HOME` 时，跨进程窗口靠写前复核从「一次 LLM 往返」压到两次读写之间——非零，但不声称零（无 CAS 支持）。
