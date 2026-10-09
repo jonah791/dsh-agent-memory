@@ -278,7 +278,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
 function buildRecall(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'recall',
-    description: '检索记忆。按关键词/层级/标签/时间过滤，按相关度（标签命中 > 标题命中 > 正文命中）与新鲜度排序；每个结果附带「相关链」（related：共享标签/标题/正文关联的记忆，因果留痕维度）。**每条都带 id**（主条目与相关链都有，可直接用于 update / forget / memory_merge）。结果标注来源作用域（global 或 workspaceId）与压缩层级（周概要/月概要等）。缺省检索当前项目 + global（全局记忆永远附加，来源在 scope 字段标注）。',
+    description: '检索记忆。按关键词/层级/标签/时间过滤，按相关度（标签命中 > 标题命中 > 正文命中）与新鲜度排序；每个结果附带「相关链」（related：共享标签/标题/正文关联的记忆，因果留痕维度）。**每条都带 id**（主条目与相关链都有，可直接用于 update / forget / memory_merge）。结果标注来源作用域（global 或 workspaceId）与压缩层级（周概要/月概要等）。缺省检索当前项目 + global（全局记忆永远附加，来源在 scope 字段标注）。⚠ **返回「命中 0 条」时先看是否带了 suppressedTerms**：带了 = 查询词太泛被抑制（如「插件」「技能」这类高频概念词），**不等于没有相关记忆**，换更具体的词或加 tags/kind 过滤；没带 = 库里确实没有。',
     parameters: {
       query: { type: 'string', description: '检索关键词（多个词空格分隔，任一命中即计分；省略则按新鲜度排序）。' },
       kind: { type: 'array', items: { type: 'string', enum: ['fact', 'knowledge', 'episodic', 'summary'] }, description: '层级过滤（任一命中）。' },
@@ -296,6 +296,12 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         additionalProperties: false,
         properties: {
           total: { type: 'integer', required: true },
+          suppressedTerms: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'v0.12：被泛词门抑制的词项（**仅结果为空时出现**）。出现即说明「命中 0 条」是**打分被抑制**，不是「没有相关记忆」。',
+          },
           results: {
             type: 'array',
             required: true,
@@ -334,6 +340,17 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         },
       },
       render: (args, value) => {
+        // v0.12（2026-10-10）：空结果必须自证原因——
+        // 「被泛词门抑制」≠「没有相关记忆」。实测 recall("插件") / recall("技能")
+        // 曾返回「命中 0 条」（库里分别有 510 / 395 条提及），读起来像"没有这条记忆"。
+        if (value.results.length === 0) {
+          const sup = value.suppressedTerms
+          const text =
+            sup !== undefined && sup.length > 0
+              ? `命中 0 条。⚠ 但**这不是「没有相关记忆」**：查询词 ${sup.map((t) => `「${t}」`).join('、')} 在本库中出现过频（超过泛词阈值）⇒ 词项被打分抑制。请换更具区分力的词，或配合 tags / kind / since 收窄后重试。`
+              : '命中 0 条：库中确实没有包含这些词项的条目（非抑制所致）。'
+          return [{ type: 'text', text }]
+        }
         const lines = value.results.map((item) => {
           const levelNote = item.level !== null ? `（${item.level}概要）` : ''
           const relatedNote = item.related !== undefined && item.related.length > 0

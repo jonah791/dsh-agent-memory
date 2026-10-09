@@ -200,6 +200,11 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   // 在**过滤后**的候选集上算 DF（比较基准就是本次检索范围）。
   const idfTokens = weighted !== undefined ? weighted.map((item) => item.term) : tokens
   const idf = hasQuery ? buildIdf(filtered, idfTokens) : new Map<string, number>()
+  // v0.12：被泛词门置 0 的词项。idfOf 恒 > 0（log(1+N/(1+df))），故 idf===0 ⟺ 泛词门命中。
+  // 用途：把「真的没有相关记忆」与「查询词过泛被抑制」分开（仅结果为空时上报）。
+  const suppressedTerms = hasQuery
+    ? [...new Set(idfTokens.map((t) => t.toLowerCase()).filter((t) => idf.get(t) === 0))]
+    : []
   let scored = filtered.map((entry) => ({
     entry,
     score: weighted !== undefined ? scoreEntryWeighted(entry, weighted, idf) : scoreEntry(entry, tokens, idf),
@@ -228,7 +233,12 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
     item.related = relatedOf(entries, entry, 3, includeArchive)
     return item
   })
-  return { results, total: scored.length }
+  return {
+    results,
+    total: scored.length,
+    // v0.12：仅在「结果为空且确因泛词门」时上报——有结果时不加噪声
+    ...(scored.length === 0 && suppressedTerms.length > 0 ? { suppressedTerms } : {}),
+  }
 }
 
 /**

@@ -431,3 +431,37 @@ describe('relateClosure · 多跳联想闭包（BFS 记忆图）', () => {
     }
   })
 })
+
+// ---------- v0.12：空结果必须自证原因（泛词门抑制 vs 真的没有） ----------
+describe('recallEntries · 泛词门的空结果语义（v0.12）', () => {
+  /**
+   * 夹具：60 条条目。
+   *  - 「泛词甲」在 55 条的正文里 ⇒ df=55、N=60、df/N≈0.92 ⇒ 触发泛词门（df≥50 且 df/N>0.1）
+   *  - 「特异乙」只在 3 条里 ⇒ 不触发
+   * 动机（2026-10-10 实测）：真实库里 recall("插件") / recall("技能") 返回「命中 0 条」
+   * 而库中分别有 510 / 395 条提及——空结果此前无法与「真的没有」区分。
+   */
+  function corpus() {
+    const entries = []
+    for (let i = 0; i < 60; i++) {
+      entries.push(entry(`e${i}`, { body: i < 55 ? `正文含 泛词甲 编号${i}` : `普通正文 ${i}` }))
+    }
+    entries[0].body += ' 特异乙'
+    entries[1].body += ' 特异乙'
+    entries[2].body += ' 特异乙'
+    return entries
+  }
+
+  test('泛词查询 → total=0 且上报 suppressedTerms（区分「被抑制」与「没有」）', () => {
+    const result = recallEntries(corpus(), { query: '泛词甲' })
+    assert.equal(result.total, 0)
+    assert.ok(Array.isArray(result.suppressedTerms), '应上报 suppressedTerms')
+    assert.ok(result.suppressedTerms.includes('泛词甲'), '应含被抑制的词项')
+  })
+
+  test('尸体样本：特异词有命中 → 不得出现 suppressedTerms（此断言给判据区分力）', () => {
+    const result = recallEntries(corpus(), { query: '特异乙' })
+    assert.ok(result.total > 0, '特异词应有命中')
+    assert.equal(result.suppressedTerms, undefined, '有命中时不得带 suppressedTerms')
+  })
+})
