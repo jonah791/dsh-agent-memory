@@ -99,6 +99,47 @@ function ngrams(text: string): string[] {
   return out
 }
 
+/** 条目的清洗文本与其 2-gram 集合（`relatedOf` 的缓存视图） */
+interface GramIndex {
+  title: string
+  body: string
+  titleGrams: Set<string>
+  bodyGrams: Set<string>
+}
+
+/**
+ * gram 索引缓存（2026-10-12 性能修复）。
+ *
+ * 为什么快：`relatedOf` 原先对**全库每条**都做 `cleanForGram(title)+cleanForGram(body)`
+ * （两次正则替换全文）+ 逐 gram `includes` ⇒ O(结果数 × 全库)，CPU profile 里
+ * relatedOf 家族占 88.9%。这里把「清洗 + 2-gram 集合」按 Entry 对象缓存一次。
+ *
+ * 等价性依据（**这是本改动唯一需要论证的地方**）：`ngrams()` 产出的 gram 长度恒为 2
+ * （唯一例外是 clean.length===1 时返回的**单字符**）⇒ 对一个长度 2 的 g，
+ * `cleanText.includes(g)` ⟺ `g ∈ cleanText 的 2-gram 集合`（子串出现位置必对齐）。
+ * 单字符 g 不满足此等价 ⇒ 该分支**回退** `includes`（见 `relatedOf` 内注释）。
+ *
+ * 用 WeakMap：键是 Entry 对象 ⇒ 条目数组换实例时自然失效，**零失效维护**，
+ * 也不阻止 GC（不构成常驻内存泄漏）。
+ */
+const gramCache = new WeakMap<Entry, GramIndex>()
+
+function gramSetOf(clean: string): Set<string> {
+  const out = new Set<string>()
+  for (let i = 0; i < clean.length - 1; i++) out.add(clean.slice(i, i + 2))
+  return out
+}
+
+function gramIndexOf(entry: Entry): GramIndex {
+  const hit = gramCache.get(entry)
+  if (hit !== undefined) return hit
+  const title = cleanForGram(entry.title)
+  const body = cleanForGram(entry.body)
+  const idx: GramIndex = { title, body, titleGrams: gramSetOf(title), bodyGrams: gramSetOf(body) }
+  gramCache.set(entry, idx)
+  return idx
+}
+
 /**
  * 联想层（v0.3）：为单个命中条目计算相关条目链（因果留痕维度）。
  * 关联强度 = 共享标签数×3 + 标题 2-gram 重叠×2 + 正文 2-gram 重叠×1。
@@ -119,11 +160,14 @@ export function relatedOf(entries: Entry[], target: Entry, limit = 3, includeArc
     // 目标标题 2-gram 出现在对方标题/正文的次数 = 子串关联
     let titleOverlap = 0
     let bodyOverlap = 0
-    const otherTitle = cleanForGram(other.title)
-    const otherBody = cleanForGram(other.body)
+    const oi = gramIndexOf(other)
     for (const g of targetTitleGrams) {
-      if (otherTitle.includes(g)) titleOverlap += 1
-      else if (otherBody.includes(g)) bodyOverlap += 1
+      // ⚠ 等价性边界（见 gramIndexOf 注释）：|g|===2 时 `includes` ⟺ 属于 2-gram 集合；
+      // |g|===1（clean.length===1 的退化情形）不满足该等价 ⇒ 该分支回退 includes。
+      const two = g.length === 2
+      const inTitle = two ? oi.titleGrams.has(g) : oi.title.includes(g)
+      if (inTitle) titleOverlap += 1
+      else if (two ? oi.bodyGrams.has(g) : oi.body.includes(g)) bodyOverlap += 1
     }
     const strength = sharedTags * 3 + titleOverlap * 2 + bodyOverlap * 1
     if (strength > 0) {
