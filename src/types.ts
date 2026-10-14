@@ -394,6 +394,24 @@ export interface RecallQuery {
    * 该路径**每条主人消息都跑**，是最热的调用点。
    */
   withRelated?: boolean
+  /**
+   * 家族折叠（v0.16.0 · 论文 Memory Echo 的 Family 组件）：把**候选池内**的
+   * 「概要与其 `archiveRef` 原料」归为一族，**每族最多占一个服务位**（族内得分最高者为代表）。
+   *
+   * 论文依据（arXiv 2610.17763v1 §5.1）：「**Repeated writes therefore add records,
+   * not independent votes**」——同一来源的派生记录不该被当作多个独立证据占检索位。
+   *
+   * ⚠ **缺省 false（默认关）**，理由是论文自己的消融：Family 单独上线会把准确率
+   * 从 0.825 打到 **0.651**（≈ −33 题）——它必须与「当前事实优先」（Authority）配对
+   * 才不掉分，而后者本插件尚无 ⇒ 先提供可选手段，待有配套再议默认。
+   * 论文亦明确「The representative is selected anew from the current candidate pool」
+   * 且「source grouping **does not delete** the unselected records」——本实现照此：
+   * 只影响**本次占位**，数据不动，仍可 `includeArchive` 取回。
+   *
+   * ⚠ 与 `includeArchive` 的关系：默认视图下原料已冷归档、不会与概要同时命中，
+   * 故本项**只在 `includeArchive=true` 时有实际效果**（实测：活跃概要 + 活跃原料同源对 = 0）。
+   */
+  collapseFamily?: boolean
 }
 
 /** 检索结果项 */
@@ -484,6 +502,14 @@ export interface RecallResult {
   results: RecallResultItem[]
   /** 过滤后、截断前的命中总数 */
   total: number
+  /**
+   * v0.16.0：家族折叠的说明（**仅当真发生折叠时出现**）。
+   *
+   * 它解释「为什么返回条数看着比命中数少」——把 `query.collapseFamily` 压掉的同源条目
+   * 如实报出来，避免「静默少了几条」被读成「检索漏了」。信噪比纪律同 `groundingTag`：
+   * 无折叠即不打这一行。
+   */
+  familyNote?: string
   /**
    * v0.12：被泛词门抑制的词项（idf 置 0）。**仅在结果为空时出现**。
    *

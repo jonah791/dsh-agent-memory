@@ -11,6 +11,7 @@
  */
 
 import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RelatedItem, TimelineLevel, WeightedTerm } from './types.ts'
+import { collapseFamilies, renderFamilyNote } from './family.ts'
 
 /** 检索默认截断条数（未显式给 limit 时） */
 export const DEFAULT_RECALL_LIMIT = 20
@@ -349,15 +350,28 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   // 联想层开关（2026-10-13）：缺省 true 保持原行为；false 时**完全跳过** relatedOf
   // ——它是 O(结果数 × 全库) 的，实测 20 条结果 500–640 ms，而 auto-recall 不消费它。
   const withRelated = query.withRelated ?? true
-  const results = scored.slice(0, limit).map(({ entry, score }) => {
+  // 家族折叠（v0.16.0 · 论文 Memory Echo 的 Family 组件）：**缺省关**。
+  // 开启时把候选池内的「概要 + 其 archiveRef 原料」压成**每族一位**（族内得分最高者为代表）。
+  // ⚠ 语义边界：折叠只影响**本次占位**，不改 `total`（命中总数不变），也不动数据；
+  //   未占位的同族条目仍可经 includeArchive 取回（论文 §5.1：source grouping does not delete）。
+  // 为什么默认关：论文自证 Family 单独上线 0.825 → 0.651（≈ −33 题）。
+  const collapsed = query.collapseFamily === true ? collapseFamilies(scored) : undefined
+  const serving = collapsed === undefined ? scored : collapsed.kept
+  const results = serving.slice(0, limit).map(({ entry, score }) => {
     const item = toResultItem(entry, score)
     // 联想层：每个命中条目附相关链（仅在结果项上附加，不改变 total 语义）
     if (withRelated) item.related = relatedOf(entries, entry, 3, includeArchive)
     return item
   })
+  const titleOf = new Map(entries.map((entry) => [entry.id, entry.title]))
+  const familyNote = collapsed === undefined
+    ? undefined
+    : renderFamilyNote(collapsed.families, (id) => titleOf.get(id) ?? id)
   return {
     results,
     total: scored.length,
+    // v0.16：仅在真发生折叠时出现（无折叠不打噪声，信噪比纪律同 groundingTag/stalenessTag）
+    ...(familyNote !== undefined ? { familyNote } : {}),
     // v0.12：仅在「结果为空且确因泛词门」时上报——有结果时不加噪声
     ...(scored.length === 0 && suppressedTerms.length > 0 ? { suppressedTerms } : {}),
   }

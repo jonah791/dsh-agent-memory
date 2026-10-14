@@ -322,6 +322,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       subject: { type: 'string', description: '主体层过滤（v0.13.0）：只看「关于谁」的条目——`self` = 只看关于我自己的，`master` = 只看关于主人的。缺省 = 不过滤（通用条目照常返回）。⚠ 与 role 的**准入**不同：这是**可选筛子**，不是可见性边界——它只是不匹配就不返回，不改变任何条目的可见性。想「关于我的 + 关于主人的、排除通用」目前需分两次调用。' },
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` = **只看我自己提的、主人未回应的事**——自查「我有没有把提议当成定论」时用它；`rejected` = 只看主人否决过的（防我旧事重提）；`established` = 只看主人明确说过的。缺省 = 不过滤。⚠ 同为**可选筛子**，不是可见性边界。' },
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看**该重看**的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`（还早）。典型用法：`["expired","due-soon"]` = 「**我的哪些结论该重看了**」。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目在任何取值下都不返回（它们的时效状态是「**不知道**」，不是「有效」）。' },
+      collapseFamily: { type: 'boolean', description: '家族折叠（v0.16.0 · 论文 Memory Echo 的 Family 组件）：把**候选池内**的「时间桶概要 + 它 archiveRef 的原料」压成**每族一位**（族内得分最高者为代表），其余不占本次服务位。论文依据：「Repeated writes therefore add records, not independent votes」（arXiv 2610.17763v1 §5.1）——同一来源的派生不该当多个独立证据占位。**缺省 false**：论文消融显示 Family 单独上线会把准确率从 0.825 打到 0.651（≈ −33 题），须与「当前事实优先」配对才安全，故先做成可选。⚠ 只在 `includeArchive: true` 时有实际效果（默认视图下原料已冷归档，不会与概要同时命中）；折叠不删数据，只是本次不占位。' },
     },
     output: {
       schema: {
@@ -329,6 +330,11 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         additionalProperties: false,
         properties: {
           total: { type: 'integer', required: true },
+          familyNote: {
+            type: 'string',
+            description:
+              'v0.16.0：家族折叠说明（**仅当真发生折叠时出现**）——解释「为什么返回条数看着比命中数少」；无折叠时不打这一行。',
+          },
           suppressedTerms: {
             type: 'array',
             items: { type: 'string' },
@@ -460,6 +466,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         until: args.until,
         limit: args.limit,
         includeArchive,
+        collapseFamily: args.collapseFamily ?? false,
       })
       // 侧车用量轨迹（v0.6）：只交出命中 id，**绝不改条目**；失败静默（吞错在实现方）
       if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined && result.results.length > 0) {
