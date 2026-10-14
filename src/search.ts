@@ -20,6 +20,45 @@ const SCORE_TAG = 3
 const SCORE_TITLE = 2
 const SCORE_BODY = 1
 
+/** 条目的小写视图（检索全程复用的小写缓存实体） */
+interface LowerView {
+  title: string
+  tags: string[]
+  /** 检索别名的小写视图（与 tags 同级参与打分，2026-10-13 重做） */
+  aliases: string[]
+  body: string
+}
+
+/**
+ * 小写视图缓存（2026-10-13 性能改造 · 治「每词每库重跑 toLowerCase」）。
+ *
+ * **为什么需要**（2026-10-13 实测）：`documentFrequency` 对**每个查询词项**遍历全库，
+ * 且循环体内对每条目调用 `entry.body.toLowerCase()` —— 全库正文 217 万字符，
+ * 15 个词项 ⇒ 同一批正文被小写 **15 遍**。查询「讲讲改进后的记忆插件的设计思路」
+ * 实测 IDF 段 **135.3 ms**，缓存后稳态 **13.2 ms**（**10.3×**）。
+ *
+ * **等价性**：`toLowerCase()` 是纯函数（同一字符串返回值恒定）⇒ 本缓存只做
+ * 「同一输入不重复计算」，**不改变任何比较结果**。缓存实体与未缓存实体逐字段可比。
+ *
+ * **失效**：键为 Entry **对象**（WeakMap）。`MemoryStore` 读出的是快照拷贝
+ * （store.ts 注释明写），条目内容变化即换新对象 ⇒ 自然失效、零维护，且不阻止 GC。
+ * 与既有 `gramCache` 同一模式。
+ */
+const lowerCache = new WeakMap<Entry, LowerView>()
+
+function lowerOf(entry: Entry): LowerView {
+  const hit = lowerCache.get(entry)
+  if (hit !== undefined) return hit
+  const view: LowerView = {
+    title: entry.title.toLowerCase(),
+    tags: entry.tags.map((tag) => tag.toLowerCase()),
+    aliases: (entry.aliases ?? []).map((alias) => alias.toLowerCase()),
+    body: entry.body.toLowerCase(),
+  }
+  lowerCache.set(entry, view)
+  return view
+}
+
 /**
  * 文档频率：包含该 token 的条目数（大小写不敏感；标签/标题/正文任一命中即计）。
  *
@@ -27,6 +66,8 @@ const SCORE_BODY = 1
  * 原打分对每个词项等权，于是「改进 / 可以 / 需要」这类高频泛词与「相关度算法」这类特征词
  * 同权，泛词主导排序。当晚实例：主人那句话触发的注入三条，全是靠 bigram「改进」命中的
  * 无关条目（技能熔炉改进 / freelance-radar 改进 / 20+ 项改进），与「相关度算法」无关。
+ *
+ * ⚠ 2026-10-13：小写改用 `lowerOf` 缓存视图（原为循环体内现算，见该函数注释）。
  * @param entries - 候选全集（打分上下文）
  * @param token - 查询词项
  * @returns 命中该词的条目数
@@ -35,9 +76,11 @@ function documentFrequency(entries: readonly Entry[], token: string): number {
   const needle = token.toLowerCase()
   let count = 0
   for (const entry of entries) {
-    if (entry.title.toLowerCase().includes(needle)) count += 1
-    else if (entry.tags.some((tag) => tag.toLowerCase().includes(needle))) count += 1
-    else if (entry.body.toLowerCase().includes(needle)) count += 1
+    const view = lowerOf(entry)
+    if (view.title.includes(needle)) count += 1
+    else if (view.tags.some((tag) => tag.includes(needle))) count += 1
+    else if (view.aliases.some((alias) => alias.includes(needle))) count += 1
+    else if (view.body.includes(needle)) count += 1
   }
   return count
 }
@@ -133,11 +176,42 @@ function gramSetOf(clean: string): Set<string> {
 function gramIndexOf(entry: Entry): GramIndex {
   const hit = gramCache.get(entry)
   if (hit !== undefined) return hit
-  const title = cleanForGram(entry.title)
+  // 标题 + 别名（见 entryGramSource 注释）。**分别取 gram 再并集**，不先拼字符串——
+  // 拼接会在接缝处产生跨边界假 gram（如「手册」+「服务」→「册服」）。
+  const title = entry.title
   const body = cleanForGram(entry.body)
-  const idx: GramIndex = { title, body, titleGrams: gramSetOf(title), bodyGrams: gramSetOf(body) }
+  const titleGrams = gramSetOf(cleanForGram(title))
+  for (const alias of entry.aliases ?? []) {
+    for (const g of gramSetOf(cleanForGram(alias))) titleGrams.add(g)
+  }
+  // `title` 字段供 |g|===1 的退化分支 `includes` 兜底——它必须覆盖与 gram 相同的文本范围，
+  // 否则「单字符别名」在兜底分支里查不到（grams 并集含别名、纯 includes 不含 ⇒ 不一致）。
+  const idx: GramIndex = {
+    title: cleanForGram([title, ...(entry.aliases ?? [])].join(' ')),
+    body,
+    titleGrams,
+    bodyGrams: gramSetOf(body),
+  }
   gramCache.set(entry, idx)
   return idx
+}
+
+/**
+ * 目标侧 gram 来源（2026-10-13 重做）：标题 **+ 别名**。
+ *
+ * **为什么并入别名**：别名是「这条记忆可能被怎么问」的入口（见 `Entry.aliases` 注释）。
+ * 若联想只读标题，会出现「检索能靠别名命中、但联想链里看不到关联」的不一致——
+ * 同一份「入口」语义在两条路径上表现不同。
+ *
+ * ⚠ 必须与 `gramIndexOf` 的 titleGrams **同源**：`relatedOf` 用本函数的输出
+ * 去 `has()` 对方的 `titleGrams`，两侧范围不一致就会出现「自己查自己查不到」。
+ */
+function targetGramsOf(entry: Entry): string[] {
+  const out = ngrams(entry.title)
+  for (const alias of entry.aliases ?? []) {
+    for (const g of ngrams(alias)) if (!out.includes(g)) out.push(g)
+  }
+  return out
 }
 
 /**
@@ -148,7 +222,8 @@ function gramIndexOf(entry: Entry): GramIndex {
  * @returns 按 strength 降序、取前 limit 条
  */
 export function relatedOf(entries: Entry[], target: Entry, limit = 3, includeArchive = false): RelatedItem[] {
-  const targetTitleGrams = ngrams(target.title)
+  // 目标侧 gram = 标题 + 别名（与 gramIndexOf 的 titleGrams 同源，见 targetGramsOf 注释）。
+  const targetTitleGrams = targetGramsOf(target)
   const out: RelatedItem[] = []
   for (const other of entries) {
     if (other.id === target.id) continue
@@ -271,10 +346,13 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   })
   const limit = query.limit === undefined ? DEFAULT_RECALL_LIMIT : Math.max(0, Math.floor(query.limit))
   const includeArchive = query.includeArchive ?? false
+  // 联想层开关（2026-10-13）：缺省 true 保持原行为；false 时**完全跳过** relatedOf
+  // ——它是 O(结果数 × 全库) 的，实测 20 条结果 500–640 ms，而 auto-recall 不消费它。
+  const withRelated = query.withRelated ?? true
   const results = scored.slice(0, limit).map(({ entry, score }) => {
     const item = toResultItem(entry, score)
     // 联想层：每个命中条目附相关链（仅在结果项上附加，不改变 total 语义）
-    item.related = relatedOf(entries, entry, 3, includeArchive)
+    if (withRelated) item.related = relatedOf(entries, entry, 3, includeArchive)
     return item
   })
   return {
@@ -359,14 +437,16 @@ function cjkBigrams(token: string): string[] {
  */
 function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>): number {
   if (tokens.length === 0) return 0
-  const title = entry.title.toLowerCase()
-  const body = entry.body.toLowerCase()
+  const view = lowerOf(entry)
   let score = 0
   for (const token of tokens) {
     const w = idf.get(token) ?? 1
-    if (entry.tags.some((tag) => tag.toLowerCase().includes(token))) score += SCORE_TAG * w
-    if (title.includes(token)) score += SCORE_TITLE * w
-    if (body.includes(token)) score += SCORE_BODY * w
+    // aliases 与 tags 同级（×3，2026-10-13 重做）：二者都是「人工给的检索入口」，
+    // 而标题/正文是「内容本身」——入口的意图明确性高于内容偶然的用词。
+    if (view.aliases.some((alias) => alias.includes(token))) score += SCORE_TAG * w
+    if (view.tags.some((tag) => tag.includes(token))) score += SCORE_TAG * w
+    if (view.title.includes(token)) score += SCORE_TITLE * w
+    if (view.body.includes(token)) score += SCORE_BODY * w
   }
   return score
 }
@@ -377,15 +457,15 @@ function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, num
  */
 function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>): number {
   if (terms.length === 0) return 0
-  const title = entry.title.toLowerCase()
-  const body = entry.body.toLowerCase()
+  const view = lowerOf(entry)
   let score = 0
   for (const { term, weight } of terms) {
     const token = term.toLowerCase()
     const w = (idf.get(token) ?? 1) * weight
-    if (entry.tags.some((tag) => tag.toLowerCase().includes(token))) score += SCORE_TAG * w
-    if (title.includes(token)) score += SCORE_TITLE * w
-    if (body.includes(token)) score += SCORE_BODY * w
+    if (view.aliases.some((alias) => alias.includes(token))) score += SCORE_TAG * w
+    if (view.tags.some((tag) => tag.includes(token))) score += SCORE_TAG * w
+    if (view.title.includes(token)) score += SCORE_TITLE * w
+    if (view.body.includes(token)) score += SCORE_BODY * w
   }
   return Math.round(score * 1000) / 1000
 }

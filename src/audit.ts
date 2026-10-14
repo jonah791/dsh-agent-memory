@@ -88,8 +88,11 @@ export interface AuditInput {
   indexEntries?: readonly Entry[]
   /** 配置（audit 段；缺省 DEFAULT_AUDIT_CONFIG） */
   config?: AuditConfig
-  /** 逻辑轨迹索引：id → 命中次数/最后命中（缺省 = 无轨迹，usage 恒 0） */
-  usage?: Map<string, { hits: number; lastAtMs: number }>
+  /**
+   * 用量信号：id → 命中次数 / 最后命中 / 排序加权归因（缺省 = 无轨迹，usage 项恒 0）。
+   * `attributed` 缺失时评分回退 `hits` —— 只喂旧形态的调用方零回归。
+   */
+  usage?: Map<string, { hits: number; lastAtMs: number; attributed?: number }>
   /**
    * 已裁决标记（v0.11.2）：id → 该次裁决的时刻（ms）。**由调用方从侧车读好后注入**
    * （同 `usage` 的模式 —— 本函数保持纯、不碰 IO）。
@@ -219,7 +222,13 @@ export function scoreEntry(
     weights: AuditWeights
     refs: Map<string, number>
     tagReuse: Map<string, number>
-    usage?: Map<string, { hits: number; lastAtMs: number }>
+    /**
+     * 用量信号：`hits` = 被返回过的次数（**不分位置**）；`attributed` = 排序加权归因
+     * （`Σ decay^pos`，见 access-trace.ts）。
+     * v0.12 起**评分消费 `attributed`**；它缺失即回退 `hits`
+     * ⇒ 只喂 `{ hits, lastAtMs }` 的调用方（含既有测试）逐字零回归。
+     */
+    usage?: Map<string, { hits: number; lastAtMs: number; attributed?: number }>
     dups: Map<string, { cluster: number; canonicalId: string }>
     nowMs: number
   },
@@ -228,14 +237,22 @@ export function scoreEntry(
   const chars = charsOf(entry)
   const ageDays = ageDaysOf(entry, ctx.nowMs)
   const refs = ctx.refs.get(entry.id) ?? 0
-  const hits = ctx.usage?.get(entry.id)?.hits ?? 0
+  const signal = ctx.usage?.get(entry.id)
+  const hits = signal?.hits ?? 0
+  // 归因缺失 ⇒ 回退 hits。真库路径走 parseAccessTrace，恒有 attributed（历史轨迹可回溯算出）。
+  const attributed = signal?.attributed ?? hits
   const tags = entry.tags.length
   const shared = ctx.tagReuse.get(entry.id) ?? 0
   const dup = ctx.dups.get(entry.id)
 
   const refScore = logNorm(refs, 5)
   const recency = Math.exp(-ageDays / RECENCY_SCALE_DAYS)
-  const usageScore = logNorm(hits, 10)
+  // v0.12（DREAM 迁移）：用量项从「被返回过几次」改为「按位置加权的等效次数」——
+  // 第 1 位与第 20 位不再同权（旧口径下「一次返回 20 条全是泛词命中」与真正的金标命中
+  // 记成同一个数）。
+  // ⚠ 本项**只影响同档内排序**：classify() 不消费 usage（分档只看绝对阈值与 evidence）
+  // ⇒ 改它不会翻转任何归档/降级结论，爆炸半径有界。
+  const usageScore = logNorm(attributed, 10)
   const tagScore = 0.5 * Math.min(1, tags / 4) + 0.5 * logNorm(shared, 20)
   const roleScore = entry.role !== undefined && entry.role.length > 0
     ? 1
@@ -268,7 +285,9 @@ export function scoreEntry(
       ageDays: Math.round(ageDays * 10) / 10,
       chars,
       refs,
+      // `usage` 保持原语义（被返回次数）不动 —— 既有读取方/断言不受影响；归因另立字段。
       usage: hits,
+      attribution: Math.round(attributed * 1000) / 1000,
       tags,
       hasSource: entry.source !== undefined,
       ...(entry.role !== undefined ? { role: entry.role } : {}),
@@ -459,11 +478,26 @@ export function auditMemory(input: AuditInput): AuditResult {
     })
     .slice(0, topN)
 
+  // 归因可用性（v0.12）：用量项换了算法，注脚必须说清**是哪种形态**——
+  // 「按归因计分」与「降级回退 hits」是两种世界，不能长得一样（§5.9：空/降级必须分型）。
+  let attributionAvailable = false
+  if (input.usage !== undefined) {
+    for (const stat of input.usage.values()) {
+      if (stat.attributed !== undefined) {
+        attributionAvailable = true
+        break
+      }
+    }
+  }
+  const usageNote = input.usage === undefined
+    ? '用量信号：无逻辑轨迹 ⇒ usage 项恒 0（评分仍有效，只是少一项证据）。'
+    : attributionAvailable
+      ? '用量信号：侧车轨迹 · 按**排序加权归因**计分（返回列表第 1 位权重 1.0 · 第 5 位 0.13 · 第 10 位 0.006）——v0.12 起第 1 位与第 20 位不再同权；依据 DREAM（arXiv 2610.13267）附录 G Eq.29 的序数形态。'
+      : '用量信号：侧车轨迹 · **无归因字段 ⇒ 评分回退 hits（等于旧口径）**；该形态通常意味用量由外部注入而非 parseAccessTrace 产生。'
+
   const notes: string[] = [
     `读数：条目 ${entries.length} 条 / ${totalChars} 字符；被引用（承重）${referenced} 条；近重复簇 ${new Set([...dups.values()].map((d) => d.cluster)).size} 个。`,
-    input.usage === undefined
-      ? '用量信号：无逻辑轨迹 ⇒ usage 项恒 0（评分仍有效，只是少一项证据）。'
-      : '用量信号：来自侧车轨迹。',
+    usageNote,
     '提案 ≠ 裁决：本工具只读，不归档不删除；动记忆数据请显式发起（属须请示类）。',
   ]
 

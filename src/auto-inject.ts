@@ -28,6 +28,7 @@ import { applyRoleView, narrowReadScopes, roleViewOf, type RoleCarrier } from '.
 import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
 import { recallEntries } from './search.ts'
+import { classifyMessage, thresholdForScene } from './scene.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -109,6 +110,10 @@ export function buildAutoRecallDigest(
   const { results } = recallEntries(entries, {
     ...(weighted !== undefined ? { weightedTerms: weighted } : { query: limited }),
     limit: opts.maxEntries,
+    // 本函数**不消费** `related`（只用 title/kind/updatedAt/score/snippet）⇒ 跳过联想层。
+    // 实测（2026-10-13）：limit=3 真实形状下 95 ms → 41 ms（省 56%）。这是**每条主人消息
+    // 都跑**的最热路径，而 relatedOf 是 O(结果数 × 全库) 的（每条一次全库扫描）。
+    withRelated: false,
   })
   if (results.length === 0) return ''
   const lines: string[] = []
@@ -217,6 +222,15 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
 
     // 检索：合并当前 workspace + global（attach 语义同 recall 工具）
     const scope = workspaceIdOf(cwd)
+    // 场景判据（2026-10-13 第一步）：**先分类再动手**。
+    //
+    // chitchat（闲聊/元指令）在**这一拍就短路**——不构建视野、不去重、不检索、不算重心。
+    // 理由：① 闲聊类无检索意图，检索结果必然是噪音；② 短路比「检索完再靠门槛挡」
+    // **更省**（省掉整条检索链）；③ **零注入是有保证的**——门槛只能压低概率，
+    // 实测「你自己决定吧」top1=22.9 高于 20 门槛，靠门槛挡不住。
+    const scene = classifyMessage(found.text)
+    if (scene.scene === 'chitchat') return decision
+
     // 角色视野（v0.5）：注入面同样受准入约束——否则隔离会在注入路径上被静默绕过
     const view = roleViewOf(config, { agent } as unknown as RoleCarrier)
     const scopes = narrowReadScopes([scope, GLOBAL_SCOPE], view, undefined)
@@ -243,9 +257,13 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
     const probe = recallEntries(fresh, {
       ...(weightedTerms.length > 0 ? { weightedTerms } : { query: queryLimit }),
       limit: config.autoInject.maxEntries,
+      // 门判断只读 results[].score ⇒ 不需要 related（同 buildAutoRecallDigest 的理由）。
+      withRelated: false,
     })
-    // v0.9 最低分门：没有足够相关的记忆就不打扰（比塞一堆泛词命中更诚实）
-    if (!worthInjecting(probe.results)) return decision
+    // 最低分门（v0.9 + 2026-10-13 分场景）：门槛**按场景取**——
+    // task/deictic/tracking 用 20（实测 task 类阈 20 时 100% 通过、阈 30 时仅 33%），
+    // chitchat 已在上面短路（Infinity 只是兜底，正常到不了这里）。
+    if (!worthInjecting(probe.results, thresholdForScene(scene.scene))) return decision
     const digest = buildAutoRecallDigest(fresh, found.text, {
       maxEntries: config.autoInject.maxEntries,
       maxBytes: config.autoInject.maxBytes,

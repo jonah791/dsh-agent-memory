@@ -40,6 +40,12 @@ const entrySchema = zod.object({
   title: zod.string(),
   body: zod.string(),
   tags: zod.array(zod.string()),
+  /**
+   * 检索别名（2026-10-13 重做）。
+   * ⚠ **必须在此声明**：storage-domain 在写入边界用本 schema 校验，
+   * 未声明的字段会被**静默剥掉**（存了等于没存）——这正是「持久化契约」的意义。
+   */
+  aliases: zod.array(zod.string()).optional(),
   scope: zod.string(),
   createdAt: zod.string(),
   updatedAt: zod.string(),

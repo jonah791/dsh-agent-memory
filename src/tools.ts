@@ -56,8 +56,12 @@ export interface MemoryToolDeps {
    * 实现方负责「只追加 / 吞错 / 按体积轮转」——工具层只负责把命中 id 交出去。
    */
   recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[] }) => Promise<boolean> | void
-  /** 侧车轨迹读取（体检用；缺省/读失败 ⇒ undefined = 无用量信号） */
-  readAccess?: () => Promise<Map<string, { hits: number; lastAtMs: number }> | undefined>
+  /**
+   * 侧车轨迹读取（体检用；缺省/读失败 ⇒ undefined = 无用量信号）。
+   * v0.12：每项还带 `attributed`（排序加权归因，见 access-trace.ts）——声明与实现对齐；
+   * `attributed` 缺失时体检评分回退 `hits`（零回归）。
+   */
+  readAccess?: () => Promise<Map<string, { hits: number; lastAtMs: number; attributed?: number }> | undefined>
   /** 用量轨迹汇总（v0.7 命中率度量：注入次数 / 主动检索次数；缺省不报） */
   readAccessSummary?: () => Promise<AccessSummary | undefined>
   /** 提案日志写入（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join；吞错） */
@@ -200,12 +204,13 @@ function mergeCounts(target: Record<string, number>, source: Record<string, numb
 function buildRemember(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'remember',
-    description: '记录一条记忆。适用于：事实（主人偏好/环境事实/决策结论）、可复用知识（项目知识/学习沉淀/教训）、有结果的情景（重要事件/经历时间线）。不记录：临时状态、文件可索引内容（代码/文档全文）、凭证（密钥/口令）。L1 事实可用 key 精确覆盖（同 key 再次写入=更新）；L2/L3 同标题自动合并（标签并集+正文追加）。**写入前会做近重复检测**：命中高度相似的既有条目时返回 `similar[]` + `hint`——此时优先 `update` 补写或 `memory_merge` 合流，不要新建平行条目（§5.8 先搜再写）。',
+    description: '记录一条记忆。适用于：事实（主人偏好/环境事实/决策结论）、可复用知识（项目知识/学习沉淀/教训）、有结果的情景（重要事件/经历时间线）。不记录：临时状态、文件可索引内容（代码/文档全文）、凭证（密钥/口令）。L1 事实可用 key 精确覆盖（同 key 再次写入=更新）；L2/L3 同标题自动合并（标签并集+正文追加）。**写入前会做近重复检测**：命中高度相似的既有条目时返回 `similar[]` + `hint`——此时优先 `update` 补写或 `memory_merge` 合流，不要新建平行条目（§5.8 先搜再写）。**`aliases` 强烈建议填**（2026-10-13 重做）：检索是字面匹配，而「记忆的措辞 ≠ 提问的措辞」——实测三个案例靠补别名从 #2/#4/#5 全部升到 #1。',
     parameters: {
       text: { type: 'string', required: true, description: '记忆内容（markdown；首行自动作为标题）。' },
       key: { type: 'string', description: 'L1 精确覆盖键：同一 (scope, key) 再次写入 = 覆盖更新。' },
       kind: { type: 'string', enum: ['fact', 'knowledge', 'episodic'], description: '层级：fact=事实 / knowledge=知识 / episodic=情景。缺省 knowledge。' },
       tags: { type: 'array', items: { type: 'string' }, description: '检索标签（可选）。' },
+      aliases: { type: 'array', items: { type: 'string' }, description: '**检索别名**：这条记忆**可能被怎么问**的同义表述（与 tags 同级参与打分 ×3）。**为什么要填**：检索是按字面匹配的，而记忆的措辞常与提问的措辞不同——实测（2026-10-13）：标题「把别人的『未找到』转述成『不存在』」完全不含查询「我的错误 教训 误判 修正」里的任何实词 ⇒ 排第 5；补上别名（我的错误/我犯的错/误判/修正/虚假断言）后升到 **#1**。**怎么填**：想「以后我会用什么词来找这条」，通常 4-8 个短语，含口语问法（如「服务起不来」）与同义术语（如「宿主故障」）。' },
       scope: { type: 'string', description: '写入作用域覆盖：global 或 workspaceId（缺省按项目 memory.yml 路由）。' },
       role: { type: 'string', description: '角色归属（v0.5 多智能体工作台）：条目归属的角色隔间。缺省时——项目启用 roles 则盖调用者角色，否则为共享记忆（所有角色可见）。' },
     },
@@ -254,6 +259,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         title,
         body,
         tags,
+        ...(args.aliases !== undefined && args.aliases.length > 0 ? { aliases: args.aliases } : {}),
         scope: writeScope,
         level: null,
         bucket: null,
@@ -533,7 +539,7 @@ export function mergeBodies(
 function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'update',
-    description: '修订一条记忆条目（按 id）。mode=replace（缺省）：text 首行作标题、其余作正文；mode=append：text 追加到正文末尾；mode=patch：把 find 替换成 replace（要求在正文或标题中**唯一命中**，否则拒绝）。每次内容真变都留一条修订快照（最多 3 条，可回溯）。tags 整体替换。',
+    description: '修订一条记忆条目（按 id）。mode=replace（缺省）：text 首行作标题、其余作正文；mode=append：text 追加到正文末尾；mode=patch：把 find 替换成 replace（要求在正文或标题中**唯一命中**，否则拒绝）。每次内容真变都留一条修订快照（最多 3 条，可回溯）。tags 整体替换；**aliases 整体替换**（留空数组即清空别名）。',
     parameters: {
       id: { type: 'string', required: true, description: '目标条目 id（来自 remember/recall 返回）。' },
       mode: { type: 'string', description: '改写模式：replace（缺省·整文替换）/ append（追加到正文）/ patch（局部替换）。' },
@@ -541,6 +547,7 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       find: { type: 'string', description: 'patch 模式：要被替换的原文片段（须唯一命中）。' },
       replace: { type: 'string', description: 'patch 模式：替换成的文本（缺省空串 = 删除该片段）。' },
       tags: { type: 'array', items: { type: 'string' }, description: '替换后的标签；缺省不动。' },
+      aliases: { type: 'array', items: { type: 'string' }, description: '替换后的**检索别名**（整体替换，与 tags 同语义）；缺省不动。用途：给已存在的记忆补「它可能被怎么问」的同义表述——实测补后可从 #5 升到 #1。' },
     },
     output: {
       schema: {
@@ -586,6 +593,7 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
         }
       }
       if (args.tags !== undefined) patch.tags = args.tags
+      if (args.aliases !== undefined) patch.aliases = args.aliases
       await deps.store.update(entry.scope, args.id, patch)
       recordAction(deps, config, { action: 'update', id: args.id, mode })
       return { id: args.id }
@@ -1261,9 +1269,11 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
         }
         lines.push('提案 ≠ 裁决：本工具不归档不删除；要做请显式调用 forget（动记忆数据属须请示类）。')
         if (value.notes.length > 0) {
-          // 把「看不见 ≠ 没有」这类读数注脚带出来（默认视图下承重为 0 时尤其重要）
+          // 把「看不见 ≠ 没有」这类读数注脚带出来（默认视图下承重为 0 时尤其重要）。
+          // v0.12：`用量信号` 注脚也放行 —— 它承载用量项的**计分口径**（按排序加权归因 /
+          // 回退 hits）。口径只写在结构化返回里等于没写：渲染层是唯一到人眼前的通道。
           for (const note of value.notes) {
-            if (note.startsWith('另有')) lines.push(note)
+            if (note.startsWith('另有') || note.startsWith('用量信号')) lines.push(note)
           }
         }
         return [{ type: 'text', text: lines.join('\n') }]

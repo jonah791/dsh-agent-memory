@@ -39,6 +39,11 @@ export interface EntryDraft {
   title: string
   body: string
   tags?: string[]
+  /**
+   * 检索别名（2026-10-13 重做）：这条记忆**可能被怎么问**的同义表述。
+   * 写入时给出；命中已有条目（key 覆盖 / 标题合并）时的合并策略见 `remember` 内注释。
+   */
+  aliases?: string[]
   /** global 或 workspaceId */
   scope: string
   level: TimelineLevel | null
@@ -60,6 +65,8 @@ export interface EntryPatch {
   title?: string
   body?: string
   tags?: string[]
+  /** 检索别名整体替换（2026-10-13 重做；与 `tags` 同语义——给了就整体替换） */
+  aliases?: string[]
   /**
    * 修订留痕（v0.9）：由工具层算好的**完整** revisions 数组。
    * 存储层不实现截断策略（避免「谁算上限」两处各算——判据单一真源）。
@@ -154,6 +161,7 @@ export class MemoryStore {
           title: draft.title,
           body: draft.body,
           tags: draft.tags ?? [],
+          ...(draft.aliases !== undefined ? { aliases: draft.aliases } : {}),
           updatedAt: now,
           accessedAt: now,
           ...(draft.source !== undefined ? { source: draft.source } : {}),
@@ -181,6 +189,7 @@ export class MemoryStore {
       title: draft.title,
       body: draft.body,
       tags: draft.tags ?? [],
+      ...(draft.aliases !== undefined ? { aliases: draft.aliases } : {}),
       scope,
       createdAt: now,
       updatedAt: now,
@@ -207,6 +216,7 @@ export class MemoryStore {
       ...(patch.title !== undefined ? { title: patch.title } : {}),
       ...(patch.body !== undefined ? { body: patch.body } : {}),
       ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
+      ...(patch.aliases !== undefined ? { aliases: patch.aliases } : {}),
       ...(patch.revisions !== undefined ? { revisions: patch.revisions } : {}),
       updatedAt: now,
       accessedAt: now,
@@ -266,9 +276,16 @@ export class MemoryStore {
     return undefined
   }
 
-  /** 合并语义：标签并集 + 正文追加（正文相同则不重复追加），保留原 id/createdAt */
+  /**
+   * 合并语义：标签并集 + **别名并集** + 正文追加（正文相同则不重复追加），保留原 id/createdAt。
+   *
+   * 别名并集（2026-10-13 重做）：与 tags 同一策略——并入而非替换。**不并会丢**：
+   * 合并路径（同标题指纹）会保留原条目，若只取 draft 的别名，原条目已有的检索入口就消失了，
+   * 而「同一条记忆的多种问法」正是合并场景下最该累积的东西。
+   */
   private mergeEntry(existing: Entry, draft: EntryDraft, now: string): Entry {
     const tags = [...new Set([...existing.tags, ...(draft.tags ?? [])])]
+    const aliases = [...new Set([...(existing.aliases ?? []), ...(draft.aliases ?? [])])]
     const body = existing.body.trim() === draft.body.trim()
       ? existing.body
       : `${existing.body}\n\n${draft.body}`
@@ -277,6 +294,7 @@ export class MemoryStore {
       title: draft.title,
       body,
       tags,
+      ...(aliases.length > 0 ? { aliases } : {}),
       updatedAt: now,
       accessedAt: now,
       ...(draft.source !== undefined ? { source: draft.source } : {}),

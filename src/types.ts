@@ -51,6 +51,24 @@ export interface Entry {
   body: string
   /** 可选元数据（agent 自主决定） */
   tags: string[]
+  /**
+   * 检索别名（2026-10-13 重做）：这条记忆**可能被怎么问**的同义表述。
+   *
+   * **为什么需要**（实测根因）：检索是字面匹配，而**记忆的措辞 ≠ 提问的措辞**。
+   * 亲读归因实验（`_tmp_review/mem-attribution.mjs`）对 3 个「期望第一却排不上」的案例
+   * 各换 5 个查询变体——三个全部：换个说法就排第一。机制：目标条目标题
+   * 「把别人的『未找到』转述成『不存在』」**完全不含**查询「我的错误 教训 误判 修正」
+   * 里的任何实词 ⇒ 只靠 bigram 碎片拿 10.5 分、排第 5。
+   *
+   * **证伪实验**（`_tmp_review/mem-alias-falsify.mjs`，只给 3 条补别名）：
+   * S3 #2→#1（22.4→114.1）· S4 #4→#1（50.2→115.8）· S5 #5→#1（10.5→48.7）；
+   * **对照组**：3 个无关查询 top1 全部不变（零污染）。
+   *
+   * **为什么放写入侧而非查询侧**：写入时抽，代价一次性、可复核、可人工修正；
+   * 查询时扩展每次都要做且不可复核。且它把质量责任放回写入端（主人 2026-10-13 定调
+   * 「不做向量语义检索 ⇒ 写入质量是唯一路线」）。
+   */
+  aliases?: string[]
   /** global 或 workspaceId */
   scope: 'global' | string
   createdAt: string
@@ -162,7 +180,14 @@ export interface AuditCandidate {
     ageDays: number
     chars: number
     refs: number
+    /** 被返回过的次数（**不分位置**——v0.12 起它与评分脱钩，评分改用 `attribution`） */
     usage: number
+    /**
+     * 排序加权归因（v0.12 · DREAM 迁移）：`Σ decay^pos`。
+     * 与 `usage` 的关系：同一条目，`usage=10` 若全在第 1 位 ⇒ ≈10；全在第 15 位 ⇒ ≈0。
+     * 字段缺失时（外部只喂 hits 的调用方）评分回退 `usage`——零回归。
+     */
+    attribution?: number
     tags: number
     hasSource: boolean
     role?: string
@@ -243,6 +268,19 @@ export interface RecallQuery {
   includeArchive?: boolean
   /** 角色视角覆盖（缺省 = 调用者身份推导；仅当 roles.enabled 时生效） */
   role?: string
+  /**
+   * 是否为每个结果附加联想链（`related`，v0.3 维度）。
+   *
+   * **缺省 true**（`recall` 工具的模型可见输出渲染「→ 关联: …」，必须保留）。
+   * 设 false = 跳过 `relatedOf`——**每条结果一次全库扫描**，实测 20 条结果耗时
+   * 500–640 ms（2026-10-13 分解读数）。
+   *
+   * 用于**不消费 `related` 的调用方**：`auto-inject.buildAutoRecallDigest` 只用
+   * title/kind/updatedAt/score/snippet，却同样走 `recallEntries` ⇒ 白算联想层。
+   * 实测 auto-recall 真实形状（limit=3）跳过联想后 **95 → 41 ms（省 56%）**。
+   * 该路径**每条主人消息都跑**，是最热的调用点。
+   */
+  withRelated?: boolean
 }
 
 /** 检索结果项 */
