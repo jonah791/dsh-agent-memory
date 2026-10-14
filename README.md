@@ -14,7 +14,7 @@
   <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.11.6-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-228%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-257%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：给 DSH 里的 agent 装上**跨会话的长期记忆**——把「经历过的事」结构化写入持久层，再在恰当的时机（会话启动、每条主人消息、时间桶结束、会话压缩完成）把它带回上下文，并允许 agent 检索、修订、归档、沿关系行走。
