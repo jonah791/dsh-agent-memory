@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { Entry, EntryKind, RememberResult, TimelineLevel } from './types.ts'
+import type { Entry, EntryKind, Grounding, RememberResult, Subject, TimelineLevel } from './types.ts'
 
 /**
  * kv 最小接口：KvTable<string, Entry> 的能力子集。
@@ -56,6 +56,35 @@ export interface EntryDraft {
    * 保留原条目的归属，写入不得静默转移分区（转移需要显式路径，本轮不提供）。
    */
   role?: string
+  /**
+   * 主体层（v0.13.0）：条目**关于谁**（`self` / `master`；不设 = 通用）。
+   *
+   * 与 `role` 同形的一点：**只在新建时生效**——命中已有条目（key 覆盖 / 标题合并）
+   * 时保留原标注，写入不得静默转移（防「我以为标上了、其实把别人的标注抹了」）。
+   * 与 `role` 刻意不同的一点：显式纠正走 `update({ subject })`（见 subject.ts 决定 3）。
+   */
+  subject?: Subject
+  /**
+   * 约定状态（v0.14.0）：事项**是否已被共同建立**（`established` / `proposed` / `scoped`；
+   * 不设 = 未标注）。与 `subject` 同形：**只在新建时生效**，命中已有条目时保留原标注；
+   * 显式纠正走 `update({ grounding })`。
+   *
+   * ⚠ 写入纪律（本维度的价值全在这里）：**我自己提出、主人未回应的方案，写记忆时
+   * 必须标 `proposed`**——否则它会被未来的我当成「主人说过的」而当授权用。
+   * 详见 `src/grounding.ts` 文件头（含论文读数与「刻意不做强制门」的理由）。
+   */
+  grounding?: Grounding
+  /**
+   * 时效维（v0.15.0）：复查死线（`YYYY-MM-DD`，UTC 日）。
+   *
+   * 写入侧接受相对写法（`+7d` / `+2w`），由**工具层**在写入时固化成绝对日期
+   * ——存储层只收绝对日期，不留相对值（否则「何时到期」会随「何时读取」漂移）。
+   * 与 subject / grounding 同形：**只在新建时生效**，命中已有条目（key 覆盖 / 标题合并）
+   * 时保留原死线；显式续期 / 清除走 `update({ reviewAfter })`。
+   */
+  reviewAfter?: string
+  /** 时效维（v0.15.0）：观察条件（1–8 条短句，在等什么新信息）——只在新建时生效，理由同 `reviewAfter`。 */
+  watchFor?: string[]
   /** 写入者溯源（v0.5）：新建时记录，后续修订不覆盖（保留「谁创建」） */
   author?: Entry['author']
 }
@@ -72,6 +101,34 @@ export interface EntryPatch {
    * 存储层不实现截断策略（避免「谁算上限」两处各算——判据单一真源）。
    */
   revisions?: Entry['revisions']
+  /**
+   * 主体层（v0.13.0）——**显式转移路径**，三态：
+   * `undefined` = 不动 / `null` = 清除回通用 / 值 = 设置。
+   *
+   * 为什么这里**允许**转移（而 role 不允许，见 I10）：role 转移会改变**可见范围**
+   * （安全后果），subject 转移只改**语义标记** ⇒ 无安全后果。而若禁止转移，
+   * 几百条历史记忆永远无法标注，这个维度等于白建。
+   * 本条反对的只是**静默**转移：不给该字段就绝不动它。
+   */
+  subject?: Subject | null
+  /**
+   * 约定状态（v0.14.0）——显式转移路径，三态同 `subject`：
+   * `undefined` = 不动 / `null` = 清除回**未标注** / 值 = 设置。
+   *
+   * 允许转移的理由同 subject（只改标记、不改可见性）；且**必须**允许——
+   * 存量条目要回填 `proposed`，若禁止转移则回填无路可走。
+   */
+  grounding?: Grounding | null
+  /**
+   * 时效维（v0.15.0）——显式续期 / 清除路径，三态同 `subject` / `grounding`：
+   * `undefined` = 不动 / `null` = 清除（不再跟踪）/ 值 = 设置（`YYYY-MM-DD`）。
+   *
+   * 为什么必须允许转移：**到期后的动作链**是「核实 → update 改内容 + 续新死线（或清除）」
+   * ——若禁止转移，死线一旦过期就永远卡在过期态，标记会天天亮而无法消除。
+   */
+  reviewAfter?: string | null
+  /** 时效维（v0.15.0）——观察条件整体替换，三态同 `reviewAfter`（`null` = 清空）。 */
+  watchFor?: string[] | null
 }
 
 /** 存储层统计（memory_stats 工具用） */
@@ -200,6 +257,12 @@ export class MemoryStore {
       ...(draft.source !== undefined ? { source: draft.source } : {}),
       ...(draft.archiveRef !== undefined ? { archiveRef: draft.archiveRef } : {}),
       ...(draft.role !== undefined ? { role: draft.role } : {}),
+      ...(draft.subject !== undefined ? { subject: draft.subject } : {}),
+      ...(draft.grounding !== undefined ? { grounding: draft.grounding } : {}),
+      // 时效维（v0.15.0）：只在新建时盖章——命中已有条目时保留原死线（防「我以为续了期、
+      // 其实把别人的死线抹了」）。两个字段都只在**有值**时出现（无损 JSON 纪律）。
+      ...(draft.reviewAfter !== undefined ? { reviewAfter: draft.reviewAfter } : {}),
+      ...(draft.watchFor !== undefined && draft.watchFor.length > 0 ? { watchFor: draft.watchFor } : {}),
       ...(draft.author !== undefined ? { author: draft.author } : {}),
     }
     await this.kv.put(memoryKey(scope, kind, entry.id), entry)
@@ -220,6 +283,29 @@ export class MemoryStore {
       ...(patch.revisions !== undefined ? { revisions: patch.revisions } : {}),
       updatedAt: now,
       accessedAt: now,
+    }
+    // 主体层显式转移 / 清除（v0.13.0）：三态见 EntryPatch.subject。
+    // 用 delete 而非置 undefined——条目是 JSON 落盘，留 `subject: undefined` 会让
+    // 「通用层」在存储里出现**第二种表示**（字段存在但值为 undefined）⇒ 两个真源。
+    if (patch.subject !== undefined) {
+      if (patch.subject === null) delete updated.subject
+      else updated.subject = patch.subject
+    }
+    // 约定状态显式转移 / 清除（v0.14.0）：三态同 subject（见 EntryPatch.grounding）。
+    // 存量回填 `proposed` 走的就是这条路径——本维度若不回填，保护等于没有。
+    if (patch.grounding !== undefined) {
+      if (patch.grounding === null) delete updated.grounding
+      else updated.grounding = patch.grounding
+    }
+    // 时效维显式续期 / 清除（v0.15.0）：三态同 subject（见 EntryPatch.reviewAfter）。
+    // 这条路径承载「到期后的动作链」——核实完再 update 续死线或清除，否则标记永远消不掉。
+    if (patch.reviewAfter !== undefined) {
+      if (patch.reviewAfter === null) delete updated.reviewAfter
+      else updated.reviewAfter = patch.reviewAfter
+    }
+    if (patch.watchFor !== undefined) {
+      if (patch.watchFor === null || patch.watchFor.length === 0) delete updated.watchFor
+      else updated.watchFor = patch.watchFor
     }
     await this.kv.put(memoryKey(scope, existing.kind, id), updated)
     return { ...updated }

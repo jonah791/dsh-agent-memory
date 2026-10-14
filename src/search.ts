@@ -483,6 +483,20 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     score,
     archived: entry.archived,
     updatedAt: entry.updatedAt,
+    // 主体层（v0.13.0）—— **新增字段必须贯穿投影层**：这里是 recall / memory_browse
+    // 共用的唯一投影点，漏一行就会出现「过滤生效了（total 对）但结果项里没有该字段
+    // ⇒ 渲染层打不出标记」。本次实测就是这样被 subject.test.mjs 的 A88/A88c 抓住的。
+    ...(entry.subject !== undefined ? { subject: entry.subject } : {}),
+    // 约定状态（v0.14.0）——**同一投影点、同一教训**：上一版（v0.13.0 subject）就是漏了
+    // 这里，导致「过滤生效（total 对）但结果项没有该字段 ⇒ 渲染打不出标记」。
+    // 这次一次补上。⇒ 判据：任何新字段加进 Entry，先来这里看一眼。
+    ...(entry.grounding !== undefined ? { grounding: entry.grounding } : {}),
+    // 时效维（v0.15.0）——**同一投影点、同一教训**（v0.13/v0.14 连续两版都栽在漏这里：
+    // 过滤生效了、total 对，但结果项里没有该字段 ⇒ 渲染层打不出标记）。
+    // ⚠ 这里只**透出原始值**，不预存档位：档位取决于「读取时刻」，存进结果项就会与它脱钩
+    // （今天算出的「3 天后」明天成了假读数）。档位由工具层按 now 现算。
+    ...(entry.reviewAfter !== undefined ? { reviewAfter: entry.reviewAfter } : {}),
+    ...(entry.watchFor !== undefined ? { watchFor: entry.watchFor } : {}),
   }
 }
 

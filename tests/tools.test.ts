@@ -77,7 +77,9 @@ async function seed(store: MemoryStore, scope: string, kind: EntryKind, title: s
 
 test('工具齐备，名称与契约一致', () => {
   const { byName } = setup()
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_check', 'memory_health', 'memory_merge', 'memory_relate', 'memory_stats', 'memory_version', 'recall', 'remember', 'update'])
+  // 2026-10-14 对齐（**预先存在的债**，非本轮引入——v0.15 只在既有工具上加参数、不改工具集合）：
+  // v0.11 `memory_recompress` 与 v0.13 期 `memory_review_mark` 上线时，本断言未同步。
+  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_check', 'memory_health', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_review_mark', 'memory_stats', 'memory_version', 'recall', 'remember', 'update'])
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
 })

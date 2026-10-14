@@ -25,6 +25,9 @@ import type { Entry, MemoryConfig } from './types.ts'
 import type { MemoryStore } from './store.ts'
 import { workspaceIdOf, GLOBAL_SCOPE } from './scope.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, type RoleCarrier } from './role.ts'
+import { normalizeSubject, subjectTag } from './subject.ts'
+import { groundingTag, normalizeGrounding } from './grounding.ts'
+import { stalenessTag } from './temporal.ts'
 import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
 import { recallEntries } from './search.ts'
@@ -122,7 +125,18 @@ export function buildAutoRecallDigest(
     const kind = r.kind.toUpperCase()
     const score = r.score > 0 ? ` · 相关度 ${r.score}` : ''
     const snippet = r.snippet.length > SNIPPET_MAX ? r.snippet.slice(0, SNIPPET_MAX).trimEnd() + '…' : r.snippet
-    lines.push(`- [${kind}] ${r.title}（${date}${score}）：${snippet}`)
+    // 主体层标记（v0.13.0）：只在有值时出现（通用层留空）——让「关于主人的记忆」
+    // 在每条消息的注入里一眼可辨。**纯附加信息**：不改排序、不改过滤、不改条数。
+    const subject = subjectTag(normalizeSubject(r.subject))
+    // 约定状态标记（v0.14.0）：只凸显需警觉的（我的提议 / 限范围 / 已被否决）。
+    // **纯附加信息**：不改排序、不改过滤、不改条数。
+    const groundingNote = groundingTag(normalizeGrounding(r.grounding))
+    // 时效维标记（v0.15.0）：**只打需警觉的档位**（已过期 / 7 天内到期）——fresh 与未设死线留空。
+    // 放这里的理由（论文的 routing 落点）：这是**每条主人消息都跑**的注入路径——
+    // 若命中的条目已过期，「我正拿一条可能已失效的记忆当前提」正是最该被看见的时刻。
+    // ⚠ 刻意**不注入 watchFor**：注入有字节预算，观察条件是多句文本，会把 top3 的实际内容挤掉。
+    const stalenessNote = stalenessTag(r.reviewAfter, new Date())
+    lines.push(`- ${stalenessNote}${subject}${groundingNote}[${kind}] ${r.title}（${date}${score}）：${snippet}`)
   }
   let body = `【相关记忆（auto-recall）】\n${lines.join('\n')}`
   if (body.length > opts.maxBytes) {

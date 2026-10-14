@@ -108,12 +108,20 @@ test('标题自带时区标注（本地时间 + UTC 偏移 · 读数范围可判
   return (async () => {
     await new Promise((r) => setImmediate(r))
     const title = store.remembered[0]!.title
-    const m = /^会话压缩检查点 (\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}) UTC([+-])(\d{2}):(\d{2})$/.exec(title)
+    // 形态：`会话压缩检查点 · YYYY-MM-DD UTC±hh:mm`（**日粒度**）。
+    // ⚠ 2026-10-14 对齐（**预先存在的债**，非本轮引入）：原断言期望**分钟粒度**
+    // （`YYYY-MM-DD hh:mm UTC±hh:mm`），而实现自 2026-09-26 起刻意改为**日粒度**
+    // ——后者是 checkpoint 的**合并键**，让同日多次压缩落到同一条（否则 8.5 小时落 6 条
+    // 平行快照，见 `dayStampOf` 的注释与实测）。⇒ 改测试，不改实现。
+    const m = /^会话压缩检查点 · (\d{4})-(\d{2})-(\d{2}) UTC([+-])(\d{2}):(\d{2})$/.exec(title)
     if (m === null) assert.fail('标题缺时区标注：' + title)
-    // round-trip：标题里的「本地时间 + 偏移」折回 UTC 必须等于建档时刻（分钟精度 ⇒ 容差 90s）
-    const offMinutes = (m[6]! === '-' ? -1 : 1) * (Number(m[7]) * 60 + Number(m[8]))
-    const utc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5])) - offMinutes * 60_000
-    assert.ok(Math.abs(utc - firedAt) < 90_000, '标题时刻与建档时刻不符：' + title)
+    // round-trip（日粒度）：标题里的「本地日 + 偏移」折回 UTC，建档时刻必须落在那一天之内
+    const offMinutes = (m[4]! === '-' ? -1 : 1) * (Number(m[5]) * 60 + Number(m[6]))
+    const localDayStartUtc = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) - offMinutes * 60_000
+    assert.ok(
+      firedAt >= localDayStartUtc && firedAt < localDayStartUtc + 86_400_000,
+      '标题日期与建档时刻不符：' + title,
+    )
   })()
 })
 

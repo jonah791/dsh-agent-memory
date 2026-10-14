@@ -19,6 +19,9 @@ import type { Entry, MemoryConfig } from './types.ts'
 import type { MemoryStore } from './store.ts'
 import { workspaceIdOf, GLOBAL_SCOPE } from './scope.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, type RoleCarrier } from './role.ts'
+import { normalizeSubject, subjectTag } from './subject.ts'
+import { groundingTag, normalizeGrounding } from './grounding.ts'
+import { stalenessTag } from './temporal.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -32,13 +35,24 @@ export interface MemoryInjectDeps {
   loadConfig: (workspaceRoot: string) => Promise<MemoryConfig> | MemoryConfig
 }
 
-/** 单行条目渲染：类型 + 层级 + 标题 + 时间 + tags（线索，不含正文） */
+/** 单行条目渲染：主体层标记 + 类型 + 层级 + 标题 + 时间 + tags（线索，不含正文） */
 function lineOf(entry: Entry): string {
   const kind = entry.kind.toUpperCase()
   const level = entry.level !== null ? ` ${entry.level}` : ''
   const date = entry.updatedAt.slice(0, 10)
   const tags = entry.tags.length > 0 ? ` · ${entry.tags.join('/')}` : ''
-  return `- [${kind}${level}] ${entry.title}（${date}${tags}）`
+  // 主体层标记（v0.13.0）：**只在有值时**出现——通用层留空（库里绝大多数是通用条目，
+  // 全都打标记等于没打）。经归一而非直读：历史数据可能含别名或非法值，直读会渲染 `[undefined]`。
+  const subject = subjectTag(normalizeSubject(entry.subject))
+  // 约定状态标记（v0.14.0）：只凸显需警觉的（我的提议 / 限范围 / 已被否决）。
+  // 速览是每个会话最先看到的东西，在这里标出来最划算——「我提的、主人没应」
+  // 若不带标记，未来的我会把它读成主人说过的。
+  const groundingNote = groundingTag(normalizeGrounding(entry.grounding))
+  // 时效维标记（v0.15.0）：只凸显需警觉的档位（已过期 / 7 天内到期）。
+  // 速览是每个会话最先看到的文本——把「这条结论的复查死线已过」摆在最前，
+  // 成本是每行几字符，收益是我在**用**它之前就看见它该重看了。
+  const stalenessNote = stalenessTag(entry.reviewAfter, new Date())
+  return `- ${stalenessNote}${subject}${groundingNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
 }
 
 /**

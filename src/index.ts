@@ -28,12 +28,22 @@ import { appendCompressTrace, readCompressSummary as readCompressSummaryFromTrac
 import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import type { Entry } from './types.ts'
+import type { Entry, Grounding, Subject } from './types.ts'
+import { normalizeSubject } from './subject.ts'
+import { normalizeGrounding } from './grounding.ts'
+import { normalizeReviewAfter, normalizeWatchFor } from './temporal.ts'
 
 // ---------- 持久化域 ----------
 
 /** 记忆条目 zod schema（storage-domain 持久化校验边界，对齐 types.ts Entry） */
-const entrySchema = zod.object({
+/**
+ * 写入边界 schema（**导出供测试直接校验**）。
+ *
+ * 为什么必须导出：这个 schema 是「新字段静默剥掉」那个坑的现场（v0.12/13/14 连中三次）。
+ * 只靠源码 grep 断言「某行存在」是弱判据——**真正的判据是喂一个带该字段的对象进去、
+ * 断言它没被剥掉**。导出后 tests/temporal.test.mjs 的 A113 就是这么测的（真 parse，非 grep）。
+ */
+export const entrySchema = zod.object({
   id: zod.string(),
   kind: zod.enum(['fact', 'knowledge', 'episodic', 'summary']),
   key: zod.string().optional(),
@@ -61,6 +71,32 @@ const entrySchema = zod.object({
   archiveRef: zod.array(zod.string()).optional(),
   // v0.5 角色维度（多智能体工作台模式）：归属 + 写入者溯源
   role: zod.string().optional(),
+  /**
+   * 主体层（v0.13.0）：条目**关于谁**——与 `role` 正交（role 答「谁写的」，本字段答
+   * 「关于谁的」）。缺省 = 通用。
+   * ⚠ **必须在此声明**（同 v0.12 `aliases` 的教训）：storage-domain 在写入边界用本
+   * schema 校验，未声明的字段会被**静默剥掉**（存了等于没存——过滤/渲染/统计全部失效，
+   * 而写入还返回成功，是最难查的一类缺陷）。
+   */
+  subject: zod.enum(['self', 'master']).optional(),
+  /**
+   * 约定状态（v0.14.0）：事项**是否已被共同建立**——`established` / `proposed`（**我提的、
+   * 主人未回应**）/ `scoped` / `rejected`。缺省 = 未标注。
+   * ⚠ **必须在此声明**（这是同一个坑第三次：v0.12 `aliases`、v0.13 `subject`）：
+   * storage-domain 在写入边界用本 schema 校验，**未声明的字段会被静默剥掉**——
+   * 存了等于没存，而写入**仍返回成功**，是最难查的一类缺陷。
+   */
+  grounding: zod.enum(['established', 'proposed', 'scoped', 'rejected']).optional(),
+  /**
+   * 时效维（v0.15.0）：复查死线（`YYYY-MM-DD`，**存绝对日期**——相对写法在工具层就折算了）
+   * 与观察条件（1–8 条短句）。
+   * ⚠ **必须在此声明**（同一个坑**第四次**：v0.12 `aliases`、v0.13 `subject`、v0.14 `grounding`）：
+   * storage-domain 在写入边界用本 schema 校验，**未声明的字段会被静默剥掉**——
+   * 存了等于没存，而写入**仍返回成功**，是最难查的一类缺陷。
+   * ⇒ 判据：**任何新字段加进 `Entry`，必须同时来这里声明一次**（类型层不会报错）。
+   */
+  reviewAfter: zod.string().optional(),
+  watchFor: zod.array(zod.string()).optional(),
   author: zod.object({
     sessionId: zod.string().optional(),
     delegationDepth: zod.number().optional(),
@@ -94,6 +130,26 @@ export interface MemoryApiService {
     tags?: string[]
     key?: string
     scope?: string
+    /**
+     * 主体层（v0.13.0）：这条回流记忆**关于谁**（`self` = 我 / `master` = 主人；
+     * 缺省 = 通用）。服务通道走**容错归一**（认别名、认不出即通用）而非 fail-loud——
+     * 它的契约是「不阻塞调用方业务」，为一个标注字段让整笔回流失败不划算。
+     */
+    subject?: Subject
+    /**
+     * 约定状态（v0.14.0）：这条回流记忆涉及的事**是否已被共同建立**
+     * （`established` / `proposed` / `scoped` / `rejected`；缺省 = 未标注）。
+     * 同走**容错归一**（认别名、认不出即未标注）——服务通道不为标注字段阻塞调用方。
+     */
+    grounding?: Grounding
+    /**
+     * 时效维（v0.15.0）：复查死线（`YYYY-MM-DD` / ISO 时刻 / 相对写法 `+7d` / `+2w`）
+     * 与观察条件（1–8 条短句）。同走**容错归一**（认不出即不设）——服务通道不为标注字段
+     * 阻塞调用方。用途：调用方回流「**会腐化的运行态结论**」时（如某通道当前可用率、
+     * 某依赖的版本或路径），顺手登记「它该在什么时候被重看」与「什么新信息会让它失效」。
+     */
+    reviewAfter?: string
+    watchFor?: string[]
   }): Promise<{ id?: string; action?: string; error?: string }>
 }
 
@@ -183,7 +239,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // 记忆回流服务提供（2026-09-06）：供 emotion/taskboard/evolution-core/skill-forge 注入消费。
   // 复用 store.remember（L1 key 覆盖 / L2/L3 指纹合并），容错返回 error 不抛。
   ctx.provide('memoryApi', {
-    async remember(input: { text: string; kind?: 'fact' | 'knowledge' | 'episodic'; tags?: string[]; key?: string; scope?: string }) {
+    async remember(input: { text: string; kind?: 'fact' | 'knowledge' | 'episodic'; tags?: string[]; key?: string; scope?: string; subject?: Subject; grounding?: Grounding; reviewAfter?: string; watchFor?: string[] }) {
       try {
         const text = (input.text ?? '').trim()
         if (text.length === 0) return { error: 'text 不能为空' }
@@ -193,7 +249,16 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         const firstLine = body.split(/\r?\n/).find((line) => line.trim().length > 0) ?? body
         const base = firstLine.trim()
         const title = base.length > 80 ? base.slice(0, 79) + '…' : base
-        const r = await store.remember({ kind, key: input.key, title, body, tags: input.tags ?? [], scope, level: null, bucket: null })
+        // 主体层（v0.13.0）：**容错归一**（认别名；认不出 = 通用）——服务通道不走 fail-loud，
+        // 理由见 MemoryApiService.remember 的注释（不阻塞调用方业务）。
+        const subject = normalizeSubject(input.subject)
+        // 约定状态（v0.14.0）：同走**容错归一**——服务通道的契约是「不阻塞调用方业务」，
+        // 为一个标注字段让整笔回流失败不划算（理由同上面 subject 那段注释）。
+        const grounding = normalizeGrounding(input.grounding)
+        // 时效维（v0.15.0）：同走**容错归一**——相对写法（`+7d`）在这里按**此刻**折算成绝对日期。
+        const reviewAfter = normalizeReviewAfter(input.reviewAfter, new Date())
+        const watchFor = normalizeWatchFor(input.watchFor)
+        const r = await store.remember({ kind, key: input.key, title, body, tags: input.tags ?? [], scope, level: null, bucket: null, ...(subject !== undefined ? { subject } : {}), ...(grounding !== undefined ? { grounding } : {}), ...(reviewAfter !== undefined ? { reviewAfter } : {}), ...(watchFor !== undefined ? { watchFor } : {}) })
         return { id: r.id, action: r.action }
       } catch (err) {
         return { error: 'memoryApi.remember 失败: ' + String(err) }

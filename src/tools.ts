@@ -29,6 +29,9 @@ import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
 import { findNearDuplicates, formatDuplicateHint } from './dedupe.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
+import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
+import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, parseGroundingArg, UNLABELED_GROUNDING } from './grounding.ts'
+import { countByStaleness, filterByStaleness, parseReviewAfterArg, parseStalenessFilterArg, parseWatchForArg, stalenessTag, stalenessVerdict, watchForTag } from './temporal.ts'
 import { auditMemory } from './audit.ts'
 
 /** 概要重压的外部结果（工具层回报用；与 timeline.RecompressResult 解耦，界面只认这几个读数） */
@@ -213,6 +216,10 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       aliases: { type: 'array', items: { type: 'string' }, description: '**检索别名**：这条记忆**可能被怎么问**的同义表述（与 tags 同级参与打分 ×3）。**为什么要填**：检索是按字面匹配的，而记忆的措辞常与提问的措辞不同——实测（2026-10-13）：标题「把别人的『未找到』转述成『不存在』」完全不含查询「我的错误 教训 误判 修正」里的任何实词 ⇒ 排第 5；补上别名（我的错误/我犯的错/误判/修正/虚假断言）后升到 **#1**。**怎么填**：想「以后我会用什么词来找这条」，通常 4-8 个短语，含口语问法（如「服务起不来」）与同义术语（如「宿主故障」）。' },
       scope: { type: 'string', description: '写入作用域覆盖：global 或 workspaceId（缺省按项目 memory.yml 路由）。' },
       role: { type: 'string', description: '角色归属（v0.5 多智能体工作台）：条目归属的角色隔间。缺省时——项目启用 roles 则盖调用者角色，否则为共享记忆（所有角色可见）。' },
+      subject: { type: 'string', description: '主体层（v0.13.0）：这条记忆**关于谁**——`self`（关于我：我的判断/错误/成长/决策理由）或 `master`（关于主人：主人的偏好/定调/习惯/反馈）。缺省 = **通用**（技术知识/项目工作/外部论文这类不关于特定主体的）。⚠ 它不是隔离：设了 subject 的条目**依然对所有调用方可见**，只是可被过滤与统计。只在**新建**时盖章；命中已有条目（key 覆盖/标题合并）时不覆盖原标注——纠正用 update。' },
+      grounding: { type: 'string', description: '约定状态（v0.14.0）：这条记忆涉及的事**是否已被主人与我共同建立**——`established`（主人明确说过/定调过）· `proposed`（**我自己提的、主人未回应**）· `scoped`（主人接受但限定范围）· `rejected`（主人否决过）。缺省 = 未标注。⚠ **写入纪律**：我提出的、主人没回应的方案，**必须标 `proposed`**——否则未来的我会把它当成「主人说过的」而当授权用（论文实测：未接受提议被记成「已确认信息」的比例高达 86–100%）。' },
+      reviewAfter: { type: 'string', description: '复查死线（v0.15.0）：这条结论**该在什么时候被重看**——那是「未来的我执行它」的时刻。接受 `YYYY-MM-DD`（如 2026-11-01）/ ISO 时刻 / 相对写法 `+7d`（7 天后）或 `+2w`（2 周后）。**什么时候填**：这条结论依赖**会变的外部状态**时——环境坐标（端口/路径/版本号/目录布局）、工具或通道的可用率读数、别人的系统行为、价格与限额、尚未定稿的方案。**什么时候不填**：结论永久成立时（原则 / 教训 / 主人偏好 / 我的代码风格 / 已发生事件的事实）——**空是常态，填是例外**。⚠ 到期**不等于作废**，只表示该去核实；核实后 `update` 续新死线或清除。' },
+      watchFor: { type: 'array', items: { type: 'string' }, description: '观察条件（v0.15.0）：**什么样的新信息会让这条失效**（1–8 条短句，每条 ≤200 字）。**为什么值得填**（论文实测）：决策时写下的观察条件能达 92.2% 的关键新信息、只带 20 条无关噪音；而「把全部背景事实都索引上」虽达 100%，却带 89 条噪音——**少而准**才划算。**怎么填**：写「什么事件会让它不成立」，点名具体实体（含它的**别名**与**上游依赖**），**略去用不到的**。例：`["DuckDuckGo 通道可用率重测低于 80%", "busDir 或 web 端口改变", "该插件被卸载或改名"]`。**写入时机只有一次——就是现在**（我记得为什么这样判断）；事后再补，我想不起当时在等什么。它会被印在 recall 结果里，命中的那一刻我就看见「它在等什么」。' },
     },
     output: {
       schema: {
@@ -241,6 +248,19 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         throw new Error(`remember: 本项目 memory.yml 未启用 ${kind} 层（layers: ${config.layers.join(' / ')}），请改用已启用层或调整配置`)
       }
       const tags = args.tags ?? []
+      // 主体层（v0.13.0）：**显式给值才盖章**——不猜（猜错会静默污染检索，错标比不标更坏）；
+      // 非法值 fail-loud（parseSubjectArg），不静默降级成通用。
+      const subject = parseSubjectArg(args.subject, 'remember.subject')
+      // 约定状态（v0.14.0）：同纪律——**显式给值才标**，非法值 fail-loud
+      // （静默降级成「未标注」正是本维度要防的那种失败：以为标了、其实没标）。
+      const grounding = parseGroundingArg(args.grounding, 'remember.grounding')
+      // 时效维（v0.15.0）：同纪律——**显式给值才设**，非法值 fail-loud（静默当「无死线」
+      // 正是本维度要防的失败：我以为标了、其实没标，未来的我照旧拿过期结论当前提）。
+      // ⚠ 相对写法（`+7d` / `+2w`）在这里**固化成绝对日期**——存相对值会让「何时到期」
+      // 随「何时读取」漂移（同一个 +7d，今天读是 7 天后、明天读还是 7 天后 ⇒ 永不到期）。
+      const rememberNow = new Date()
+      const reviewAfter = parseReviewAfterArg(args.reviewAfter, rememberNow, 'remember.reviewAfter')
+      const watchFor = parseWatchForArg(args.watchFor, 'remember.watchFor')
       const { writeScope } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
       const { title, body } = splitText(text)
       // max_entries 守卫：仅当会新建时拦截（更新/合并不受限）
@@ -264,6 +284,10 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         level: null,
         bucket: null,
         ...roleStampOf(exec, config, args.role),
+        ...(subject !== undefined ? { subject } : {}),
+        ...(grounding !== undefined ? { grounding } : {}),
+        ...(reviewAfter !== undefined ? { reviewAfter } : {}),
+        ...(watchFor !== undefined ? { watchFor } : {}),
       })
       // 近重复提示（2026-09-17 主人「存记忆时先搜索记忆」的机制层）：
       // 用写入前的既有条目快照做检测，复用 search.ts 的打分（判据单一真源）；
@@ -295,6 +319,9 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       limit: { type: 'integer', description: '返回条数上限（缺省 20）。' },
       includeArchive: { type: 'boolean', description: '是否包含已归档条目（缺省 false）。' },
       role: { type: 'string', description: '角色视角覆盖（v0.5）：以指定角色检索。缺省 = 按调用者会话身份推导（人类会话→主脑角色；子代理/队员→派生角色）。仅当项目启用 roles 时生效。' },
+      subject: { type: 'string', description: '主体层过滤（v0.13.0）：只看「关于谁」的条目——`self` = 只看关于我自己的，`master` = 只看关于主人的。缺省 = 不过滤（通用条目照常返回）。⚠ 与 role 的**准入**不同：这是**可选筛子**，不是可见性边界——它只是不匹配就不返回，不改变任何条目的可见性。想「关于我的 + 关于主人的、排除通用」目前需分两次调用。' },
+      grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` = **只看我自己提的、主人未回应的事**——自查「我有没有把提议当成定论」时用它；`rejected` = 只看主人否决过的（防我旧事重提）；`established` = 只看主人明确说过的。缺省 = 不过滤。⚠ 同为**可选筛子**，不是可见性边界。' },
+      staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看**该重看**的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`（还早）。典型用法：`["expired","due-soon"]` = 「**我的哪些结论该重看了**」。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目在任何取值下都不返回（它们的时效状态是「**不知道**」，不是「有效」）。' },
     },
     output: {
       schema: {
@@ -321,6 +348,10 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
                 snippet: { type: 'string', required: true },
                 tags: { type: 'array', required: true, items: { type: 'string' } },
                 scope: { type: 'string', required: true },
+                subject: { type: 'string', enum: ['self', 'master'], description: '主体层（v0.13.0）：该条目关于谁；通用条目省略该键。' },
+                grounding: { type: 'string', enum: ['established', 'proposed', 'scoped', 'rejected'], description: '约定状态（v0.14.0）：该条是否已被共同建立；未标注条目省略该键（⚠ 省略 = 不知道，不等同于「已建立」）。' },
+                reviewAfter: { type: 'string', description: '时效维（v0.15.0）：复查死线 `YYYY-MM-DD`；未设死线的条目省略该键。⚠ 档位（已过期 / N 天后复查）由**渲染层按当前时刻现算**，不预存——存了就会与读取时刻脱钩。' },
+                watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）：观察条件——这条记忆在等什么新信息会让它失效；未设的条目省略该键。' },
                 level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
                 score: { type: 'number', required: true },
                 archived: { type: 'boolean', required: true },
@@ -357,6 +388,9 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
               : '命中 0 条：库中确实没有包含这些词项的条目（非抑制所致）。'
           return [{ type: 'text', text }]
         }
+        // 时效维的判定基准：整批结果共用**同一时刻**——避免渲染 N 条时前后条目的基准漂移
+        // （档位本就该按「读的人看到它的时刻」算，所以这里用渲染时刻而非 execute 的局部变量）。
+        const renderNow = new Date()
         const lines = value.results.map((item) => {
           const levelNote = item.level !== null ? `（${item.level}概要）` : ''
           const relatedNote = item.related !== undefined && item.related.length > 0
@@ -365,7 +399,26 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // 渲染 id（v0.11.0）：id 本就在 output schema 里（数据层一直有），此前只在 render 层漏掉，
           // 导致「知道标题却拿不到 id」⇒ update / forget / memory_merge 全部缺入口
           // （2026-09-26 实测：为找一条已知标题的条目花掉 5 轮仍未取到 id）。
-          return `- [${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${relatedNote}`
+          // 主体层标记（v0.13.0）：**只在有值时**渲染——通用条目留空。
+          // 为什么留空：库里绝大多数条目属于通用层，给它们都打标记只会淹没真正该被看见的那两条
+          // （同型教训见 silent-suppression-gate：标记也要挑着打，否则最该被看见的被背景吃掉）。
+          // 经 normalizeSubject 归一而非直读：历史数据可能含别名或非法值，直读会渲染出 `[undefined]`。
+          const subjectNote = subjectTag(normalizeSubject(item.subject))
+          // 约定状态标记（v0.14.0）：**只凸显需警觉的**（我的提议 / 限范围 / 已被否决），
+          // `established` 与未标注一律留空——库里绝大多数是常规来源，全打标记等于没打
+          // （同 subjectTag 的教训）。经归一而非直读：历史数据可能含别名或非法值。
+          const groundingNote = groundingTag(normalizeGrounding(item.grounding))
+          // 时效维标记（v0.15.0）：**只对需警觉的档位**打（已过期 / 7 天内到期；fresh 与
+          // 「未设死线」留空）——同 subjectTag / groundingTag 的教训：标记要挑着打，
+          // 全打等于没打。它放前缀的**最前**：过期是「这条结论可能已经不成立」，
+          // 比「这是谁的提议」更该被第一眼看见。
+          const stalenessNote = stalenessTag(item.reviewAfter, renderNow)
+          // 观察条件（v0.15.0）：印在结果行尾 = **免费路由**。论文的 router 服务于
+          // 「持续新闻流 × 大量开放决策」；而我的输入流就是我的注意力——`recall` 每轮都在
+          // 把相关记忆拉到眼前，**recall 本身就是路由器**。命中即看见「它在等什么」，
+          // 由我判断此刻是否正撞上那个事件。（独立 router 等有尸体再做，见 temporal.ts 决定 1）
+          const watchNote = watchForTag(item.watchFor)
+          return `- ${stalenessNote}${subjectNote}${groundingNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${relatedNote}`
         })
         return [{
           type: 'text',
@@ -381,8 +434,24 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         if (deps.compress !== undefined) void deps.compress(scope, exec.agent).catch(() => {})
       }
       const includeArchive = args.includeArchive ?? false
-      // 取数：作用域合并 → 视野收窄 → 角色准入过滤（v0.5 单点过滤）→ 检索管道
-      const { entries } = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
+      // 取数：作用域合并 → 视野收窄 → 角色准入过滤（v0.5 单点过滤）
+      //      → 主体层筛选（v0.13.0，可选）→ 检索管道
+      const gathered = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
+      // 主体层是**可选筛子**（非准入）：未给参数时 `filterBySubject` 原样返回同一数组引用
+      // （零拷贝）⇒ 存量无 subject 的条目行为逐字节不变。非法值 fail-loud（不静默当通用）。
+      const subject = parseSubjectArg(args.subject, 'recall.subject')
+      // 约定状态筛（v0.14.0）：同为可选筛子；两级过滤串联，两者都未给时全是零拷贝透传。
+      const grounding = parseGroundingArg(args.grounding, 'recall.grounding')
+      // 时效维筛（v0.15.0）：同为可选筛子（三级串联，都未给时全部零拷贝透传，存量行为逐字节不变）。
+      // ⚠ 它不是「过滤掉过期的」——是**审查入口**：`staleness:['expired']` 把该重看的捞出来。
+      // now 在这里取**一次**、整批共用：避免长批处理里前后条目的判定基准漂移（§仪器纪律）。
+      const staleness = parseStalenessFilterArg(args.staleness, 'recall.staleness')
+      const now = new Date()
+      const entries = filterByStaleness(
+        filterByGrounding(filterBySubject(gathered.entries, subject), grounding),
+        staleness,
+        now,
+      )
       const result = recallEntries(entries, {
         query: args.query,
         kind: args.kind,
@@ -548,6 +617,10 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       replace: { type: 'string', description: 'patch 模式：替换成的文本（缺省空串 = 删除该片段）。' },
       tags: { type: 'array', items: { type: 'string' }, description: '替换后的标签；缺省不动。' },
       aliases: { type: 'array', items: { type: 'string' }, description: '替换后的**检索别名**（整体替换，与 tags 同语义）；缺省不动。用途：给已存在的记忆补「它可能被怎么问」的同义表述——实测补后可从 #5 升到 #1。' },
+      subject: { type: 'string', description: '主体层（v0.13.0）——**显式纠正/标注**已存在条目的「关于谁」：给 `self`/`master` = 设置，给空字符串 = 清除回通用，缺省 = 不动。用途：给存量历史记忆补标注（新建时忘标或标错时的唯一入口）；批量标注请先用 recall/memory_browse 定位 id。' },
+      grounding: { type: 'string', description: '约定状态（v0.14.0）——**显式纠正/回填**已存在条目的「是否已被共同建立」：给 `established`/`proposed`/`scoped`/`rejected` = 设置，给空字符串 = 清除回未标注，缺省 = 不动。**主要用途是回填**：把库里「我自己提的、主人未回应」的条目标成 `proposed`，防止未来的我把它当授权用；批量回填请先用 recall({ grounding: ... }) 定位 id。' },
+      reviewAfter: { type: 'string', description: '时效维（v0.15.0）——**显式续期 / 清除**复查死线：给 `YYYY-MM-DD`（或相对写法 `+7d` / `+2w`，按**此刻**折算成绝对日期）= 设置；给**空字符串** = 清除（不再跟踪）；缺省 = 不动。**主要用途是「到期后的动作链」**：核实完 → 改内容 + 续新死线（或清除）。必须允许转移——死线一旦过期就永远卡在过期态，标记天天亮而消不掉。' },
+      watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）——**整体替换**观察条件：给 1–8 条（每条 ≤200 字）= 设置；给**空数组** = 清空；缺省 = 不动。' },
     },
     output: {
       schema: {
@@ -594,6 +667,28 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       }
       if (args.tags !== undefined) patch.tags = args.tags
       if (args.aliases !== undefined) patch.aliases = args.aliases
+      // 主体层显式转移（v0.13.0）：给值 = 设置，空串 = 清除回通用，缺省 = 不动。
+      // 与 role 刻意不同——role 转移会改**可见范围**（安全后果），故 I10 禁止；subject 只是
+      // 语义标记，且**必须**允许显式纠正，否则几百条历史记忆永远无法标注（见 subject.ts 决定 3）。
+      // 仍不静默：不给该参数就绝不动它（反对的是静默转移，不是显式纠正）。
+      if (args.subject !== undefined) {
+        patch.subject = parseSubjectArg(args.subject, 'update.subject') ?? null
+      }
+      // 约定状态显式转移 / 清除（v0.14.0）：三态同 subject（给值 = 设置 / 空串 = 清除回未标注 /
+      // 缺省 = 不动）。这是**回填 `proposed` 的唯一入口**——本维度若不回填，保护等于没有
+      // （论文的反面：库里「我提的、主人没应」的条目在未标注时就与「已建立」长得一样）。
+      if (args.grounding !== undefined) {
+        patch.grounding = parseGroundingArg(args.grounding, 'update.grounding') ?? null
+      }
+      // 时效维显式续期 / 清除（v0.15.0）：三态同 subject / grounding（给值 = 设置 / 空串或空数组
+      // = 清除 / 缺省 = 不动）。空值统一折成 `null` 交给 store 层 `delete`——**不留
+      // `reviewAfter: ''` 这种「第二表示」**（字段存在但值为空，会让「未设死线」有两个真源）。
+      if (args.reviewAfter !== undefined) {
+        patch.reviewAfter = parseReviewAfterArg(args.reviewAfter, new Date(), 'update.reviewAfter') ?? null
+      }
+      if (args.watchFor !== undefined) {
+        patch.watchFor = parseWatchForArg(args.watchFor, 'update.watchFor') ?? null
+      }
       await deps.store.update(entry.scope, args.id, patch)
       recordAction(deps, config, { action: 'update', id: args.id, mode })
       return { id: args.id }
@@ -821,12 +916,18 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           byLevel: { type: 'object', additionalProperties: true, required: true },
           bucketCounts: { type: 'object', additionalProperties: true, required: true },
           archiveCount: { type: 'integer', required: true },
+          bySubject: { type: 'object', additionalProperties: true, required: true, description: '主体层分布（v0.13.0）：self / master / unspecified（通用层）。' },
+          byGrounding: { type: 'object', additionalProperties: true, required: true, description: '约定状态分布（v0.14.0）：established / proposed / scoped / rejected / unlabeled（未标注）。⚠ **unlabeled 与 established 是两件事**——前者是「不知道」，后者是「主人明确说过」；把未标注读成已建立正是论文点名的失败。' },
+          byStaleness: { type: 'object', additionalProperties: true, required: true, description: '时效维分布（v0.15.0）：expired（**已过复查死线**）/ due-soon（7 天内到期）/ fresh（已跟踪且还早）/ untracked（**未设死线**）。⚠ untracked 与 fresh 是两件事——前者是「**不知道它会不会过期**」，后者是「已跟踪且还早」。若 untracked 长期等于总数，说明这个维度没被用起来（退出判据见 src/temporal.ts 文件头）。' },
           scopes: { type: 'array', required: true, items: { type: 'string' } },
         },
       },
       render: (args, value) => [{
         type: 'text',
-        text: `记忆统计（${value.scopes.join(' + ')}）：共 ${value.total} 条（按层 ${JSON.stringify(value.byKind)}；已归档 ${value.archiveCount}）`,
+        text: `记忆统计（${value.scopes.join(' + ')}）：共 ${value.total} 条（按层 ${JSON.stringify(value.byKind)}；主体层 ${JSON.stringify(value.bySubject)}；约定状态 ${JSON.stringify(value.byGrounding)}；已归档 ${value.archiveCount}）`
+          // 时效维（v0.15.0）：**单独一行给结论**——它是「有哪些结论该重看了」的动作入口，
+          // 挤在括号里会被读成一堆数字（过期数 > 0 时这行 verdict 自带处置指引）。
+          + `\n${stalenessVerdict(value.byStaleness)}`,
       }],
     },
     async execute(args, exec) {
@@ -843,7 +944,18 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
         view,
         explicitScope: args.scope,
       })
-      return { ...statsOf(entries), scopes }
+      // 主体层 + 约定状态分布（v0.13 / v0.14）：与 statsOf 吃**同一批** entries（含归档）——
+      // 口径同体，否则「总 N 条但分档加起来不等」这种不自洽会在读数层制造新疑问。
+      return {
+        ...statsOf(entries),
+        scopes,
+        bySubject: countBySubject(entries),
+        byGrounding: countByGrounding(entries),
+        // 时效维（v0.15.0）：与上面两项吃**同一批** entries（含归档）——口径同体，
+        // 否则「总 N 条但分档加起来不等」这种不自洽会在读数层制造新疑问。
+        // now 取一次、整批共用（同一批条目的判定基准不漂移）。
+        byStaleness: countByStaleness(entries, new Date()),
+      }
     },
   })
 }
@@ -864,6 +976,9 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       page: { type: 'integer', description: '页码（1 起，默认 1）。' },
       pageSize: { type: 'integer', description: '每页组数（默认 20）。' },
       role: { type: 'string', description: '角色视角覆盖（v0.5）：缺省按调用者会话身份推导。仅当项目启用 roles 时生效。' },
+      subject: { type: 'string', description: '主体层过滤（v0.13.0）：只看「关于谁」的条目——`self` / `master`。缺省 = 不过滤。用于翻看某一层的积累（如「我对主人的认识都记了些什么」）。' },
+      grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` / `rejected` / `scoped` / `established`。缺省 = 不过滤。用于翻档案自查（如「我提过哪些主人没回应的方案」）。' },
+      staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看某档时效状态的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`。用于**按时间线**翻「哪些结论该重看了」（recall 要查询词，这里不要）。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目时效状态是「不知道」，不是「有效」。' },
     },
     output: {
       schema: {
@@ -924,7 +1039,19 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
       const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
       const includeArchive = args.includeArchive ?? false
-      const { entries } = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
+      const gathered = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
+      // 主体层筛选（v0.13.0，可选筛子）：未给参数时零拷贝原样返回 ⇒ 存量行为不变
+      // 时效维筛（v0.15.0）：第三级同为可选筛子。加在 browse 上不是「为对称而对称」——
+      // **审查入口必须在所有读路径上可达**：否则「我以为能翻到，结果那个工具不支持」
+      // 会复现 2026-09-26 那个坑（知道标题却拿不到 id，因为 render 层漏了字段）。
+      const entries = filterByStaleness(
+        filterByGrounding(
+          filterBySubject(gathered.entries, parseSubjectArg(args.subject, 'memory_browse.subject')),
+          parseGroundingArg(args.grounding, 'memory_browse.grounding'),
+        ),
+        parseStalenessFilterArg(args.staleness, 'memory_browse.staleness'),
+        new Date(),
+      )
       const result = browseEntries(entries, {
         kind: args.kind,
         tags: args.tags,
