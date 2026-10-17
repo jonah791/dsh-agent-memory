@@ -304,6 +304,30 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
+/**
+ * 维度字段声明（v0.13–v0.15）——`recall` 与 `memory_browse` 的 item schema **共用同一份**。
+ *
+ * 为什么抽成常量（而不是两处各写一份）：v0.13 / v0.14 / v0.15 连续三版发生**同一漂移**——
+ * `search.ts` 的共用投影层补了字段、`recall` 的 schema 补了字段，而 `memory_browse` 的
+ * schema 一次都没跟上。后果不是「少个字段」：browse 的 execute 直接返回投影结果 ⇒ 线上被
+ * harness 的 `additionalProperties: false` 校验整条拒收，**工具完全不可用**（2026-10-17 实测）；
+ * 而单测全绿——因为它们直接调 `execute()`、绕过了 schema 校验这一跳。
+ *
+ * ⇒ 投影层注释写了三遍「新增字段必须贯穿投影层」都没拦住，因为漏的不是投影层而是它的**下游**。
+ *   换机制承载（§5.39）：让「加字段」在结构上只可能改一处。
+ * ⚠ 新增维度字段时**只改这里**——两侧 schema 与回归测试（tests/schema-parity.test.mjs）会自动跟上。
+ *
+ * 导出给测试：判据要能**从常量本身出发**遍历键（而不是在测试里枚举字段名——那会重蹈判据㉓
+ * 「枚举式守卫在命名空间扩张时静默失效」）。tests/schema-parity.test.mjs 的 A118 断言
+ * 「两侧展开的每个键都与本常量**引用相等**」⇒ 被拆回两份时立刻红。
+ */
+export const DIMENSION_ITEM_FIELDS = {
+  subject: { type: 'string', enum: ['self', 'master'], description: '主体层（v0.13.0）：该条目关于谁；通用条目省略该键。' },
+  grounding: { type: 'string', enum: ['established', 'proposed', 'scoped', 'rejected'], description: '约定状态（v0.14.0）：该条是否已被共同建立；未标注条目省略该键（⚠ 省略 = 不知道，不等同于「已建立」）。' },
+  reviewAfter: { type: 'string', description: '时效维（v0.15.0）：复查死线 `YYYY-MM-DD`；未设死线的条目省略该键。⚠ 档位（已过期 / N 天后复查）由**渲染层按当前时刻现算**，不预存——存了就会与读取时刻脱钩。' },
+  watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）：观察条件——这条记忆在等什么新信息会让它失效；未设的条目省略该键。' },
+} as const
+
 /** 构建 recall 工具 */
 function buildRecall(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
@@ -354,10 +378,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
                 snippet: { type: 'string', required: true },
                 tags: { type: 'array', required: true, items: { type: 'string' } },
                 scope: { type: 'string', required: true },
-                subject: { type: 'string', enum: ['self', 'master'], description: '主体层（v0.13.0）：该条目关于谁；通用条目省略该键。' },
-                grounding: { type: 'string', enum: ['established', 'proposed', 'scoped', 'rejected'], description: '约定状态（v0.14.0）：该条是否已被共同建立；未标注条目省略该键（⚠ 省略 = 不知道，不等同于「已建立」）。' },
-                reviewAfter: { type: 'string', description: '时效维（v0.15.0）：复查死线 `YYYY-MM-DD`；未设死线的条目省略该键。⚠ 档位（已过期 / N 天后复查）由**渲染层按当前时刻现算**，不预存——存了就会与读取时刻脱钩。' },
-                watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）：观察条件——这条记忆在等什么新信息会让它失效；未设的条目省略该键。' },
+                ...DIMENSION_ITEM_FIELDS,
                 level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
                 score: { type: 'number', required: true },
                 archived: { type: 'boolean', required: true },
@@ -1015,6 +1036,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
                       snippet: { type: 'string', required: true },
                       tags: { type: 'array', required: true, items: { type: 'string' } },
                       scope: { type: 'string', required: true },
+                      ...DIMENSION_ITEM_FIELDS,
                       level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
                       updatedAt: { type: 'string', required: true },
                       score: { type: 'number', required: true },
@@ -1029,11 +1051,25 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
         },
       },
       render: (args, value) => {
+        // 时效维的判定基准：整批结果共用**同一时刻**——与 recall 同一条纪律
+        // （避免渲染 N 条时前后条目的基准漂移）。
+        const renderNow = new Date()
         const lines = value.groups.map((group) => {
           const levelNote = group.level !== null ? `（${group.level}概要）` : ''
           // 渲染 id（v0.11.0）：同 recall——id 一直在 output schema 里，此前 render 层漏掉，
           // 使「翻档案看到标题却无法对它做 update/forget/merge」
-          const items = group.items.map((item) => `  - [${item.kind}] ${item.title}(id=${item.id})`).join('\n')
+          // 维度标记（v0.13–v0.15）：与 recall 同一份渲染纪律（semantic.md「渲染纪律」段
+          // **明列 memory_browse 为触发点之一**）——此前该工具的 schema 与 render **两处都缺**，
+          // 文档承诺与实现不符。标记要挑着打：只凸显需警觉的档位，其余留空。
+          const items = group.items
+            .map((item) => {
+              const stalenessNote = stalenessTag(item.reviewAfter, renderNow)
+              const subjectNote = subjectTag(normalizeSubject(item.subject))
+              const groundingNote = groundingTag(normalizeGrounding(item.grounding))
+              const watchNote = watchForTag(item.watchFor)
+              return `  - ${stalenessNote}${subjectNote}${groundingNote}[${item.kind}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}`
+            })
+            .join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
         })
         return [{

@@ -563,6 +563,9 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 | A113 | 写路径：`remember({reviewAfter, watchFor})` 落库（**绝对日期**）；不带 ⇒ **无该键**（无损 JSON）；非法值 fail-loud 且**整笔拒绝**（不留半条）；★**写入边界 schema 真 parse**：新字段不得被静默剥掉（**真校验，不是 grep 源码**） | 同文件「A113…」「A113b…」 | ✔ 已实测 |
 | A114 | **端到端**：`recall` 按 `staleness` 过滤 + 结果项带该字段（**投影层**）+ 渲染标记正确（**含关联段不污染行定位**）+ `memory_stats` `byStaleness` 之和 == total + 工具面非法参数 fail-loud（**双层**：工具 schema 层 + 纯函数层）+ ★**存量兼容尸体样本**（全无死线的库：行为不变、任何档位都取不到、渲染零标记）+ `update` 三态 | 同文件「A114…」～「A115…」 | ✔ 已实测 |
 | A116 | 汇总结论：有过期条目时**点名风险 + 给处置指引**（含取回入口）；全未设死线时提示**退出判据**；入参**容错读取**（弱类型 / 缺键 / 非数字不抛，毕竟调用方是 render 层） | 同文件「A116…」 | ✔ 已实测 |
+| A117 | ★ **工具 output schema 与实现一致（机制承载）**：`recall` / `memory_browse` 的 `execute` 真实返回的每个键，其 output schema 都必须声明（递归下钻 `items`/`properties`）——否则线上被 harness 的 `additionalProperties: false` **整条拒收**（工具不可用）。★判据自证 A117b：对未声明键**真会亮**（否则本判据恒真） | `tests/schema-parity.test.mjs`「A117 ★ schema 一致性…」「A117b ★判据自证…」 | ✔ 已实测 |
+| A118 | **单一真源**：`recall` 与 `memory_browse` 的 item 键集合之差恰为 `['related']`（结构性、**自动跟随新增字段**，不枚举字段名）；维度字段值 == 导出的 `DIMENSION_ITEM_FIELDS`。⚠ **判据边界**：不能用 `strictEqual`——`defineTool` 会拷贝/归一化 schema，两处值相同而引用不同（实测） | 同文件「A118 单一真源…」 | ✔ 已实测 |
+| A119 | `memory_browse` 的 render 打出维度标记（过期 / 主体 / 观察条件），且标题与 id 不丢；**对照** A119b：未设维度的条目**零标记**（标记要挑着打，同 A90/A100/A109） | 同文件「A119…」「A119b 对照…」 | ✔ 已实测 |
 
 > 测量口径：`pending = total − proven`（fail-closed）。解析器现算 `total=78, proven=76, pending=2`（A17 周期补压 / A30 memoryApi 写入待线上验收）。**本次新增 6 行（A79–A84）全为「已实测」⇒ pending 不变（仍 2）**。
 > ✅ **曾报 77 的「差 1」已定位并修复（2026-09-22）**：真因是 `dsh-semantic-docs` 的 `parseTables` **把「空行切断后形成的续块」的首行当表头吞掉**——本表 A44 与 A45 之间有一个空行，A45 因此长期不进 `total`（`verified` 判据因 total 偏小而**偏松**）。已修（表头判据改为「第二行是分隔行」，commit `7f9def6`，含 RED→GREEN 单测 + 64 份文档全量对账 mismatch 0），现算 `total=78`，与本表 78 个 A 行一致。
@@ -733,6 +736,17 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
     - **如实保留的残留风险**：字段可选 ⇒ **不填就得不到保护**（与 v0.14 同型的失败面）。**退出判据已写死**：新写入里带 `reviewAfter` 的比例长期 ≈ 0 ⇒ 撤或改形，不留死字段。
     - **顺手还的两笔债（预先存在、非本轮引入，已在测试里标注）**：① `tests/tools.test.ts` 的工具集合断言漏了 `memory_recompress` / `memory_review_mark`（测试未跟进实现）；② `tests/compaction-sink.test.ts` 的标题断言期望**分钟粒度**，而实现自 2026-09-26 起刻意改为**日粒度**（checkpoint 合并键，防同日多条平行快照）⇒ **改测试不改实现**。
     - **落地判据**：A105–A116（12 行，全「已实测」）+ `tests/temporal.test.mjs` 21 条用例；全量 `npm run test:all` **403 项 / 0 失败**（两个既有红同轮转绿，见上条）。
+
+22. **2026-10-17 · 修 `memory_browse` 线上不可用（v0.13–v0.15 三版漂移的收口 · 机制承载取代注释）**
+    - **触发事实（线上实测，不是巡检猜测）**：调用 `memory_browse` 直接失败——harness 的严格校验拒绝其返回值：`"value.groups[0].items[0].subject" is not a declared property (additionalProperties: false)`（`reviewAfter` / `watchFor` 同）。⇒ **该工具完全不可用**，而不是「少显示一个字段」。
+    - **根因**：`search.ts: toResultItem` 是 recall / browse **共用的唯一投影点**，v0.13 / v0.14 / v0.15 三版都在这里补了字段，`recall` 的 output schema 也三版都补了——而 **`memory_browse` 的 output schema 一次都没跟上**（它的 item 停在 v0.12 的 10 个字段）。投影是共用的、schema 是**双份**的，这个不对称是漂移的结构原因。
+    - **⚠ 为什么既有测试全绿而线上崩（本次最重要的发现）**：其余 browse 测试**直接调 `execute()`**（`byName.get('memory_browse').execute({…}, EXEC)`）——**绕过了 harness 的 output schema 校验这一跳** ⇒ **schema 声明的正确性在测试里完全不可见**。⇒ 一般化：**判据必须打在被绕过的那一层上**；「工具能跑」与「工具在宿主里能跑」是两件事（同 §5.9 规则 2「恒为空的输出不是证据」的变体：**校验被绕过 = 该层判据恒真**）。
+    - **⚠ 为什么注释没拦住**：投影层的注释**写了三遍**「新增字段必须贯穿投影层」（v0.13 / v0.14 / v0.15 各一遍，字面还在原地）——而漏的**不是投影层，是它的下游**。⇒ 印证 §5.39：**同一族规则反复失效时，换机制承载而不是再写一遍措辞**。
+    - **修法（结构上让漂移不可能）**：抽 `DIMENSION_ITEM_FIELDS` 常量（`src/tools.ts`，**导出**给测试），recall / browse 两处 `...DIMENSION_ITEM_FIELDS` 展开 ⇒ **加字段只可能改一处**。配新测试文件 `tests/schema-parity.test.mjs`（判据全部**结构性、自动跟随新增字段**，不枚举字段名——避免判据㉓「枚举式守卫在命名空间扩张时静默失效」）。
+    - **判据设计的三次修正（留档，因为每次都是「判据错而不是实现错」）**：① 路径少一层（`group.items` 是**数组定义**，要再下钻 `.items` 才到元素 schema）⇒ 取到 `undefined`；② 对**所有共有键**断言引用相等 ⇒ `id`/`kind` 这类各处手写的字面量必然不等 ⇒ 误报；③ 改 `strictEqual` 后实测发现 **`defineTool` 会拷贝/归一化 schema**（两处值逐字段相同而引用不同）⇒ **引用相等在框架处理后根本不成立**，改 `deepStrictEqual` 并**在测试注释里写清判据边界**（「是否被拆成两份」不由这条承担，而由差集判据 + A117 承担）。⇒ 教训：**判据的域写清楚，比让它看起来更强重要**。
+    - **顺带补齐的实现缺口（文档承诺 vs 实现）**：§5.14 的「渲染纪律」段**明列 `memory_browse` 为标记触发点之一**，而它的 render 只输出 `[kind] title(id=)`——**schema 与 render 两处都缺**。本次一并补上（`stalenessTag` / `subjectTag` / `groundingTag` / `watchForTag`，判定基准整批共用同一时刻，同 recall 纪律）。
+    - **落地判据**：A117–A119（3 行，全「已实测」）+ `tests/schema-parity.test.mjs` **5 条**（含 A117b **判据自证**与 A119b **负对照**）；全量 **336 项 / 0 失败**；预检 full 通过 → 重启 → **线上取证**：`memory_browse` 恢复且一次调用同时验证三处改动（schema 不再被拒 + `[自我]` 与 `⚠观察条件：…` 标记出现 + 条目 id 齐全）。
+    - **一般化（已进技能 `persisted-field-extension`）**：新增持久化字段的落点是**五跳**（类型 → 投影 → **每个消费者的 output schema** → render → 写入边界），不是四跳；而**「消费者有几个」这件事本身要显式清点**——共用投影会让「有几个 schema」看不见。
 
 ## 10 · 未决问题
 
