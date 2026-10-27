@@ -136,7 +136,28 @@ export function buildAutoRecallDigest(
     // 若命中的条目已过期，「我正拿一条可能已失效的记忆当前提」正是最该被看见的时刻。
     // ⚠ 刻意**不注入 watchFor**：注入有字节预算，观察条件是多句文本，会把 top3 的实际内容挤掉。
     const stalenessNote = stalenessTag(r.reviewAfter, new Date())
-    lines.push(`- ${stalenessNote}${subject}${groundingNote}[${kind}] ${r.title}（${date}${score}）：${snippet}`)
+    // v0.19（2026-10-27）：snippet 与标题同源时改注入 cue。
+    //
+    // 旧行为的失效证据（同族第 2 次，2026-10-26 记过「我不读是取用问题」）：
+    // 2026-10-27 主人给一本书说「学习一下」；auto-recall 命中
+    // 「多格工口漫画：MOSS-Image 一次生成整页分镜」——**相关度 88.964，排第一**。
+    // 我却整轮没去读它，从零重做了一遍昨晚已打通的管线。
+    //
+    // 根因不是「信号没到」，也不是「记忆没记」，而是**送达的形态不产生动作**：
+    // 条目的正文首行就是标题 ⇒ snippet 是标题的重複 ⇒ 注入行里同一句话出现两遍，
+    // 而真正能触发动作的 cue（「要在单张图里让同一角色出现在多个小画面里且保持一致时」）
+    // 被预算裁掉了。**腾出来的字节没换来内容，只换来重复。**
+    //
+    // 判据（可单测）：条目正文首行 = 标题且带 cue 时，注入文本必须出现 cue 首句。
+    const headLen = Math.min(12, snippet.trim().length)
+    const head = snippet.trim().slice(0, headLen)
+    const snippetIsTitleEcho = headLen >= 8 && r.title.startsWith(head)
+    const cueFirst = r.cue?.[0]
+    const useCue = snippetIsTitleEcho && cueFirst !== undefined && cueFirst.length > 0
+    const payload = useCue
+      ? `◎${cueFirst.length > SNIPPET_MAX ? cueFirst.slice(0, SNIPPET_MAX).trimEnd() + '…' : cueFirst}`
+      : snippet
+    lines.push(`- ${stalenessNote}${subject}${groundingNote}[${kind}] ${r.title}（${date}${score}）：${payload}`)
   }
   let body = `【相关记忆（auto-recall）】\n${lines.join('\n')}`
   if (body.length > opts.maxBytes) {

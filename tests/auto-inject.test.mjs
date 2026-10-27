@@ -203,3 +203,54 @@ test('digest：中文整句 query 经 bigram 命中（无空格分词增强）',
   const text = buildAutoRecallDigest(entries, '帮我看一下守护体系现在是什么状态', { maxEntries: 3, maxBytes: 1500 })
   assert.ok(text.includes('守护体系基线'))
 })
+
+// ---------- v0.19：snippet 是标题 echo 时改注入 cue ----------
+// 动机（2026-10-27 实测失效）：`makeSnippet` 取**正文首个非空行**，而 remember 写入时
+// 首行自动作标题 ⇒ 首行=标题的条目，其 snippet 就是标题本身。注入行于是变成
+// 「标题：标题的前 56 字」——同一句话两遍，而能触发动作的 cue 被预算裁掉。
+// 代价现场：主人给一本书说「学习一下」，auto-recall 命中「多格工口漫画：MOSS-Image
+// 一次生成整页分镜」**相关度 88.964 排第一**，我整轮没去读它，从零重做了昨晚已打通
+// 的管线。它的 cue 正是「要在单张图里让同一角色出现在多个小画面里且保持一致时」。
+
+const CUE = '要在单张图里让同一角色出现在多个小画面里且保持一致时'
+
+test('digest v0.19 尸体样本：snippet 只是标题重複 ⇒ 注入 cue 首句，不再注入重复的标题', () => {
+  const title = '多格工口漫画：MOSS-Image 一次生成整页分镜'
+  const entries = [entry({
+    id: 'k1',
+    title,
+    body: title + '\n\n正文细节若干，讲怎么用 layout canvas=multi_panel 出四格。',
+    createdAt: '2026-10-26T00:00:00.000Z',
+    cue: [CUE],
+  })]
+  const text = buildAutoRecallDigest(entries, '多格 分镜 MOSS 漫画', { maxEntries: 3, maxBytes: 1500 })
+  // 修复前：这一行是「……：多格工口漫画：MOSS-Image 一次生成整页分镜」（标题重复），cue 整段丢失
+  assert.ok(text.includes('◎'), '应带 cue 标记')
+  assert.ok(text.includes(CUE), 'cue 首句必须在注入文本里')
+})
+
+test('digest v0.19 回归：snippet 与标题不同源 ⇒ 保持原行为（用 snippet，不塞 cue）', () => {
+  const entries = [entry({
+    id: 'k1',
+    title: '守护体系基线',
+    body: 'watch 35656 → web 37860，HTTP 401 健康',
+    createdAt: '2026-08-31T00:00:00.000Z',
+    cue: [CUE],
+  })]
+  const text = buildAutoRecallDigest(entries, '守护体系 健康', { maxEntries: 3, maxBytes: 1500 })
+  assert.ok(text.includes('watch 35656'), '正文信息必须仍在场')
+  assert.ok(!text.includes('◎'), 'snippet 有独立信息时不该拿 cue 顶替它')
+})
+
+test('digest v0.19 边界：snippet 是标题 echo 但没有 cue ⇒ 回落到 snippet（不产出空 payload）', () => {
+  const title = '无 cue 的条目'
+  const entries = [entry({
+    id: 'k1',
+    title,
+    body: title + '\n\n详情',
+    createdAt: '2026-10-26T00:00:00.000Z',
+  })]
+  const text = buildAutoRecallDigest(entries, '无 cue 条目', { maxEntries: 3, maxBytes: 1500 })
+  assert.ok(text.includes(title))
+  assert.ok(!text.includes('◎'))
+})
