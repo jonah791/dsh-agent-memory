@@ -20,6 +20,9 @@
 
 import { readFileSync } from 'node:fs'
 import { corpusFingerprint, loadSearch } from './lib.mjs'
+// 统计层单独成文件：`validate-holdout.mjs` 也用它。各写一份必然漂移，
+// 而两个脚本对同一个差值给出不同裁决时，没人知道该信哪个。
+import { mcnemar, powerIndependent, powerPaired, requiredNIndependent, requiredNPaired } from './stats.mjs'
 
 const DEFAULT_SET = 'E:/alice/.dsh/recall-eval/eval-set.json'
 /** 生产默认值（与 src/search.ts 的常量逐字对应；这里显式写一份是为了让报告能标「基线」） */
@@ -86,29 +89,26 @@ function evaluate(tuning, subset = cases) {
     empty: sum((r) => (r.returned === 0 ? 1 : 0)) / n,
     /** 逐 case 的对错位图（配对检验用：同一条 case 上两臂一个对一个错，噪声互相抵消） */
     hits: rows.map((r) => (r.rank === 1 ? 1 : 0)),
+    /** 逐 case 的名次（0 = 未命中）。分区报告要用它——长度归一的效应符号按长度区翻转，
+     *  只看总体会把「短目标区收益」与「长目标区代价」抵消成零，读起来像「没效果」 */
+    ranks: rows.map((r) => r.rank),
   }
 }
 
-/**
- * McNemar 配对检验：两臂在**同一批 case** 上的「对/错」是否真不同。
- *
- * 为什么必须配对：两个独立比例的差看的是 `sqrt(p(1-p)/n)`（216 case 约 3.2 个点），
- * 而配对只看「一个对一个错」的那部分（不一致对），噪声大幅抵消——
- * 同样 216 case，配对能检出小得多的差异。今天差点被「差 3.7 个点的独立比例」骗到。
- *
- * @returns `{ aOnly, bOnly, z, significant }`；z > 1.96 ⇒ α=0.05 显著（连续校正）
- */
-function mcnemar(a, b) {
-  let aOnly = 0
-  let bOnly = 0
-  for (let i = 0; i < a.length; i++) {
-    if (a[i] === 1 && b[i] === 0) aOnly += 1
-    else if (a[i] === 0 && b[i] === 1) bOnly += 1
-  }
-  const n = aOnly + bOnly
-  const z = n === 0 ? 0 : (aOnly - bOnly - Math.sign(aOnly - bOnly)) / Math.sqrt(n)
-  return { aOnly, bOnly, z, significant: Math.abs(z) > 1.96 }
+/** 按长度区切一刀：返回该区内的样本量与 top1（`hits` 供配对检验复用） */
+function zoneSlice(m, zoneName, allCases) {
+  const idx = []
+  allCases.forEach((c, i) => {
+    if (c.zone === zoneName) idx.push(i)
+  })
+  const hits = idx.map((i) => m.hits[i])
+  const n = hits.length
+  return { n, top1: n > 0 ? hits.reduce((a, b) => a + b, 0) / n : 0, hits }
 }
+
+// `normCdf` 在 ./stats.mjs（与 mcnemar / 功效 / 反解同住，保证两脚本同口径）
+
+// `mcnemar` 在 ./stats.mjs
 
 const arms = []
 if (stage === 'ablate') {
@@ -171,6 +171,15 @@ const elapsed = ((Date.now() - t0) / 1000).toFixed(0)
 const sorted = [...results].sort((a, b) => b.m.top1 - a.m.top1 || b.m.mrr - a.m.mrr)
 const base = results[0].m // 第一臂固定是基线（ablate 阶段）或 coarse 的第一臂
 
+// ★ 功效（检出率）：给定 n 与效应量，这台仪器**能发现**这个效应的概率。
+//   它与「量程」是一回事的两个方向：量程问「能分清多大」，功效问「这么大的有多大概率被看见」。
+//   ⚠ 配对版的 ψ（不一致率）是**假设值**，不是从本评测集量出来的 ⇒ 读数只给量级，不是精确功效。
+// 3 个点是「这类改动通常能带来的最大改进」的量级（核验报告的判据线即取此值）。
+const powerAt3 = powerPaired(cases.length, 0.03)
+const powerAt3Indep = powerIndependent(cases.length, base.top1, 0.03)
+
+// 反解：要可靠检出 delta 这个效应，需要多少 case（α=0.05、功效 0.8）。
+
 console.log('\n── 排名（⚠ top1 带 ±1σ；**只认「差 > 2σ」的臂**，其余都是噪声）──')
 console.log('臂'.padEnd(30) + ' top1±σ'.padEnd(14) + ' MRR    top5   噪音  空结果  未命中   与首臂差  判定')
 for (const r of sorted) {
@@ -196,24 +205,124 @@ for (const r of sorted) {
 //   独立比例的标准误（±3 个点）会把小改进淹掉；配对只看不一致的那几对 case。
 if (results.length > 1) {
   console.log('\n── 配对检验（McNemar，各臂 vs 首臂；只统计「一个对一个错」的 case）──')
+  console.log('  判定用 α=0.05 **双侧**；z 打印三位是因为两位会把 1.9551 打成「+1.96」却判不显著（核验实测 19 组如此）。')
   const baseHits = results[0].m.hits
   let anySig = false
+  let anyEmpty = false
+  let anyBelowBound = false
   for (const r of results.slice(1)) {
     const t = mcnemar(r.m.hits, baseHits)
+    // ★ 三条互不掩盖的判定分支，段位顺序有意义：
+    //   empty 必须最先判——它意味着「样本里根本没有不一致对」，此时 z=0 不是「持平」而是「测不出」。
+    if (t.empty) {
+      anyEmpty = true
+      console.log(
+        `  ${r.label.padEnd(30)} 不一致对 0（0:0）` +
+          `  ⇒ ⚠ **无数据**：不是「与基线持平」，是这个评测集对这条臂**完全不敏感**（两臂逐 case 全同）`,
+      )
+      continue
+    }
+    if (t.n < 6) {
+      anyBelowBound = true
+      console.log(
+        `  ${r.label.padEnd(30)} 本臂对/基线错=${String(t.aOnly).padStart(3)}  基线对/本臂错=${String(t.bOnly).padStart(3)}` +
+          `  z=${t.z >= 0 ? '+' : ''}${t.z.toFixed(3)}  p=${t.p.toFixed(3)}` +
+          `  ⇒ ⚠ **不可判**：不一致对仅 ${t.n} 个，而本实现 n≤5 时数学上不可能报显著（上界 z=(n−1)/√n）`,
+      )
+      continue
+    }
     const dir = t.aOnly > t.bOnly ? '本臂更好' : t.aOnly < t.bOnly ? '本臂更差' : '持平'
     if (t.significant) anySig = true
     console.log(
       `  ${r.label.padEnd(30)} 本臂对/基线错=${String(t.aOnly).padStart(3)}  基线对/本臂错=${String(t.bOnly).padStart(3)}` +
-        `  z=${t.z >= 0 ? '+' : ''}${t.z.toFixed(2)}  ⇒ ${t.significant ? '★ 显著' : '不显著'}（${dir}）`,
+        `  z=${t.z >= 0 ? '+' : ''}${t.z.toFixed(3)}  p=${t.p.toFixed(3)}` +
+        `  ⇒ ${t.significant ? '★ 显著' : '不显著'}（${dir}）`,
     )
+  }
+  if (anyEmpty) {
+    console.log('\n  ⚠ 上面有臂落在「无数据」档：不一致对为 0 ⇒ 这条臂改的东西**在这个评测集上根本不发生**。')
+    console.log('     这通常指向评测集缺场景（如所有 case 的竞争者都不长），不指向「这个参数没用」——先查 case 构成。')
+  }
+  if (anyBelowBound) {
+    console.log('\n  ⚠ 上面有臂落在「不可判」档：不一致对 < 6。改判据或加 case，别读成「效果不存在」。')
   }
   if (!anySig) {
     console.log('\n  ⚠ 没有任何臂与基线有显著差异 ⇒ **这一轮扫参什么都没证明**。')
     console.log('     别把「排名表里第一」当结论：要么加 case 数（σ ∝ 1/√n），要么承认这个差异测不出。')
   }
+  // ★ 功效脚注：把「不显著」与「没有效应」分开。数字**现算**，不写死（n 一变它就变）。
+  console.log(
+    `\n  ⓘ 功效脚注（α=0.05 双侧、功效按 0.8 标定、基线 ${(base.top1 * 100).toFixed(1)}%、效应取 3 个百分点）：` +
+      `本集 ${cases.length} case 的检出率 ≈ 配对 ${(powerAt3 * 100).toFixed(1)}% / 独立 ${(powerAt3Indep * 100).toFixed(1)}%。`,
+  )
+  console.log('     ⇒ 报「不显著」的意思是**这台仪器没有分辨力**，不是「效应不存在」。')
+  console.log('     ⚠ 配对那一路的 ψ=0.2（不一致率）是假设值不是实测 ⇒ 只当量级看。')
+}
+
+// ★★ 分区读数（2026-10-27 加）：长度归一的效应**符号按长度区翻转** ⇒ 总体数字是两个相反效应之和。
+//   核验报告实测：总体 +3.7pp，但「答案≤中位」−1.7pp、「答案>2×中位」+12.0pp
+//   —— 只看总体会得出「没效果」，而真相是两种相反效果叠在一起。
+//   ⇒ 集子带 zone 字段就分区报，且**每个区独立做配对检验**（各区样本量小，必须带 p）。
+{
+  const ZONE_ORDER = ['far-short', 'short', 'fair', 'long', 'far-long']
+  const ZONE_LABEL = {
+    'far-short': '远短于竞争者（归一收益区）',
+    short: '偏短（归一收益区）',
+    fair: '长度相当（纯排序能力）',
+    long: '偏长（归一代价区）',
+    'far-long': '远长于竞争者（归一代价区）',
+  }
+  const hasZone = cases.every((c) => typeof c.zone === 'string')
+  const probeArm = results.slice(1)[0]
+  if (!hasZone) {
+    console.log('\n⚠ 评测集没有 zone 字段（旧集）⇒ 跳过分区报告。重建评测集后才看得到效应符号翻转。')
+  } else if (probeArm) {
+    console.log(`\n── 分区读数：${probeArm.label}  vs  ${results[0].label} ──`)
+    console.log('  长度区'.padEnd(32) + 'n'.padStart(4) + '   基线'.padStart(8) + '   对比'.padStart(8) + '    差'.padStart(8) + '   配对 a:b       p      判定')
+    for (const z of ZONE_ORDER) {
+      const bz = zoneSlice(base, z, cases)
+      if (bz.n === 0) continue
+      const oz = zoneSlice(probeArm.m, z, cases)
+      const d = (oz.top1 - bz.top1) * 100
+      const t = mcnemar(oz.hits, bz.hits)
+      const verdict = t.empty ? '无数据' : Math.abs(t.z) > 1.96 ? '★ 显著' : '不显著'
+      console.log(
+        `  ${(ZONE_LABEL[z] ?? z).padEnd(30)}` +
+          String(bz.n).padStart(4) +
+          `${(bz.top1 * 100).toFixed(1)}%`.padStart(8) +
+          `${(oz.top1 * 100).toFixed(1)}%`.padStart(8) +
+          `${d >= 0 ? '+' : ''}${d.toFixed(1)}`.padStart(8) +
+          `   ${String(t.aOnly).padStart(2)}:${String(t.bOnly).padEnd(2)}` +
+          `  ${t.empty ? '  —  ' : t.p.toFixed(3)}` +
+          `  ${verdict}`,
+      )
+    }
+    const perZone = Math.round(cases.length / ZONE_ORDER.length)
+    console.log(`  ⚠ 每区 n 约 ${perZone} ⇒ 单区 ±1 个 case 就是 ±${(100 / perZone).toFixed(1)} 个百分点。`)
+    console.log('     单区的「★ 显著」只在该区样本够时才可信；单区的「不显著」同样**不可读成「无效应」**。')
+  }
 }
 
 console.log(`\n耗时 ${elapsed} 秒。`)
+
+// ★ 量程提示（2026-10-27 补）：不是「要多少样本」，而是「我这点样本能分清多大」。
+//   实测（α=0.05 / 功效 0.8）：top1 67%→70%（3 个点）要 3763（独立）或 1742（配对）个 case。
+//   ⇒ 216 个 case 的配对设计只能可靠检出约 8.5 个点以上。
+//   这一段必须常驻：否则下一个人（包括未来的我）会拿排名表第一名当结论。
+{
+  const p = base.top1
+  const sigma = Math.sqrt((p * (1 - p)) / cases.length)
+  console.log('\n── 量程（这台仪器能判多大的效应）──')
+  console.log(`  tune 侧 ${cases.length} 个 case，基线比例 ${(p * 100).toFixed(1)}% ⇒ 单臂标准误 ±${(sigma * 100).toFixed(1)} 个百分点`)
+  console.log(`  ⇒ **差值小于 ±${(2 * sigma * 100).toFixed(1)} 个百分点的臂，即使排第一也只是噪声**。`)
+  console.log(`  ⇒ 配对检验（McNemar）能检出更小的差异，但仍受 ${cases.length} 个样本的上限约束。`)
+  // 下面三行全部**现算**（不写死数字）：n 一变，需要的样本量就跟着变。
+  const n5 = requiredNPaired(0.05)
+  const n3 = requiredNPaired(0.03)
+  const n3i = requiredNIndependent(p, 0.03)
+  console.log(`     要可靠检出 5 个点：${n5} 个 case（配对，ψ=0.2）/ 要检出 3 个点：${n3} 个（配对）或 ${n3i} 个（独立）`)
+  console.log(`     ⇒ 现在这 ${cases.length} 个 case 连 5 个点都检不可靠（${(powerPaired(cases.length, 0.05) * 100).toFixed(0)}% 检出率）——加 case 数才是正解，加规则不是。`)
+}
 
 // 分组报告：长度归一到底帮谁、害谁（split / bgrid 阶段必出——那两阶段的结论只在分组里看得见）
 if (stage === 'split' || stage === 'bgrid') {

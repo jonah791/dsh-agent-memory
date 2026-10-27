@@ -144,22 +144,26 @@ function preciseOwners(texts, key, cap = 40) {
 }
 
 /**
- * 竞争条目数 = 「含**至少一个**查询词」的条目数（找到 cap 个就停，不必数完）。
+ * 竞争者 id 列表（含**至少一个**查询词；到 cap 就停）。
  *
  * 为什么这条判据关键：recall 是 **OR 累加**不是 AND ⇒ 这些条目**都会得分**，
  * 目标条目要在它们之中排第一，排序能力才被考到。
- * 若这个数是 1 ⇒ 只有一条有分 ⇒ 结果必然恰好 1 条 ⇒ top1 恒为 100%（第一版就是这样失效的）。
+ * 若只有 1 条 ⇒ 结果必然恰好 1 条 ⇒ top1 恒为 100%（第一版就是这样失效的）。
+ *
+ * ⚠ 2026-10-27 改：从「只数个数」改为「返回 id 列表」——长度带约束需要竞争者的正文长度，
+ *   而 top1 的偏差（核验实测：本集答案中位 1849 vs 全库 1206）几乎全部来自长度 ⇒ 必须能看见它们有多长。
+ *   `cap` 从 6 提高到 41：中位数对上限不敏感，6 个太少（长条目录入顺序靠前会带偏中位）。
  */
-function countCompetitors(texts, toks, cap = 6) {
+function collectCompetitors(texts, toks, cap = 41) {
   const keys = toks.map((t) => t.toLowerCase())
-  let n = 0
+  const ids = []
   for (const t of texts) {
     if (keys.some((k) => t.text.includes(k))) {
-      n += 1
-      if (n >= cap) return n
+      ids.push(t.id)
+      if (ids.length >= cap) break
     }
   }
-  return n
+  return ids
 }
 
 /**
@@ -169,12 +173,19 @@ function countCompetitors(texts, toks, cap = 6) {
  * 这样查询会同时命中一批条目，只有目标条目命中**全部** token ⇒ 排序能力才被考到。
  *
  * @param {Array<object>} entries
- * @param {{maxTokens?: number, rarityMax?: number, verbose?: boolean}} opts
- * @returns {Array<{query: string, answerId: string, type: string, tokenCount: number, rareDf: number, commonDf: number}>}
+ * @param {{maxTokens?: number, rarityMax?: number, lengthBand?: [number, number]|null, verbose?: boolean}} opts
+ *   `lengthBand` 缺省 `null`（**不排除**）：只记录每条 case 的 `lengthRatio`，配平交给抽样层按区配额做。
+ *   ⚠ 为什么不做成「带外排除」：2026-10-27 实测 —— 把答案限制在竞争者的 [0.5, 1.2] 倍带内，
+ *   确实消掉了偏差（配对 10:2 → 6:4、b=0 的显著优势消失），但**同时把归一的收益区一起砍光**
+ *   （新集「长答案」子集 0 条）。排除法是拿掉病灶，不是配平；正确做法是让三个区都有代表。
+ *   传 `[lo, hi]` 仍可启用排除（只用于复现某次特定实验）。
+ * @returns {Array<{query: string, answerId: string, type: string, tokenCount: number, rareDf: number,
+ *   commonDf: number, competitors: number, lengthRatio: number, answerLen: number, compMedLen: number}>}
  */
 export function buildCases(entries, opts = {}) {
   const maxTokens = opts.maxTokens ?? 3
   const rarityMax = opts.rarityMax ?? 3
+  const lengthBand = opts.lengthBand === undefined ? null : opts.lengthBand
   const texts = entries.map((e) => ({ id: e.id, text: `${e.title}\n${e.body}`.toLowerCase() }))
 
   // 每条条目的 token 表 + 正则口径倒排（**只用于粗筛**，一次遍历建好，不做全库扫）
@@ -205,11 +216,14 @@ export function buildCases(entries, opts = {}) {
   }
   const byId = new Map(entries.map((e) => [e.id, e]))
   const lowerOf = new Map(entries.map((e) => [e.id, `${e.title}\n${e.body}`.toLowerCase()]))
+  // ⚠ 长度必须取 **body.length**（`bodyLengthNorm` 惩罚的就是它），不能取 title+body。
+  const bodyLenOf = new Map(entries.map((e) => [e.id, e.body.length]))
 
   const cases = []
   let skippedNoRare = 0
   let skippedNotUnique = 0
   let skippedLonely = 0
+  let skippedLengthBand = 0
   for (const e of entries) {
     const toks = [...perEntry.get(e.id).values()]
     if (toks.length < 2) {
@@ -251,9 +265,24 @@ export function buildCases(entries, opts = {}) {
     const lastToken = picked[picked.length - 1].token.toLowerCase()
     // ★ 分辨力闸门：查询必须能让**不止一条**条目得分，否则排序不被考到。
     //   第一版漏了这道门（单词 + df===1 ⇒ 只有一条有分）⇒ 实测 615/615 全满分 = 零分辨力。
-    const competitors = countCompetitors(texts, picked.map((p) => p.token))
-    if (competitors < 2) {
+    const compIds = collectCompetitors(texts, picked.map((p) => p.token))
+    if (compIds.length < 2) {
       skippedLonely += 1
+      continue
+    }
+    const competitors = Math.min(compIds.length, 6) // 旧读数口径（≥6 视为饱和），保持与历史报告可比
+    // ★ 长度带闸门（2026-10-27 依核验报告加）：答案正文长度必须落在**竞争者长度中位的 [lo, hi] 倍带内**。
+    //   为什么必须有：本集答案正文中位 1849 字符 vs 全库 1206（1.53×、均值 1.80×），而长度归一的惩罚
+    //   随长度单调增长 ⇒ **语料构造本身在给「关掉归一」投票**（实测 ablate：b=0 以 10:2 显著更好）。
+    //   核验的长度手术正控证明这条通道是真的：答案正文加长 10× ⇒ top1 67.1%→34.3%、135/216 全变差。
+    //   ⚠ 这道门只保证「长度不成为决定性因素」，不保证 case 一定测得到归一的收益——
+    //   要测收益得反过来看 lengthRatio > 1.5 的子集（长答案 + 短竞争者，归一该在那里帮忙）。
+    const lens = compIds.map((id) => bodyLenOf.get(id) ?? 0).sort((a, b) => a - b)
+    const compMed = lens[Math.floor(lens.length / 2)] || 1
+    const ansLen = bodyLenOf.get(e.id) ?? 0
+    const lengthRatio = ansLen / compMed
+    if (lengthBand && (lengthRatio < lengthBand[0] || lengthRatio > lengthBand[1])) {
+      skippedLengthBand += 1
       continue
     }
     cases.push({
@@ -264,13 +293,35 @@ export function buildCases(entries, opts = {}) {
       rareDf: rareOwnersOfThis.length,
       commonDf: dfOf(lastToken),
       competitors,
+      lengthRatio: Number(lengthRatio.toFixed(3)),
+      answerLen: ansLen,
+      compMedLen: compMed,
     })
   }
   if (opts.verbose) {
     console.log(
       `  [生成] 无稀有词跳过 ${skippedNoRare} 条；组合不唯一跳过 ${skippedNotUnique} 条；` +
-        `无竞争条目（只有它有分 ⇒ 送分题）跳过 ${skippedLonely} 条`,
+        `无竞争条目（只有它有分 ⇒ 送分题）跳过 ${skippedLonely} 条；` +
+        `超出长度带 ${lengthBand ? `[${lengthBand[0]}, ${lengthBand[1]}]` : '（已关闭）'} 跳过 ${skippedLengthBand} 条`,
     )
+    if (cases.length > 0) {
+      // ★ 自检：这道门的判据是「答案长度不再系统性偏长」⇒ 必须当场量出来。
+      //   只写「已加门」是措辞，不是证据（核验报告实测旧集：答案中位 1849 vs 全库 1206）。
+      const q = (arr, f) => arr[Math.min(arr.length - 1, Math.floor(arr.length * f))]
+      const ansLens = cases.map((c) => c.answerLen).sort((a, b) => a - b)
+      const allLens = entries.map((e) => e.body.length).sort((a, b) => a - b)
+      const ratios = cases.map((c) => c.lengthRatio).sort((a, b) => a - b)
+      const ansMed = q(ansLens, 0.5)
+      const allMed = q(allLens, 0.5) || 1
+      console.log(
+        `  [长度] 答案正文中位 ${ansMed} 字符 vs 全库 ${allMed}（比值 ${(ansMed / allMed).toFixed(2)}×；旧集是 1.53×）；` +
+          `答案/竞争者中位比 p10 ${q(ratios, 0.1)} / 中位 ${q(ratios, 0.5)} / p90 ${q(ratios, 0.9)}`,
+      )
+      console.log(
+        `  [长度] 长答案子集（比值 > 1.5，归一的用武之地）${cases.filter((c) => c.lengthRatio > 1.5).length} 条；` +
+          `短答案子集（比值 < 0.7，归一的代价区）${cases.filter((c) => c.lengthRatio < 0.7).length} 条`,
+      )
+    }
   }
   return cases
 }
@@ -297,4 +348,29 @@ export function corpusFingerprint(entries) {
  */
 export function splitOf(id) {
   return Number.parseInt(id.slice(0, 2), 16) % 2 === 0 ? 'tune' : 'holdout'
+}
+
+/**
+ * 长度区：按 `lengthRatio`（答案正文 / 竞争者正文中位）把 case 分到五个**作用面**上。
+ *
+ * 为什么必须分而不是筛：长度归一的效应是**分层的**且符号会翻转——
+ *   - `far-short` / `short`：答案短 ⇒ 归一给它提权（收益区）
+ *   - `fair`：长度不再是决定性因素 ⇒ 这一区测的是**纯排序能力**
+ *   - `long` / `far-long`：答案长 ⇒ 归一压它（代价区）
+ * 若只保留 `fair`，仪器就只测得到「排序能力」，**测不到归一值不值**（实测：长答案子集被砍成 0 条）。
+ * 若只保留收益区，读数会系统性偏袒归一。
+ * ⇒ 正确做法是**每区都有配额**，然后在报告里分区读——总体数字会把两个方向的效应抵消成零。
+ */
+export const LENGTH_ZONES = [
+  { name: 'far-short', lo: 0, hi: 0.4 },
+  { name: 'short', lo: 0.4, hi: 0.7 },
+  { name: 'fair', lo: 0.7, hi: 1.2 },
+  { name: 'long', lo: 1.2, hi: 1.5 },
+  { name: 'far-long', lo: 1.5, hi: Number.POSITIVE_INFINITY },
+]
+
+/** 判定一个 `lengthRatio` 落在哪个区（永远有返回值：区间覆盖 [0, ∞)） */
+export function zoneOf(ratio) {
+  for (const z of LENGTH_ZONES) if (ratio >= z.lo && ratio < z.hi) return z.name
+  return 'far-long'
 }
