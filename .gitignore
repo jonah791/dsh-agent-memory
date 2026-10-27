@@ -3,3 +3,6 @@ lib
 
 *.bak
 *.bak-*
+
+# 评测数据留在 <DSH_HOME>/recall-eval（含语料 token），不进公开仓；脚本在仓里
+ tests/recall-eval/*.json
