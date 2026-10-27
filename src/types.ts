@@ -353,6 +353,25 @@ export interface WeightedTerm {
   weight: number
 }
 
+/**
+ * 检索打分参数（2026-10-27 · 供评测扫参，生产调用**不传**即用默认值）。
+ *
+ * **为什么把常量变成可注入**：这三项此前都是我拍的数（`k1=1.2` / `b=0.75` / `floor=0.05`），
+ * 没有任何权威真源 ⇒ 按「能推导就别硬编码」的纪律，它们**本来就该可调**。
+ * 有了零标注评测集（`tests/recall-eval/`）之后才能**扫**：在 tune 集上选参数，
+ * 留出集只跑一次验收（样本外纪律）。
+ *
+ * ⚠ 生产路径（`tools.ts` 的 `recall` 工具）**不传本对象** ⇒ 行为与不参数化时逐位一致。
+ */
+export interface RecallTuning {
+  /** BM25 饱和参数 k1。0 = 关掉饱和项（公式自动退化为恒 1，不需特判） */
+  k1?: number
+  /** BM25 长度权重 b。0 = 不按长度归一；1 = 完全归一（同样自然退化为恒 1） */
+  b?: number
+  /** 相对分门槛：保留 `score ≥ top1 × 本值`。0 = 关闭（不砍长尾） */
+  relativeFloor?: number
+}
+
 /** 检索查询 */
 export interface RecallQuery {
   query?: string
@@ -421,6 +440,11 @@ export interface RecallQuery {
    * 故本项**只在 `includeArchive=true` 时有实际效果**（实测：活跃概要 + 活跃原料同源对 = 0）。
    */
   collapseFamily?: boolean
+  /**
+   * 打分参数覆盖（2026-10-27）：**只给评测/消融用**，生产路径不传。
+   * 不传时逐项回退 `BM25_K1=1.2` / `BM25_B=0.75` / `RECALL_RELATIVE_FLOOR=0.05`。
+   */
+  tuning?: RecallTuning
 }
 
 /** 检索结果项 */

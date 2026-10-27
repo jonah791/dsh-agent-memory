@@ -34,16 +34,20 @@ const verbose = process.argv.includes('--verbose')
 
 const { recallEntries } = await loadSearch()
 const set = JSON.parse(readFileSync(setPath, 'utf8'))
-const entries = loadCorpus(set.db ?? DEFAULT_DB)
+// ⚠ 优先用评测集自带的**语料快照**：尺子必须是冻结的（理由见 build-eval-set.mjs 的注释）。
+//   否则每写一条新记忆语料指纹就变、评测集作废、跨天读数不可比，而扫参期间不可能不写记忆。
+//   只有旧版评测集（无快照）才回落到读当前库——那时语料指纹不符就拒绝跑。
+const useSnapshot = Array.isArray(set.corpusSnapshot) && set.corpusSnapshot.length > 0
+const entries = useSnapshot ? set.corpusSnapshot : loadCorpus(set.db ?? DEFAULT_DB)
+const corpusSource = useSnapshot ? '评测集自带快照（冻结）' : '当前库（⚠ 非冻结，读数只在当天有效）'
 
-// ---- 尺子自检：评测集是对着哪份语料生成的？语料变了读数就不能跨天比 ----
 const fp = corpusFingerprint(entries)
 if (set.corpus?.digest !== fp.digest) {
   console.error(
-    `✖ 语料已变：评测集生成于 ${set.corpus?.count} 条（指纹 ${set.corpus?.digest}），` +
-      `当前 ${fp.count} 条（指纹 ${fp.digest}）`,
+    `✖ 语料指纹不符：评测集记录 ${set.corpus?.count} 条（${set.corpus?.digest}），` +
+      `实测 ${fp.count} 条（${fp.digest}）`,
   )
-  console.error('  ⇒ 先重建评测集（build-eval-set.mjs），否则这次读数与之前的不是同一把尺子。')
+  console.error('  ⇒ 重建评测集（build-eval-set.mjs），否则这次读数与之前的不是同一把尺子。')
   process.exit(2)
 }
 
@@ -101,7 +105,7 @@ const fmt = (m) =>
 
 console.log('\n════ 检索评测 ════')
 console.log(`评测集   : ${setPath}（生成于 ${set.generatedAt}）`)
-console.log(`语料     : ${fp.count} 条（指纹 ${fp.digest}，与评测集一致 ✓）`)
+console.log(`语料     : ${fp.count} 条（指纹 ${fp.digest} ✓）— ${corpusSource}`)
 console.log(`跑完     : ${cases.length} case / ${elapsed} 秒（split=${splitFilter}）`)
 
 console.log('\n── 总体 ──')

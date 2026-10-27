@@ -113,7 +113,11 @@ if (multi !== cases.length) {
 }
 console.log(`耗时      : ${((Date.now() - t0) / 1000).toFixed(1)} 秒`)
 
-const payload = { generatedAt: new Date().toISOString(), db: dbPath, corpus: fp, perType, cases }
+// ⚠ 评测集**自带语料快照**（2026-10-27 补）：这是「同一把尺子」的正确实现——
+//   否则每写一条新记忆，语料指纹就变、评测集作废、跨天读数不可比，而扫参期间
+//   又不可能不写记忆。快照让评测跑在**冻结语料**上，与当天的真实库脱钩。
+//   ⚠ 代价：文件变成数 MB（含全部正文）。写盘用无缩进 JSON。
+const payload = { generatedAt: new Date().toISOString(), db: dbPath, corpus: fp, perType, cases, corpusSnapshot: entries }
 if (dry) {
   console.log('\n(--dry) 未写盘。样例前 6 条：')
   for (const c of cases.slice(0, 6)) {

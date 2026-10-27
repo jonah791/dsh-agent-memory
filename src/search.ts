@@ -10,7 +10,7 @@
  * ISO 字符串字典序即时间序；纯日期输入按日界归一化。
  */
 
-import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RelatedItem, TimelineLevel, WeightedTerm } from './types.ts'
+import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RecallTuning, RelatedItem, TimelineLevel, WeightedTerm } from './types.ts'
 import { collapseFamilies, renderFamilyNote } from './family.ts'
 
 /** 检索默认截断条数（未显式给 limit 时） */
@@ -342,6 +342,8 @@ export function relateClosure(
  */
 export function recallEntries(entries: Entry[], query: RecallQuery = {}): RecallResult {
   const filtered = filterEntries(entries, query)
+  // 打分参数（2026-10-27）：生产调用不传 ⇒ 全部回退默认值，行为与不参数化时逐位一致
+  const tuning = resolveTuning(query.tuning)
   // v0.7：给了上下文重心就按权重打分；否则退回原路径（query 字符串 + 等权词项）
   const weighted = query.weightedTerms !== undefined && query.weightedTerms.length > 0
     ? query.weightedTerms
@@ -365,8 +367,8 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   let scored = filtered.map((entry) => ({
     entry,
     score: weighted !== undefined
-      ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen)
-      : scoreEntry(entry, tokens, idf, avgBodyLen),
+      ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen, tuning)
+      : scoreEntry(entry, tokens, idf, avgBodyLen, tuning),
   }))
   // 带查询时剔除零分条目（无关内容不进结果）；无查询词时全量按新鲜度排序
   if (hasQuery) scored = scored.filter(({ score }) => score > 0)
@@ -389,11 +391,11 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   // 不负责相关性过滤——旧实现里它是唯一的"减法"，于是 190 条全算命中）。
   // ⚠ 语义变化：`total` 从此报「过门槛的相关条目数」而非「有分条目数」。
   // 旧口径会把「只因一个 bigram 偶然命中」的条算成命中，对读者是误导。
-  if (hasQuery && scored.length > 1) {
+  if (hasQuery && scored.length > 1 && tuning.relativeFloor > 0) {
     // `scored[0]` 在 noUncheckedIndexedAccess 下是 `T | undefined`（长度已判 >1，用可选链收口）
     const top = scored[0]?.score ?? 0
     if (top > 0) {
-      const floor = top * RECALL_RELATIVE_FLOOR
+      const floor = top * tuning.relativeFloor
       scored = scored.filter(({ score }) => score >= floor)
     }
   }
@@ -519,10 +521,33 @@ function cjkBigrams(token: string): string[] {
  */
 const BM25_K1 = 1.2
 const BM25_B = 0.75
-function bodyLengthNorm(bodyLen: number, avgBodyLen: number): number {
+
+/** 已解析的打分参数（默认值 + 调用方覆盖） */
+interface ResolvedTuning {
+  k1: number
+  b: number
+  relativeFloor: number
+}
+
+/**
+ * 解析打分参数（2026-10-27 参数化，供 `tests/recall-eval/` 扫参与消融）。
+ *
+ * ⚠ 必须用 `??` 不能用 `||`：`k1=0` / `b=0` / `relativeFloor=0` 都是**合法且有意义的取值**
+ * （= 关掉该项）。用 `||` 会把 0 当作「没给」而静默回退默认值 ⇒ 消融臂变成假读数，
+ * 而且看不出来（「关了」与「没关」跑出同一个数）。
+ */
+function resolveTuning(tuning?: RecallTuning): ResolvedTuning {
+  return {
+    k1: tuning?.k1 ?? BM25_K1,
+    b: tuning?.b ?? BM25_B,
+    relativeFloor: tuning?.relativeFloor ?? RECALL_RELATIVE_FLOOR,
+  }
+}
+
+function bodyLengthNorm(bodyLen: number, avgBodyLen: number, tuning: ResolvedTuning): number {
   if (avgBodyLen <= 0) return 1
-  const denom = 1 + BM25_K1 * (1 - BM25_B + BM25_B * (bodyLen / avgBodyLen))
-  return (BM25_K1 + 1) / denom
+  const denom = 1 + tuning.k1 * (1 - tuning.b + tuning.b * (bodyLen / avgBodyLen))
+  return (tuning.k1 + 1) / denom
 }
 
 /**
@@ -534,10 +559,10 @@ function bodyLengthNorm(bodyLen: number, avgBodyLen: number): number {
  * @param idf - token → IDF；缺项回退 1（等权，与原行为一致，避免静默变差）
  * @param avgBodyLen - 候选集正文平均长度（用于 BM25 归一化）
  */
-function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>, avgBodyLen: number): number {
+function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning): number {
   if (tokens.length === 0) return 0
   const view = lowerOf(entry)
-  const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen)
+  const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen, tuning)
   let score = 0
   for (const token of tokens) {
     const w = idf.get(token) ?? 1
@@ -556,10 +581,10 @@ function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, num
  * `IDF × 重心权重 × (标签 3 / 标题 2 / 正文 1×lenNorm)`。
  * 与 `scoreEntry` 同构，只是词项带重心权重——这样「话题重心」比「最后一个词」更有话语权。
  */
-function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>, avgBodyLen: number): number {
+function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning): number {
   if (terms.length === 0) return 0
   const view = lowerOf(entry)
-  const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen)
+  const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen, tuning)
   let score = 0
   for (const { term, weight } of terms) {
     const token = term.toLowerCase()
