@@ -108,6 +108,15 @@ export interface Entry {
    * 「不做向量语义检索 ⇒ 写入质量是唯一路线」）。
    */
   aliases?: string[]
+  /**
+   * 情境形状（v0.16.0，2026-10-21）：这条经验**在什么形状的情境下该被取出使用**。
+   *
+   * 与 `aliases` 的分工：aliases 面向**词面失配**（我会用什么词来找），cue 面向**场景失配**
+   * （什么样的处境该用它）。检索时同权参与打分——两者都是人工给的入口，只是防的失配不同。
+   * 论文依据：Harness² 的 experience `cue`（arXiv:2610.14224 §H Prompt 6）——写「情境的形状」
+   * 而不是本次任务的事实，才能在另一件事上触发。
+   */
+  cue?: string[]
   /** global 或 workspaceId */
   scope: 'global' | string
   createdAt: string
@@ -440,6 +449,8 @@ export interface RecallResultItem {
   reviewAfter?: string
   /** 时效维（v0.15.0；仅当条目设了时出现在结果里）——观察条件（在等什么新信息） */
   watchFor?: string[]
+  /** 情境形状（v0.16.0；仅当条目设了时出现在结果里）——什么处境的「形状」该用这条经验 */
+  cue?: string[]
   /** 联想层（v0.3）：相关条目链（共享标签/标题/正文关联），关联强度降序 */
   related?: RelatedItem[]
 }

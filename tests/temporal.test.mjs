@@ -20,7 +20,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryStore } from '../lib/store.js'
-import { createMemoryTools } from '../lib/tools.js'
+import { DIMENSION_ITEM_FIELDS, createMemoryTools } from '../lib/tools.js'
 import { workspaceIdOf } from '../lib/scope.js'
 import { entrySchema } from '../lib/index.js'
 import {
@@ -29,6 +29,7 @@ import {
   STALENESS_LEVELS,
   UNTRACKED_STALENESS,
   countByStaleness,
+  cueTag,
   daysUntil,
   filterByStaleness,
   normalizeReviewAfter,
@@ -241,6 +242,19 @@ test('A109b watchForTag：空/未给/全空白 ⇒ 空串；有值时列出全�
   assert.equal(watchForTag(['条件 A', '条件 B']), '⚠观察条件：条件 A / 条件 B')
 })
 
+test('A109c cueTag（v0.16.0）：空/未给/全空白/脏值 ⇒ 空串；有值时列出全部情境形状', () => {
+  assert.equal(cueTag(undefined), '')
+  assert.equal(cueTag([]), '')
+  // 脏值域：cue 从存储层来（可被手改坏），渲染层不得因脏值抛错——抛错会连累整条 recall 渲染
+  assert.equal(cueTag('不是数组'), '', '非数组必须留空而不是抛错')
+  assert.equal(cueTag([1, null, true]), '', '非字符串项必须被过滤')
+  assert.equal(cueTag(['  ', '']), '')
+  assert.equal(
+    cueTag(['仪器要执行若干顺序动作', '其中一个会终止行动者自身的权限']),
+    '◎适用处境：仪器要执行若干顺序动作 / 其中一个会终止行动者自身的权限',
+  )
+})
+
 // ---------- A110 日粒度 ----------
 
 test('A110 daysUntil：UTC 日粒度（今天 0 / 明天 1 / 昨天 -1；同一天任何时刻都相同）', () => {
@@ -327,18 +341,45 @@ test('A113 写路径：remember 落字段（绝对日期）；不带则无键；
   assert.equal(store.list(WID).length, before, '整笔拒绝：非法死线不得留下半条记录')
 })
 
-test('A113b ★写入边界 schema：新字段**不得被静默剥掉**（真 parse，不是 grep 源码）', () => {
+test('A113b ★写入边界 schema：维度字段**不得被静默剥掉**（真 parse，不是 grep 源码）', () => {
   const base = {
     id: 'x', kind: 'knowledge', title: 't', body: 'b', tags: [], scope: 'global',
     createdAt: '2026-10-14T00:00:00.000Z', updatedAt: '2026-10-14T00:00:00.000Z',
     accessedAt: '2026-10-14T00:00:00.000Z', level: null, bucket: null, archived: false,
   }
-  const parsed = entrySchema.parse({ ...base, reviewAfter: '2026-11-01', watchFor: ['条件 A'] })
-  assert.equal(parsed.reviewAfter, '2026-11-01', 'reviewAfter 必须存活（未声明会被 storage-domain 静默剥掉）')
-  assert.deepEqual(parsed.watchFor, ['条件 A'], 'watchFor 必须存活')
-  // 对照组：不带也合法（可选字段，不是必填）
+  // ⚠ 从**真源**遍历键，不在测试里枚举字段名：本节原先硬编码 reviewAfter / watchFor 两个，
+  //   v0.16.0 加 `cue` 时它**静默漏掉了新字段**（与 schema-parity A117 的夹具同一形状的失效：
+  //   枚举式守卫在命名空间扩张时静默失效）。按常量自己声明的类型造样例值 ⇒ 新增维度字段自动覆盖。
+  const sampleOf = (schema) => {
+    if (schema.type === 'string') return schema.enum ? schema.enum[0] : '样例'
+    if (schema.type === 'array') return ['样例']
+    throw new Error(`样例生成器不认识维度字段类型「${schema.type}」——新增类型时须先扩这里，不许静默返回 undefined`)
+  }
+  const dims = Object.fromEntries(Object.entries(DIMENSION_ITEM_FIELDS).map(([k, s]) => [k, sampleOf(s)]))
+  assert.ok(Object.keys(dims).length > 0, '前提：维度常量不得为空（否则本测试恒真）')
+
+  const parsed = entrySchema.parse({ ...base, ...dims })
+  for (const [k, v] of Object.entries(dims)) {
+    assert.deepEqual(
+      parsed[k],
+      v,
+      `${k} 必须存活（entrySchema 未声明它 ⇒ storage-domain 写入边界会静默剥掉，而写入**仍返回成功**）`,
+    )
+  }
+  // 对照组：不带也合法（可选字段，不是必填），且不得被填默认值（「没标」与「标了」必须可区分）
   const bare = entrySchema.parse(base)
-  assert.equal(bare.reviewAfter, undefined)
+  for (const k of Object.keys(DIMENSION_ITEM_FIELDS)) {
+    assert.equal(bare[k], undefined, `${k} 是可选字段，不带时不得被填默认值`)
+  }
+  // ★ 判据自证：未声明的字段**确实**会被剥掉——否则上面那循环恒真
+  //   （「存活」就只是「没被剥」的另一种说法，而剥字段的机制可能压根没被走到：
+  //    zod 若被改成 .passthrough()，A113b 会变成永远绿的假守卫）。
+  const stripped = entrySchema.parse({ ...base, __not_declared_dimension__: 'x' })
+  assert.equal(
+    '__not_declared_dimension__' in stripped,
+    false,
+    '未声明字段必须被剥掉——否则本判据恒真（剥字段的机制没被走到）',
+  )
 })
 
 // ---------- A114 端到端 ----------

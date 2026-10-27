@@ -338,6 +338,24 @@ export function watchForTag(watchFor: unknown): string {
   return `⚠观察条件：${items.join(' / ')}`
 }
 
+/**
+ * 渲染「情境形状」（v0.16.0）——与 `watchForTag` 同形，回答的是另一件事。
+ *
+ * `aliases` 决定**能不能被找到**，`cue` 决定**找到之后我会不会意识到「这就是它适用的处境」**。
+ * 两者都印出来，命中那一刻我同时看见「它会怎么被问」与「什么处境该用它」——
+ * 论文依据（Harness² 的 experience cue，arXiv:2610.14224 §H Prompt 6）：cue 写的是情境的
+ * **形状**，因而能在另一件事上触发。
+ *
+ * @param cue - 条目的 cue 字段（未知形状，运行时校验）
+ * @returns 渲染行；空/无 ⇒ 空串（调用方据此跳过）
+ */
+export function cueTag(cue: unknown): string {
+  if (!Array.isArray(cue) || cue.length === 0) return ''
+  const items = cue.filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+  if (items.length === 0) return ''
+  return `◎适用处境：${items.join(' / ')}`
+}
+
 /** 有效期计数（memory_stats / 体检用）：三档 + 未设死线 */
 export function countByStaleness(
   entries: readonly TemporalCarrier[],

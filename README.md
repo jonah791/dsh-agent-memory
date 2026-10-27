@@ -11,10 +11,10 @@
 # dsh-agent-memory
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.11.6-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.17.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-257%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-337%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：给 DSH 里的 agent 装上**跨会话的长期记忆**——把「经历过的事」结构化写入持久层，再在恰当的时机（会话启动、每条主人消息、时间桶结束、会话压缩完成）把它带回上下文，并允许 agent 检索、修订、归档、沿关系行走。
@@ -28,7 +28,7 @@
 | 工具 | 用途 |
 |------|------|
 | `remember` | 写入/覆盖/合并。L1 `fact` 带 `key`（同 scope+key 精确覆盖）；L2 `knowledge` / L3 `episodic` 同标题自动合并（标签并集 + 正文追加）；未命中则新建。受 `max_entries` 守卫（**仅拦新建**） |
-| `recall` | 检索：关键词/层级/标签/时间过滤，相关度（标签 3 > 标题 2 > 正文 1）+ 新鲜度排序；每个结果附 `related` 关联链；结果标注来源 scope 与压缩层级。**v0.5：受角色视野约束**（见「角色视野」），可用 `role` 参数切换视角 |
+| `recall` | 检索：关键词/层级/标签/时间过滤，相关度（标签 3 > 标题 2 > 正文 1，**v0.17 起每项再乘 BM25 文档长度归一** `k1=1.2 / b=0.75`）+ 新鲜度排序；**v0.17 相对门槛**：分数低于本轮最高分 5% 的一律截掉 ⇒ `total` 报的是「够相关」的条数，不再是「沾到任一词」的条数。每个结果附 `related` 关联链；结果标注来源 scope 与压缩层级。**v0.5：受角色视野约束**（见「角色视野」），可用 `role` 参数切换视角 |
 | `memory_relate` | 联想导航：按 id 展开关联网络；`depth>1` 走 BFS 多跳记忆社区（`hop` 标注层级、visited 防环、每跳 `limit` 扇出） |
 | `memory_browse` | 时间金字塔浏览（年/月/周/日分桶 + 层级/标签/时间过滤 + 分页）。与 `recall` 互补——「不知道有什么」时的发现路径 |
 | `update` | 按 id 修订。**v0.9 三模式**：`replace`（缺省·`text` 首行作标题、全文作正文）/ `append`（追加到正文末尾）/ `patch`（`find`→`replace`，**要求唯一命中**，0 处或多处一律拒绝）——内容真变即落**修订快照**（`revisions`，保留最近 3 条，改错可回溯）；`tags` 整体替换 |
@@ -196,7 +196,7 @@ console.log("⑤更新时刻",new Date(require("node:fs").statSync(process.env.D
 
 ### 检索面体检器：`scripts/audit-retrieval.mjs`（2026-10-10 建）
 
-**为什么有它**：`recall` 的打分是「标签 3 / 标题 2 / 正文 1 × IDF」，另有一道**泛词门**（`df ≥ 50 且 df/N > 0.1` 的词被清零）。这道门会与**最该被问到的对象反相关**——实测 `插件`(510 次) / `技能`(395) / `教训`(366) / `任务板`(246) **全部返回「命中 0 条」**。v0.12 起空结果会**自报**被谁挡了（`suppressedTerms`，仅在空路径上报）；本脚本是它的**离线批量版**：不依赖会话、绝不改数据、可跨语料复算。
+**为什么有它**：`recall` 的打分是「标签 3 / 标题 2 / 正文 1 × IDF」，v0.17 起每项再乘 **BM25 文档长度归一**（`k1=1.2 / b=0.75`：正文等于全库均值时系数恰为 1，短条目被放大、长条目被压回去），另有一道**泛词门**（`df ≥ 50 且 df/N > 0.1` 的词被清零），以及一道**相对分门槛**（低于本轮最高分 5% 的截掉）。这道门会与**最该被问到的对象反相关**——实测 `插件`(510 次) / `技能`(395) / `教训`(366) / `任务板`(246) **全部返回「命中 0 条」**。v0.12 起空结果会**自报**被谁挡了（`suppressedTerms`，仅在空路径上报）；本脚本是它的**离线批量版**：不依赖会话、绝不改数据、可跨语料复算。
 
 ```bash
 node scripts/audit-retrieval.mjs [gate|ablation|inject|all|timing]
@@ -234,6 +234,8 @@ npm test          # = tsc -p tsconfig.json && node --test "tests/*.test.mjs"
 npm run test:ts   # = tsc && node --test "tests/*.test.ts"   （需 node ≥ 24）
 npm run test:all  # = 两套一起
 ```
+
+**实测（2026-10-27，v0.17.0）：`node --test tests/*.test.mjs` → `# tests 337 / # pass 337 / # fail 0`**（同一构建含 recall v0.17 的 BM25 长度归一 + 相对分门槛，与 v0.16.0 `cue` 维度的接线）。本轮补的三处守卫：`A109c`（`cueTag` 的脏值域：非数组 / 非字符串项 ⇒ 空串，**不许抛错**——抛错会连累整条 `recall` 渲染）· `A113b`（改写为**从 `DIMENSION_ITEM_FIELDS` 真源遍历**：它原先硬编码 `reviewAfter` / `watchFor` 两个字段，v0.16 加 `cue` 时**静默漏掉了新字段**，并新增「未声明字段确实会被剥掉」的判据自证，防止它退化成恒真的假守卫）· `A119`（render 打出「◎适用处境」）。
 
 **实测（2026-10-10，v0.11.6）：`npm test` → `# tests 228 / # pass 228 / # fail 0`** —— 本轮为「空结果自证」新增 2 条判据，含**尸体样本**：喂一个真不存在的词 ⇒ 必须 0 条 **且不携带** `suppressedTerms`（证明该字段真的区分了「被门挡掉」与「真的没有」，而不是恒为空）。
 

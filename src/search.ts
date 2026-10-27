@@ -21,11 +21,25 @@ const SCORE_TAG = 3
 const SCORE_TITLE = 2
 const SCORE_BODY = 1
 
+/**
+ * 相对分数门槛（v0.17，2026-10-27）：排序后只保留 `score ≥ topScore × 本值` 的条目。
+ *
+ * **动机（基线实测）**：旧实现只剔 `score > 0` ⇒ 「因单个 bigram 偶然命中」的尾巴全留下：
+ * 查「读过 不代表 做出 改进 提交 修 报告」→ **140 条**，而第 2 名只有 top1 的 **16%**（26.46 / 162.83）；
+ * 查「相关度算法 IDF 泛词门 最低分门 recall 检索」→ **190 条**，第 3 名只有 top1 的 **17%**。
+ *
+ * **为什么取 0.05 而不是 0.2**（这是有读数的取舍，不是拍脑袋）：
+ * 0.2 会把「检索路线：明确排除向量语义检索（主人 2026-10-13 20:59 定调）」砍掉
+ * —— 实测 34.48 / 264.15 = **0.13**，而那条是**绝不能误杀**的定调类条目。
+ * ⇒ 门槛的职责只是砍掉明显无关的长尾，主刀是 `bodyLengthNorm`（长度归一化）。
+ */
+const RECALL_RELATIVE_FLOOR = 0.05
+
 /** 条目的小写视图（检索全程复用的小写缓存实体） */
 interface LowerView {
   title: string
   tags: string[]
-  /** 检索别名的小写视图（与 tags 同级参与打分，2026-10-13 重做） */
+  /** 检索入口的小写视图：`aliases`（词面）**与 `cue`（情境形状）合并**——与 tags 同级打分 */
   aliases: string[]
   body: string
 }
@@ -53,11 +67,28 @@ function lowerOf(entry: Entry): LowerView {
   const view: LowerView = {
     title: entry.title.toLowerCase(),
     tags: entry.tags.map((tag) => tag.toLowerCase()),
-    aliases: (entry.aliases ?? []).map((alias) => alias.toLowerCase()),
+    // cue（情境形状，v0.16.0）与 aliases（检索别名）**同级**：两者都是人工给的检索入口，
+    // 只是防的失配不同（词面失配 vs 场景失配）。合进同一个数组 ⇒ 所有打分点自动覆盖，
+    // 不必在每个 `view.aliases.some(...)` 处各加一行（那正是最容易漏一处的地方）。
+    aliases: [...(entry.aliases ?? []), ...(entry.cue ?? [])].map((s) => s.toLowerCase()),
     body: entry.body.toLowerCase(),
   }
   lowerCache.set(entry, view)
   return view
+}
+
+/**
+ * 检索入口词的**单一来源**：`aliases`（词面失配）+ `cue`（情境形状失配）。
+ *
+ * ⚠ 三处消费者（`gramIndexOf` 的 titleGrams 与 title 兜底字段、`targetGramsOf`）必须**都走本函数**。
+ * 两侧范围不一致会出现「自己查自己查不到」（见 `targetGramsOf` 的同源纪律）——
+ * 用一个函数而不是三处各写一遍，是因为后者正是会漏一处的形状。
+ *
+ * @param entry - 记忆条目
+ * @returns 全部检索入口词（保持原序，不去重——去重由调用方按需做）
+ */
+function entryEntryWords(entry: Entry): string[] {
+  return [...(entry.aliases ?? []), ...(entry.cue ?? [])]
 }
 
 /**
@@ -181,14 +212,15 @@ function gramIndexOf(entry: Entry): GramIndex {
   // 拼接会在接缝处产生跨边界假 gram（如「手册」+「服务」→「册服」）。
   const title = entry.title
   const body = cleanForGram(entry.body)
+  const words = entryEntryWords(entry)
   const titleGrams = gramSetOf(cleanForGram(title))
-  for (const alias of entry.aliases ?? []) {
-    for (const g of gramSetOf(cleanForGram(alias))) titleGrams.add(g)
+  for (const word of words) {
+    for (const g of gramSetOf(cleanForGram(word))) titleGrams.add(g)
   }
   // `title` 字段供 |g|===1 的退化分支 `includes` 兜底——它必须覆盖与 gram 相同的文本范围，
   // 否则「单字符别名」在兜底分支里查不到（grams 并集含别名、纯 includes 不含 ⇒ 不一致）。
   const idx: GramIndex = {
-    title: cleanForGram([title, ...(entry.aliases ?? [])].join(' ')),
+    title: cleanForGram([title, ...words].join(' ')),
     body,
     titleGrams,
     bodyGrams: gramSetOf(body),
@@ -209,8 +241,8 @@ function gramIndexOf(entry: Entry): GramIndex {
  */
 function targetGramsOf(entry: Entry): string[] {
   const out = ngrams(entry.title)
-  for (const alias of entry.aliases ?? []) {
-    for (const g of ngrams(alias)) if (!out.includes(g)) out.push(g)
+  for (const word of entryEntryWords(entry)) {
+    for (const g of ngrams(word)) if (!out.includes(g)) out.push(g)
   }
   return out
 }
@@ -325,9 +357,16 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   const suppressedTerms = hasQuery
     ? [...new Set(idfTokens.map((t) => t.toLowerCase()).filter((t) => idf.get(t) === 0))]
     : []
+  // v0.17：候选集正文平均长度（BM25 长度归一化的基准）。与 IDF 同域——在**过滤后**的
+  // 候选集上算，比较基准即本次检索范围（不用全库均值，否则跨 scope 检索会失真）。
+  const avgBodyLen = filtered.length > 0
+    ? filtered.reduce((sum, entry) => sum + entry.body.length, 0) / filtered.length
+    : 0
   let scored = filtered.map((entry) => ({
     entry,
-    score: weighted !== undefined ? scoreEntryWeighted(entry, weighted, idf) : scoreEntry(entry, tokens, idf),
+    score: weighted !== undefined
+      ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen)
+      : scoreEntry(entry, tokens, idf, avgBodyLen),
   }))
   // 带查询时剔除零分条目（无关内容不进结果）；无查询词时全量按新鲜度排序
   if (hasQuery) scored = scored.filter(({ score }) => score > 0)
@@ -345,6 +384,19 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
     // 原实现相等时返回 -1，违反比较器契约，导致全等条目顺序被打乱
     return 0
   })
+  // v0.17 相对分数门槛：只保留 `score ≥ topScore × RECALL_RELATIVE_FLOOR`。
+  // 施加位置有讲究：**排序之后**（要先知道 topScore）、**截断之前**（limit 只负责显示条数，
+  // 不负责相关性过滤——旧实现里它是唯一的"减法"，于是 190 条全算命中）。
+  // ⚠ 语义变化：`total` 从此报「过门槛的相关条目数」而非「有分条目数」。
+  // 旧口径会把「只因一个 bigram 偶然命中」的条算成命中，对读者是误导。
+  if (hasQuery && scored.length > 1) {
+    // `scored[0]` 在 noUncheckedIndexedAccess 下是 `T | undefined`（长度已判 >1，用可选链收口）
+    const top = scored[0]?.score ?? 0
+    if (top > 0) {
+      const floor = top * RECALL_RELATIVE_FLOOR
+      scored = scored.filter(({ score }) => score >= floor)
+    }
+  }
   const limit = query.limit === undefined ? DEFAULT_RECALL_LIMIT : Math.max(0, Math.floor(query.limit))
   const includeArchive = query.includeArchive ?? false
   // 联想层开关（2026-10-13）：缺省 true 保持原行为；false 时**完全跳过** relatedOf
@@ -449,9 +501,43 @@ function cjkBigrams(token: string): string[] {
  * @param tokens - 查询词项（小写）
  * @param idf - token → IDF；缺项回退 1（等权，与原行为一致，避免静默变差）
  */
-function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>): number {
+/**
+ * BM25 文档长度归一化（k1=1.2，b=0.75 为通行缺省）。
+ *
+ * **为什么需要（2026-10-27 基线实测）**：旧实现对正文命中给固定 `+1 × IDF`，**与正文长度无关**，
+ * 而长正文命中概率天然更高（覆盖更多 bigram）⇒ 长条目系统性占优。
+ * 全库读数：正文长度 **中位 1203 / 均值 2159 / 最大 83885**，**19 条**超 2 万字符。
+ * 直接后果：查「读过不代表改进」时那个 10 万字符的 checkpoint 容器（`5501b489`）挤进前 4；
+ * 查「compaction-sink」时 6 条无关条目因正文偶然含该词而**同分并列**（全部 `5.060218`）。
+ *
+ * **性质**：`bodyLen === avgBodyLen` 时系数**恰好为 1**（分母 = 1 + k1×(1−b+b) = 1 + k1，分子 = k1+1）
+ * ⇒ 不改动"典型长度条目"的相对地位，只压长条目、略微抬短条目。
+ * 实测比值：短(0.5×均值) **1.257** / 典型 **1.0** / 长(10×均值) **0.214** ⇒ 长短比约 **5.9 倍**。
+ *
+ * @param bodyLen - 该条目正文长度
+ * @param avgBodyLen - 本次候选集的正文平均长度；≤0 时退化为 1（不归一化，保护空集/夹具）
+ */
+const BM25_K1 = 1.2
+const BM25_B = 0.75
+function bodyLengthNorm(bodyLen: number, avgBodyLen: number): number {
+  if (avgBodyLen <= 0) return 1
+  const denom = 1 + BM25_K1 * (1 - BM25_B + BM25_B * (bodyLen / avgBodyLen))
+  return (BM25_K1 + 1) / denom
+}
+
+/**
+ * 打分：逐词累加——标签/别名子串命中 +3，标题 +2，正文 +1×长度归一化，**再乘该词的 IDF**。
+ *
+ * v0.17（2026-10-27）：正文项乘 `bodyLengthNorm`（BM25 长度归一）——治长条目霸榜。
+ * @param entry - 候选条目
+ * @param tokens - 查询词项（小写）
+ * @param idf - token → IDF；缺项回退 1（等权，与原行为一致，避免静默变差）
+ * @param avgBodyLen - 候选集正文平均长度（用于 BM25 归一化）
+ */
+function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>, avgBodyLen: number): number {
   if (tokens.length === 0) return 0
   const view = lowerOf(entry)
+  const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen)
   let score = 0
   for (const token of tokens) {
     const w = idf.get(token) ?? 1
@@ -460,18 +546,20 @@ function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, num
     if (view.aliases.some((alias) => alias.includes(token))) score += SCORE_TAG * w
     if (view.tags.some((tag) => tag.includes(token))) score += SCORE_TAG * w
     if (view.title.includes(token)) score += SCORE_TITLE * w
-    if (view.body.includes(token)) score += SCORE_BODY * w
+    if (view.body.includes(token)) score += SCORE_BODY * w * lenNorm
   }
   return score
 }
 
 /**
- * 加权打分（v0.7 上下文重心 + v0.9 IDF）：逐词累加 `IDF × 重心权重 × (标签 3 / 标题 2 / 正文 1)`。
+ * 加权打分（v0.7 上下文重心 + v0.9 IDF + v0.17 长度归一）：逐词累加
+ * `IDF × 重心权重 × (标签 3 / 标题 2 / 正文 1×lenNorm)`。
  * 与 `scoreEntry` 同构，只是词项带重心权重——这样「话题重心」比「最后一个词」更有话语权。
  */
-function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>): number {
+function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>, avgBodyLen: number): number {
   if (terms.length === 0) return 0
   const view = lowerOf(entry)
+  const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen)
   let score = 0
   for (const { term, weight } of terms) {
     const token = term.toLowerCase()
@@ -479,7 +567,7 @@ function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: R
     if (view.aliases.some((alias) => alias.includes(token))) score += SCORE_TAG * w
     if (view.tags.some((tag) => tag.includes(token))) score += SCORE_TAG * w
     if (view.title.includes(token)) score += SCORE_TITLE * w
-    if (view.body.includes(token)) score += SCORE_BODY * w
+    if (view.body.includes(token)) score += SCORE_BODY * w * lenNorm
   }
   return Math.round(score * 1000) / 1000
 }
@@ -511,6 +599,7 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     // （今天算出的「3 天后」明天成了假读数）。档位由工具层按 now 现算。
     ...(entry.reviewAfter !== undefined ? { reviewAfter: entry.reviewAfter } : {}),
     ...(entry.watchFor !== undefined ? { watchFor: entry.watchFor } : {}),
+    ...(entry.cue !== undefined ? { cue: entry.cue } : {}),
   }
 }
 

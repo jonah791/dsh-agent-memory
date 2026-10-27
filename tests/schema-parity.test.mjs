@@ -30,7 +30,7 @@ import assert from 'node:assert/strict'
 import { MemoryStore } from '../lib/store.js'
 import { DIMENSION_ITEM_FIELDS, createMemoryTools } from '../lib/tools.js'
 import { workspaceIdOf } from '../lib/scope.js'
-import { stalenessTag, watchForTag } from '../lib/temporal.js'
+import { cueTag, stalenessTag, watchForTag } from '../lib/temporal.js'
 import { normalizeSubject, subjectTag } from '../lib/subject.js'
 
 // ---------- 测试基建（与 temporal.test.mjs 同形） ----------
@@ -98,6 +98,7 @@ async function seedFull(store) {
     grounding: 'proposed',
     reviewAfter: '2020-01-01',
     watchFor: ['某事件发生'],
+    cue: ['某处境形状'],
   })
 }
 
@@ -129,15 +130,19 @@ test('A117 ★ schema 一致性：execute 返回的每个键都被 output schema
   const { store, byName } = setup()
   await seedFull(store)
 
-  // ★ 夹具自证：先确认 4 个维度字段真的落盘了——否则「返回里没有该键」会让判据恒真。
+  // ★ 夹具自证：先确认**每个维度字段**真的落盘了——否则「返回里没有该键」会让 A117 对那个字段恒真。
   // 用 recall（其 schema 已知正确）当参照，而不是直接读 store（store 的返回形状不是契约面）。
+  // ⚠ 遍历**常量自己的键**，不在测试里枚举字段名：本行原先硬编码 ['subject','grounding',
+  //   'reviewAfter','watchFor']，v0.16.0 加 `cue` 时它**静默漏掉了新字段**——正是 A118 注释里
+  //   警告的「枚举式守卫在命名空间扩张时静默失效」。改成从真源出发，加字段自动被覆盖。
   const recallTool = byName.get('recall')
   const recallValue = await recallTool.execute({}, EXEC)
   assert.ok(recallValue.results.length > 0, '夹具没落盘条目')
-  for (const field of ['subject', 'grounding', 'reviewAfter', 'watchFor']) {
+  assert.ok(Object.keys(DIMENSION_ITEM_FIELDS).length > 0, '前提：维度常量不得为空（否则本循环恒真）')
+  for (const field of Object.keys(DIMENSION_ITEM_FIELDS)) {
     assert.ok(
       field in recallValue.results[0],
-      `夹具未落盘 ${field} ⇒ A117 对该字段恒真（无分辨力）。先修夹具。`,
+      `夹具未落盘 ${field} ⇒ A117 对该字段恒真（无分辨力）。先修夹具（seedFull 补该字段）。`,
     )
   }
 
@@ -219,7 +224,7 @@ test('A118 单一真源：recall 与 memory_browse 的 item schema 同源（差�
 
 // ---------- A119 memory_browse 的 render 维度标记 ----------
 
-test('A119 memory_browse 的 render 打出维度标记（过期 / 主体 / 观察条件）', async () => {
+test('A119 memory_browse 的 render 打出维度标记（过期 / 主体 / 观察条件 / 情境形状）', async () => {
   const { store, byName } = setup()
   await seedFull(store)
 
@@ -232,11 +237,14 @@ test('A119 memory_browse 的 render 打出维度标记（过期 / 主体 / 观�
   const expectStaleness = stalenessTag('2020-01-01', now)
   const expectSubject = subjectTag(normalizeSubject('self'))
   const expectWatch = watchForTag(['某事件发生'])
+  const expectCue = cueTag(['某处境形状'])
 
   assert.notEqual(expectStaleness, '', '前提：2020-01-01 必须落在需警觉档位（否则这条测试无分辨力）')
+  assert.notEqual(expectCue, '', '前提：cue 必须产出标记（否则下面那条断言恒真）')
   assert.ok(text.includes(expectStaleness), `render 缺时效标记（期望含「${expectStaleness}」）`)
   assert.ok(text.includes(expectSubject), `render 缺主体标记（期望含「${expectSubject}」）`)
   assert.ok(text.includes(expectWatch), `render 缺观察条件（期望含「${expectWatch}」）`)
+  assert.ok(text.includes(expectCue), `render 缺情境形状（期望含「${expectCue}」）`)
   // 条目本体仍在（标记不得把 id/标题挤掉）
   assert.match(text, /带全维度的条目\(id=/, 'render 必须仍打出标题与 id')
 })

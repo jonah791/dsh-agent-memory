@@ -44,6 +44,11 @@ export interface EntryDraft {
    * 写入时给出；命中已有条目（key 覆盖 / 标题合并）时的合并策略见 `remember` 内注释。
    */
   aliases?: string[]
+  /**
+   * 情境形状（v0.16.0）：这条经验**在什么形状的情境下该被取出**（与 aliases 同形：
+   * 新建时写入，命中已有条目时按下方合并策略处理）。
+   */
+  cue?: string[]
   /** global 或 workspaceId */
   scope: string
   level: TimelineLevel | null
@@ -96,6 +101,8 @@ export interface EntryPatch {
   tags?: string[]
   /** 检索别名整体替换（2026-10-13 重做；与 `tags` 同语义——给了就整体替换） */
   aliases?: string[]
+  /** 情境形状整体替换（v0.16.0；与 `aliases` 同语义——给了就整体替换） */
+  cue?: string[]
   /**
    * 修订留痕（v0.9）：由工具层算好的**完整** revisions 数组。
    * 存储层不实现截断策略（避免「谁算上限」两处各算——判据单一真源）。
@@ -219,6 +226,7 @@ export class MemoryStore {
           body: draft.body,
           tags: draft.tags ?? [],
           ...(draft.aliases !== undefined ? { aliases: draft.aliases } : {}),
+          ...(draft.cue !== undefined ? { cue: draft.cue } : {}),
           updatedAt: now,
           accessedAt: now,
           ...(draft.source !== undefined ? { source: draft.source } : {}),
@@ -247,6 +255,7 @@ export class MemoryStore {
       body: draft.body,
       tags: draft.tags ?? [],
       ...(draft.aliases !== undefined ? { aliases: draft.aliases } : {}),
+      ...(draft.cue !== undefined && draft.cue.length > 0 ? { cue: draft.cue } : {}),
       scope,
       createdAt: now,
       updatedAt: now,
@@ -280,6 +289,7 @@ export class MemoryStore {
       ...(patch.body !== undefined ? { body: patch.body } : {}),
       ...(patch.tags !== undefined ? { tags: patch.tags } : {}),
       ...(patch.aliases !== undefined ? { aliases: patch.aliases } : {}),
+      ...(patch.cue !== undefined ? { cue: patch.cue } : {}),
       ...(patch.revisions !== undefined ? { revisions: patch.revisions } : {}),
       updatedAt: now,
       accessedAt: now,
@@ -372,6 +382,9 @@ export class MemoryStore {
   private mergeEntry(existing: Entry, draft: EntryDraft, now: string): Entry {
     const tags = [...new Set([...existing.tags, ...(draft.tags ?? [])])]
     const aliases = [...new Set([...(existing.aliases ?? []), ...(draft.aliases ?? [])])]
+    // cue 与 aliases 同一策略（并入而非替换）：合并路径会保留原条目，若只取 draft 的 cue，
+    // 原条目已有的「情境入口」就消失了——而同一教训适用的情境形状多条并存才是常态。
+    const cue = [...new Set([...(existing.cue ?? []), ...(draft.cue ?? [])])]
     const body = existing.body.trim() === draft.body.trim()
       ? existing.body
       : `${existing.body}\n\n${draft.body}`
@@ -381,6 +394,7 @@ export class MemoryStore {
       body,
       tags,
       ...(aliases.length > 0 ? { aliases } : {}),
+      ...(cue.length > 0 ? { cue } : {}),
       updatedAt: now,
       accessedAt: now,
       ...(draft.source !== undefined ? { source: draft.source } : {}),

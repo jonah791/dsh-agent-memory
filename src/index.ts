@@ -97,6 +97,21 @@ export const entrySchema = zod.object({
    */
   reviewAfter: zod.string().optional(),
   watchFor: zod.array(zod.string()).optional(),
+  /**
+   * 情境形状（v0.16.0，2026-10-21）：这条经验**在什么形状的情境下该被取出使用**。
+   *
+   * 与另两维的语义分工（三者不可互相替代）：`aliases` 管**入口词**（可能被怎么问）、
+   * `watchFor` 管**时效**（什么新信息会让它失效）、`cue` 管**应用场景**（什么形状的处境该用它）。
+   *
+   * 论文依据（Harness² 的 experience `cue`，arXiv:2610.14224 §H Prompt 6）：cue 描述情境的
+   * **形状**而非本次任务的事实，因而能在**另一件事**上触发。原文判据线：太泛无用
+   * （`be thorough`）；太具体永不触发（`the fee rose to 250 on Jan 1`）。
+   *
+   * ⚠ **必须在此声明**（同一个坑**第五次**：v0.12 `aliases`、v0.13 `subject`、
+   * v0.14 `grounding`、v0.15 `reviewAfter/watchFor`）：storage-domain 在写入边界用本 schema
+   * 校验，**未声明的字段会被静默剥掉**——存了等于没存，而写入**仍返回成功**。
+   */
+  cue: zod.array(zod.string()).optional(),
   author: zod.object({
     sessionId: zod.string().optional(),
     delegationDepth: zod.number().optional(),

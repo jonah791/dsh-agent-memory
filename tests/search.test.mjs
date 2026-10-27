@@ -66,20 +66,24 @@ describe('recallEntries · 基础', () => {
 describe('recallEntries · 相关度排序（标签>标题>正文）', () => {
   test('同词分别命中 标签/标题/正文 → 分数 3/2/1，顺序 标签>标题>正文', () => {
     const entries = [
+      // v0.17（BM25 长度归一）：「标签 : 正文 = 3 : 1」这个比例断言的前提是
+      // **各条目正文等长** —— 否则正文项被长度归一不同程度缩放，比例就不再是纯权重比
+      // （实测：原构造里 body-hit 正文 15 字符、另两条 4 字符 ⇒ 比例变 4.174）。
+      // 这里用 padEnd 把三条正文统一到 20 字符，把前提显式化；断言本身一个字不放宽。
       entry('body-hit', {
         title: '无关标题',
-        body: '这里提到了 alpha 关键词',
+        body: '这里提到了 alpha 关键词'.padEnd(20, '·'),
         accessedAt: '2026-08-01T00:00:00.000Z',
       }),
       entry('tag-hit', {
         title: '无关标题',
-        body: '无关正文',
+        body: '无关正文'.padEnd(20, '·'),
         tags: ['alpha'],
         accessedAt: '2026-08-01T00:00:00.000Z',
       }),
       entry('title-hit', {
         title: 'alpha 相关标题',
-        body: '无关正文',
+        body: '无关正文'.padEnd(20, '·'),
         accessedAt: '2026-08-01T00:00:00.000Z',
       }),
     ]
@@ -93,16 +97,19 @@ describe('recallEntries · 相关度排序（标签>标题>正文）', () => {
   })
 
   test('多词累加：一词命中标签+标题 → 5 分，高于单点命中', () => {
+    // v0.17（BM25 长度归一）：与上面「标签>标题>正文」那条同理 —— 「6 : 3」这个比例断言
+    // 的前提是**两条正文等长**，否则正文项被长度归一不同程度缩放（实测原构造得 1.960）。
+    // 用 padEnd 统一到 10 字符，把前提显式化；断言本身不放宽。
     const entries = [
       entry('multi', {
         title: 'dsh 插件开发',
-        body: '讲 dsh 插件',
+        body: '讲 dsh 插件'.padEnd(10, '·'),
         tags: ['dsh'],
         accessedAt: '2026-08-01T00:00:00.000Z',
       }),
       entry('single', {
         title: '其他',
-        body: '其他内容',
+        body: '其他内容'.padEnd(10, '·'),
         tags: ['dsh'],
         accessedAt: '2026-08-02T00:00:00.000Z',
       }),
