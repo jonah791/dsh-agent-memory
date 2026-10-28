@@ -42,15 +42,21 @@ export async function appendDedupeTrace(
 }
 
 /**
- * 读取处置轨迹。**不可读 ⇒ `undefined`**（调用方按「不知道」处理，不得读成「零欠账」）。
- * 文件不存在也算 `undefined`：首次使用时它本来就不存在，而「没有这个文件」与
- * 「有文件但里面没有记录」对诊断是两件事——前者说明这条侧车从未被写过。
+ * 读取处置轨迹。**只有真的读不到才返回 `undefined`**（调用方按「不知道」处理）。
+ *
+ * ⚠ 文件不存在（ENOENT）**不算读不到，返回空数组**——首次使用时这条侧车本来就不存在，
+ * 把它报成「读取失败」是假报警，而假报警比缺报告更坏（会让人以为插件坏了）。
+ * 2026-10-28 实测踩过：memory_check 第一次调用就显示「近重复轨迹读取失败」，
+ * 而同目录另外五条 memory-*.jsonl 全在——不是故障，是从未写过。
+ *
+ * ⇒ 三态的准确边界：空数组 = 「读到且没有未处置记录」· undefined = 「读不到，不知道」。
  */
 export async function readDedupeTrace(filePath: string): Promise<DedupeTraceRecord[] | undefined> {
   try {
     const text = await readFile(filePath, 'utf8')
     return parseDedupeTrace(text)
-  } catch {
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
     return undefined
   }
 }

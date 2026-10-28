@@ -1410,13 +1410,15 @@ function buildCheck(deps: MemoryToolDeps): ToolDefinition {
     },
     async execute() {
       // 处置欠账（2026-10-28 · lh-0f54524a）：本工具的第一个真实数据源。
-      // 三种「没有欠账」必须分开说：未接线 / 读不到 / 真的零欠账——前两者是「不知道」。
+      // 「没有欠账」有四种来路，必须分开说：未接线 / 读不到 / 侧车空 / 有记录但全处置过。
+      // 前两者是「不知道」，后两者才是真的零欠账——把「不知道」说成「零欠账」是这类诊断最典型的病。
+      // （侧车不存在已由 readDedupeTrace 归入空数组：首次使用时它本来就不存在，报成故障是假报警。）
       if (deps.readDedupeTrace === undefined) {
         return { suggestions: [], note: '近重复轨迹未接线（deps.readDedupeTrace 缺失）——不假装零欠账' }
       }
       const records = await deps.readDedupeTrace()
       if (records === undefined) {
-        return { suggestions: [], note: '近重复轨迹读取失败——读不到不等于零欠账' }
+        return { suggestions: [], note: '近重复轨迹读取失败（权限 / IO）——这不等于零欠账，是「不知道」' }
       }
       const pending = unresolvedCandidates(records)
       const LIMIT = 20

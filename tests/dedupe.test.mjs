@@ -4,7 +4,8 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { NEAR_DUP_THRESHOLD, findNearDuplicates, formatDuplicateHint } from '../lib/dedupe.js'
+import { NEAR_DUP_THRESHOLD, findNearDuplicates, formatDuplicateHint, parseDedupeTrace } from '../lib/dedupe.js'
+import { readDedupeTrace } from '../lib/dedupe-trace.js'
 
 const entry = (over = {}) => ({
   id: 'e1',
@@ -133,4 +134,32 @@ test('★ 不修改入参数组（排序前拷贝——就地排序会污染调�
 test('不同候选互不干扰（处置 c1 不影响 c2）', () => {
   const out = unresolvedCandidates([hit('c1', 100), hit('c2', 150), disposed('c1', 200)])
   assert.deepEqual(out.map((x) => x.candidateId), ['c2'])
+})
+
+// ─── IO 层与解析（2026-10-28 实测踩过假报警）───────────────────────────────────
+
+test('★ 侧车不存在 ⇒ 空数组，**不是** undefined（首次使用不是故障）', async () => {
+  const out = await readDedupeTrace('/nonexistent/definitely-absent-dedupe-trace.jsonl')
+  assert.deepEqual(out, [])
+})
+
+test('parseDedupeTrace：坏行跳过、结构不全的跳过，好行保留', () => {
+  const text = [
+    JSON.stringify({ kind: 'hit', atMs: 1, candidateId: 'c1', strength: 9 }),
+    'not json at all',
+    JSON.stringify({ kind: 'disposed', atMs: 2, candidateId: 'c1', disposition: 'merged' }),
+    JSON.stringify({ kind: 'bogus', atMs: 3, candidateId: 'c2' }),
+    JSON.stringify({ kind: 'hit', atMs: 4 }),
+    '',
+  ].join('\n')
+  const out = parseDedupeTrace(text)
+  assert.equal(out.length, 2)
+  assert.equal(out[0].candidateId, 'c1')
+  assert.equal(out[0].kind, 'hit')
+  assert.equal(out[1].kind, 'disposed')
+  assert.equal(out[1].disposition, 'merged')
+})
+
+test('parseDedupeTrace：空文本 ⇒ 空数组（不是错误）', () => {
+  assert.deepEqual(parseDedupeTrace(''), [])
 })
