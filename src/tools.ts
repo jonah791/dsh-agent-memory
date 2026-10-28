@@ -27,7 +27,8 @@ import type { CompressSummary } from './compress-trace.ts'
 import { formatSkipped } from './compress-trace.ts'
 import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
-import { findNearDuplicates, formatDuplicateHint } from './dedupe.ts'
+import { findNearDuplicates, formatDuplicateHint, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
+import type { DedupeTraceRecord, SimilarDisposition } from './dedupe.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
 import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, parseGroundingArg, UNLABELED_GROUNDING } from './grounding.ts'
@@ -88,6 +89,17 @@ export interface MemoryToolDeps {
    * 缺省不报——工具层只展示，不判定。
    */
   readCompressSummary?: () => Promise<CompressSummary | undefined>
+  /**
+   * 近重复处置轨迹写入（2026-10-28 · lh-0f54524a）：记「这次撞车我处置了」或「这次撞上了」。
+   * 与 `recordReviewMark` 同纪律：只追加 / 吞错 / 按体积轮转。
+   */
+  recordDedupeTrace?: (records: DedupeTraceRecord[]) => Promise<boolean> | void
+  /**
+   * 近重复处置轨迹读取（`memory_check` 用）。
+   * ⚠ 缺省 / 读失败 ⇒ `undefined` = **读不到**，与「读到了、里面是空」严格分开——
+   * 后者才是「零欠账」，前者只能说「不知道」。
+   */
+  readDedupeTrace?: () => Promise<DedupeTraceRecord[] | undefined>
 }
 
 /** 缺省配置加载器：读取 .dsh/memory.yml，缺失走默认，非法 fail loud */
@@ -221,6 +233,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       reviewAfter: { type: 'string', description: '复查死线（v0.15.0）：这条结论**该在什么时候被重看**——那是「未来的我执行它」的时刻。接受 `YYYY-MM-DD`（如 2026-11-01）/ ISO 时刻 / 相对写法 `+7d`（7 天后）或 `+2w`（2 周后）。**什么时候填**：这条结论依赖**会变的外部状态**时——环境坐标（端口/路径/版本号/目录布局）、工具或通道的可用率读数、别人的系统行为、价格与限额、尚未定稿的方案。**什么时候不填**：结论永久成立时（原则 / 教训 / 主人偏好 / 我的代码风格 / 已发生事件的事实）——**空是常态，填是例外**。⚠ 到期**不等于作废**，只表示该去核实；核实后 `update` 续新死线或清除。' },
       watchFor: { type: 'array', items: { type: 'string' }, description: '观察条件（v0.15.0）：**什么样的新信息会让这条失效**（1–8 条短句，每条 ≤200 字）。**为什么值得填**（论文实测）：决策时写下的观察条件能达 92.2% 的关键新信息、只带 20 条无关噪音；而「把全部背景事实都索引上」虽达 100%，却带 89 条噪音——**少而准**才划算。**怎么填**：写「什么事件会让它不成立」，点名具体实体（含它的**别名**与**上游依赖**），**略去用不到的**。例：`["DuckDuckGo 通道可用率重测低于 80%", "busDir 或 web 端口改变", "该插件被卸载或改名"]`。**写入时机只有一次——就是现在**（我记得为什么这样判断）；事后再补，我想不起当时在等什么。它会被印在 recall 结果里，命中的那一刻我就看见「它在等什么」。' },
       cue: { type: 'array', items: { type: 'string' }, description: '情境形状（v0.16.0）：这条经验**在什么形状的情境下该被取出使用**（1–8 条短句）。与另两维**不可互相替代**：`aliases` 管**入口词**（可能被怎么问）、`watchFor` 管**时效**（什么新信息会让它失效）、`cue` 管**应用场景**（什么处境该用它）。**怎么填**：写情境的**形状**而不是本次任务的事实，才能在**另一件事**上触发。论文给的判据线（Harness² 的 experience cue）：太泛无用（`be thorough`）；太具体永不触发（`某日某费用涨到 250`）；正好是「当仪器执行若干顺序动作、且其中一个会终止行动者自身的权限时，把终止性动作排在最后」。它会被印在 recall 里——命中的那一刻我就看见「什么处境该用它」。' },
+      similarDisposition: { type: 'string', enum: ['merged', 'updated', 'unrelated'], description: '近重复处置（2026-10-28）：当本次写入**命中相似条目**时，声明你怎么处置它们——`merged`（已合流）/ `updated`（已补写原条目）/ `unrelated`（判为无关）。作用对象是**本次全部命中候选**（不逐条指定：逐条会让参数变成数组、重到没人愿意用；差别靠 `dispositionReason` 说清）。不填 ⇒ 这次撞车进「欠账」，`memory_check` 会一直列出来。⚠ 处置是**时间轴上的重置**，不是永久免检：同一个候选之后再撞上会重新计欠账——否则「判过无关但阈值仍把它报出来」会被永久掩盖。' },
+      dispositionReason: { type: 'string', description: '处置理由（配合 `similarDisposition`）：为什么这么判。写清「其中哪条是真同主题、哪些是弱相关噪音」——将来重读时这是唯一线索。' },
     },
     output: {
       schema: {
@@ -231,12 +245,16 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
           action: { type: 'string', enum: ['created', 'updated', 'merged'], required: true },
           similar: { type: 'array', items: { type: 'string' }, description: '高度相似的既有条目（id — 标题（强度 N））；无命中时省略该键' },
           hint: { type: 'string', description: '近重复提示（建议 update/merge）；无命中时省略该键' },
+          pendingDisposition: { type: 'integer', description: '本次命中但**未给处置**的候选条数（>0 才出现）——它就是欠账，`memory_check` 会一直列出来' },
         },
       },
       render: (args, value) => [{
         type: 'text',
         text: `已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`
-          + (typeof value.hint === 'string' && value.hint.length > 0 ? `\n${value.hint}` : ''),
+          + (typeof value.hint === 'string' && value.hint.length > 0 ? `\n${value.hint}` : '')
+          + (typeof value.pendingDisposition === 'number' && value.pendingDisposition > 0
+            ? `\n⚠ ${value.pendingDisposition} 条候选未处置，已进欠账（memory_check 可查）`
+            : ''),
       }],
     },
     async execute(args, exec) {
@@ -296,11 +314,42 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       // 无命中时不带任何额外键（无损 JSON 纪律）。
       const dups = findNearDuplicates(active, { title, body, tags, kind, scope: writeScope })
       const hint = formatDuplicateHint(dups)
+      // 处置闭环（2026-10-28 · lh-0f54524a）：命中就要么处置、要么进欠账，不能停在「提示过」。
+      // 键是 candidateId 而非 (newId, candidateId)——每次写入都产生新 id，「同一对」在结构上不存在。
+      const disposition = parseSimilarDisposition(args.similarDisposition)
+      const traceMs = Date.now()
+      if (dups.length > 0 && deps.recordDedupeTrace !== undefined) {
+        const hits: DedupeTraceRecord[] = dups.map((d) => ({
+          kind: 'hit',
+          atMs: traceMs,
+          candidateId: d.id,
+          newId: written.id,
+          strength: d.strength,
+        }))
+        const reason = typeof args.dispositionReason === 'string' ? args.dispositionReason.trim() : ''
+        const disposals: DedupeTraceRecord[] = disposition === undefined
+          ? []
+          : dups.map((d) => ({
+            kind: 'disposed' as const,
+            atMs: traceMs,
+            candidateId: d.id,
+            newId: written.id,
+            disposition,
+            ...(reason.length > 0 ? { reason } : {}),
+          }))
+        // 吞错（§5.22 规则 3）：侧车写不进去不该让记忆写入失败——但也不假装写了
+        try {
+          await deps.recordDedupeTrace([...hits, ...disposals])
+        } catch { /* 侧车不可写不阻塞主流程 */ }
+      }
+      // 只报**本次**未处置的条数（不是全库欠账——那个归 memory_check，它有完整轨迹）
+      const pendingDisposition = dups.length > 0 && disposition === undefined ? dups.length : 0
       return {
         id: written.id,
         action: written.action,
         ...(dups.length > 0 ? { similar: dups.map((d) => `${d.id} — ${d.title}（强度 ${d.strength}）`) } : {}),
         ...(hint.length > 0 ? { hint } : {}),
+        ...(pendingDisposition > 0 ? { pendingDisposition } : {}),
       }
     },
   })
@@ -1323,10 +1372,10 @@ function buildVersion(): ToolDefinition {
 }
 
 /** 构建 memory_check 工具 */
-function buildCheck(): ToolDefinition {
+function buildCheck(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_check',
-    description: '查看待沉淀建议（通道 B 主动侧）。v0.1 未接线信号检测，恒返回空建议——有沉淀价值的内容请直接用 remember 落库。',
+    description: '查看**待处置的近重复欠账**（2026-10-28 起，取代原先恒空的「待沉淀建议」壳）。`remember` 命中相似条目却没给 `similarDisposition` 时，那些候选会一直列在这里——它们就是「提示过但没处置」的存量。⚠ 处置是时间轴上的重置：同一个候选之后再撞上会重新进榜。',
     parameters: {},
     output: {
       schema: {
@@ -1345,18 +1394,39 @@ function buildCheck(): ToolDefinition {
               },
             },
           },
+          note: { type: 'string', description: '轨迹不可读或结果被截断时的说明（**读不到 ≠ 零欠账**）；正常且未截断时省略' },
         },
       },
       render: (args, value) => [{
         type: 'text',
-        text: value.suggestions.length === 0
-          ? '暂无待沉淀建议。'
-          : `待沉淀建议 ${value.suggestions.length} 条：` + value.suggestions.map((s) => `- ${s.signal}: ${s.summary}`).join('\n'),
+        text: typeof value.note === 'string' && value.note.length > 0 && value.suggestions.length === 0
+          ? `memory_check：${value.note}`
+          : value.suggestions.length === 0
+            ? '无欠账：没有「命中相似却未处置」的候选。'
+            : `待处置 ${value.suggestions.length} 条近重复撞车：\n`
+              + value.suggestions.map((s) => `- ${s.summary}`).join('\n')
+              + (typeof value.note === 'string' && value.note.length > 0 ? `\n（${value.note}）` : ''),
       }],
     },
     async execute() {
-      // 通道 B（信号沉淀提示）为 v0.3 规划项；规格 §4 允许「无则空数组」
-      return { suggestions: [] }
+      // 处置欠账（2026-10-28 · lh-0f54524a）：本工具的第一个真实数据源。
+      // 三种「没有欠账」必须分开说：未接线 / 读不到 / 真的零欠账——前两者是「不知道」。
+      if (deps.readDedupeTrace === undefined) {
+        return { suggestions: [], note: '近重复轨迹未接线（deps.readDedupeTrace 缺失）——不假装零欠账' }
+      }
+      const records = await deps.readDedupeTrace()
+      if (records === undefined) {
+        return { suggestions: [], note: '近重复轨迹读取失败——读不到不等于零欠账' }
+      }
+      const pending = unresolvedCandidates(records)
+      const LIMIT = 20
+      return {
+        suggestions: pending.slice(0, LIMIT).map((p) => ({
+          signal: 'near-duplicate-unresolved',
+          summary: `${p.candidateId} 撞过 ${p.hitCount} 次（最高强度 ${p.maxStrength}，最后 ${new Date(p.lastHitMs).toISOString()}）仍未处置`,
+        })),
+        ...(pending.length > LIMIT ? { note: `仅列出最近 ${LIMIT} 条，另有 ${pending.length - LIMIT} 条` } : {}),
+      }
     },
   })
 }
@@ -1620,7 +1690,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildAudit(deps),
     buildReviewMark(deps),
     buildRecompress(deps),
-    buildCheck(),
+    buildCheck(deps),
     buildHealth(deps),
     buildVersion(),
   ]

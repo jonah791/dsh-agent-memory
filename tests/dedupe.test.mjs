@@ -72,3 +72,65 @@ test('提示文案：含条数、id 与「先考虑 update/merge」的行动指�
 test('提示文案：空数组 ⇒ 空串（调用方据此省略字段）', () => {
   assert.equal(formatDuplicateHint([]), '')
 })
+
+// ─── 处置闭环（2026-10-28 · lh-0f54524a）────────────────────────────────────
+//
+// 这组的重点是**能证伪两个看起来对、实际错的实现**：
+//   ① 处置时不清空桶，只打标记 ⇒ 「处置后又被撞」永远算作已处置（本例 4 抓）
+//   ② 排序时不拷贝入参 ⇒ 调用方数组被就地改写（本例 5 抓）
+import { unresolvedCandidates } from '../lib/dedupe.js'
+
+const hit = (candidateId, atMs, strength = 10) => ({ kind: 'hit', candidateId, atMs, strength })
+const disposed = (candidateId, atMs, disposition = 'merged') => ({ kind: 'disposed', candidateId, atMs, disposition })
+
+test('空记录 ⇒ 无欠账', () => {
+  assert.deepEqual(unresolvedCandidates([]), [])
+})
+
+test('一次命中 ⇒ 一条欠账', () => {
+  const out = unresolvedCandidates([hit('c1', 100, 12)])
+  assert.equal(out.length, 1)
+  assert.equal(out[0].candidateId, 'c1')
+  assert.equal(out[0].hitCount, 1)
+  assert.equal(out[0].lastHitMs, 100)
+  assert.equal(out[0].maxStrength, 12)
+})
+
+test('同一候选两次命中 ⇒ 累加，强度取大、时间取晚', () => {
+  const out = unresolvedCandidates([hit('c1', 100, 30), hit('c1', 200, 8)])
+  assert.equal(out[0].hitCount, 2)
+  assert.equal(out[0].maxStrength, 30)
+  assert.equal(out[0].lastHitMs, 200)
+})
+
+test('命中后被处置 ⇒ **清账**（处置是时间轴上的重置）', () => {
+  assert.deepEqual(unresolvedCandidates([hit('c1', 100), disposed('c1', 200)]), [])
+})
+
+test('★ 处置后又被撞两次 ⇒ 重新计 2（处置**不是**永久免检）', () => {
+  const out = unresolvedCandidates([hit('c1', 100), disposed('c1', 200), hit('c1', 300), hit('c1', 400)])
+  assert.equal(out.length, 1)
+  assert.equal(out[0].hitCount, 2)
+  assert.equal(out[0].lastHitMs, 400)
+})
+
+test('尸体测试：只有处置没有命中 ⇒ 不得凭空造欠账', () => {
+  assert.deepEqual(unresolvedCandidates([disposed('c1', 200)]), [])
+})
+
+test('多条候选按最后命中时间降序（最久没管的排后面，最新撞的排前面）', () => {
+  const out = unresolvedCandidates([hit('c1', 100), hit('c2', 300), hit('c3', 200)])
+  assert.deepEqual(out.map((x) => x.candidateId), ['c2', 'c3', 'c1'])
+})
+
+test('★ 不修改入参数组（排序前拷贝——就地排序会污染调用方的记录）', () => {
+  const records = [hit('c1', 300), hit('c2', 100)]
+  const before = records.map((r) => r.candidateId)
+  unresolvedCandidates(records)
+  assert.deepEqual(records.map((r) => r.candidateId), before)
+})
+
+test('不同候选互不干扰（处置 c1 不影响 c2）', () => {
+  const out = unresolvedCandidates([hit('c1', 100), hit('c2', 150), disposed('c1', 200)])
+  assert.deepEqual(out.map((x) => x.candidateId), ['c2'])
+})

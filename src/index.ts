@@ -25,6 +25,7 @@ import { installPeriodicCompress } from './periodic.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import { appendAccessTrace, appendProposalRecord, readAccessIndex, readAccessSummary as readAccessSummaryFromTrace, readReviewMarks as readReviewMarksFromTrace } from './access-trace.ts'
 import { appendCompressTrace, readCompressSummary as readCompressSummaryFromTrace, type CompressTraceSink } from './compress-trace.ts'
+import { appendDedupeTrace, readDedupeTrace as readDedupeTraceFromSidecar } from './dedupe-trace.ts'
 import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -235,6 +236,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const readReviewMarks: NonNullable<MemoryToolDeps['readReviewMarks']> = () => readReviewMarksFromTrace(reviewLogPath)
   const readCompressSummary: NonNullable<MemoryToolDeps['readCompressSummary']> = () =>
     readCompressSummaryFromTrace(compressTracePath)
+  // 近重复处置轨迹（2026-10-28 · lh-0f54524a）：记「撞车」与「处置」，让「提示过但没处置」变成可算的欠账。
+  // 同纪律：只追加 / 吞错 / 按体积轮转；读取三态见 dedupe-trace.ts。
+  const dedupeTracePath = join(dshHome, 'memory-dedupe-trace.jsonl')
+  const recordDedupeTrace: NonNullable<MemoryToolDeps['recordDedupeTrace']> = (records) =>
+    appendDedupeTrace(dedupeTracePath, records, DEFAULT_AUDIT_CONFIG.proposalLog.maxBytes)
+  const readDedupeTrace: NonNullable<MemoryToolDeps['readDedupeTrace']> = () =>
+    readDedupeTraceFromSidecar(dedupeTracePath)
 
   /**
    * 压缩轨迹接收器工厂（v0.8）：**每个 workspace 自己的 `audit.compress_trace` 说了算**
@@ -374,7 +382,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
 
   // 4. 注册记忆工具（remember/recall/update/forget/browse/relate/stats/audit/health/version/check）
-  registerMemoryTools(ctx, { store, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary })
+  registerMemoryTools(ctx, { store, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })
