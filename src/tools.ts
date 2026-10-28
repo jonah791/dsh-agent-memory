@@ -1395,18 +1395,22 @@ function buildCheck(deps: MemoryToolDeps): ToolDefinition {
             },
           },
           note: { type: 'string', description: '轨迹不可读或结果被截断时的说明（**读不到 ≠ 零欠账**）；正常且未截断时省略' },
+          disposedCount: { type: 'number', description: '历史上已销账过的**不同候选**条数（供参考：销账后条目会从列表消失，与「从未撞过」在输出上同形，靠这个数区分）' },
         },
       },
-      render: (args, value) => [{
-        type: 'text',
-        text: typeof value.note === 'string' && value.note.length > 0 && value.suggestions.length === 0
+      render: (args, value) => {
+        const disposed = typeof value.disposedCount === 'number' && value.disposedCount > 0
+          ? `\n（历史已销账 ${value.disposedCount} 条不同候选——它们不再列出，不是从未撞过）`
+          : ''
+        const shown = typeof value.note === 'string' && value.note.length > 0 && value.suggestions.length === 0
           ? `memory_check：${value.note}`
           : value.suggestions.length === 0
             ? '无欠账：没有「命中相似却未处置」的候选。'
             : `待处置 ${value.suggestions.length} 条近重复撞车：\n`
               + value.suggestions.map((s) => `- ${s.summary}`).join('\n')
-              + (typeof value.note === 'string' && value.note.length > 0 ? `\n（${value.note}）` : ''),
-      }],
+              + (typeof value.note === 'string' && value.note.length > 0 ? `\n（${value.note}）` : '')
+        return [{ type: 'text', text: shown + disposed }]
+      },
     },
     async execute() {
       // 处置欠账（2026-10-28 · lh-0f54524a）：本工具的第一个真实数据源。
@@ -1421,17 +1425,127 @@ function buildCheck(deps: MemoryToolDeps): ToolDefinition {
         return { suggestions: [], note: '近重复轨迹读取失败（权限 / IO）——这不等于零欠账，是「不知道」' }
       }
       const pending = unresolvedCandidates(records)
+      // 「已销账过多少条不同候选」：销账后条目从 pending 里消失，与「从未撞过」同形。
+      // 这个数让两者可分——也顺带证明销账记录真的被读进来了（而不是被当成坏行丢掉）。
+      const disposedCount = new Set(
+        records.filter((r) => r.kind === 'disposed').map((r) => r.candidateId),
+      ).size
       const LIMIT = 20
       return {
         suggestions: pending.slice(0, LIMIT).map((p) => ({
           signal: 'near-duplicate-unresolved',
           summary: `${p.candidateId} 撞过 ${p.hitCount} 次（最高强度 ${p.maxStrength}，最后 ${new Date(p.lastHitMs).toISOString()}）仍未处置`,
         })),
+        disposedCount,
         ...(pending.length > LIMIT ? { note: `仅列出最近 ${LIMIT} 条，另有 ${pending.length - LIMIT} 条` } : {}),
       }
     },
   })
 }
+
+/**
+ * 构建 memory_dispose 工具——**欠账的销账入口**（2026-10-29 · lh-0f54524a）。
+ *
+ * 存在理由（缺口是实测出来的，不是设计的）：2026-10-28 上线处置队列后，`remember`
+ * 命中相似时能给出 `similarDisposition`，但那个参数只在**写入那一刻**存在。
+ * 于是「当时没算到该处置、事后才想清楚」这一整类判断无法落账——欠账只进不出。
+ * 当晚三次写入共累积 15 条，我一条都清不掉。
+ *
+ * ⚠ 但它**不执行任何实际处置动作**，只写一条销账记录。这是有意的授权分割：
+ *   - 合流 → `memory_merge`（已存在）
+ *   - 补写 → `update`（已存在）
+ *   - 判无关 → 无需动作，只销账
+ * 让本工具代做这些，等于把三个独立工具的职责搅进一个销账口。2026-10-29 实测：
+ * 我用 `update` 补写两条既有条目，全程零欠账——**动作从来都是可做的，缺的只是销账**。
+ *
+ * ⚠ 时间轴语义继承 `unresolvedCandidates`：销账之后的 hit 才算新欠账。
+ * 所以同一个候选再撞上会重新进榜——**这是设计，不是漏报**。
+ */
+function buildDispose(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_dispose',
+    description: '销账：把 `memory_check` 列出的近重复欠账标记为「已处置」，此后不再列为待处置。⚠ 它**只写销账记录，不执行实际处置**——合流用 `memory_merge`、补写用 `update`、判无关则无需动作。⚠ 处置是时间轴上的重置：同一个候选之后再撞上会重新进榜（设计，不是漏报）。⚠ 全部 candidateIds 必须真的撞过（有 hit 历史），否则整批不写（fail-closed，防 id 拼错被静默吞掉）。',
+    parameters: {
+      candidateIds: { type: 'array', items: { type: 'string' }, description: '要销账的候选 id（取自 memory_check 每条 summary 的首个字段）。可一次销多条，但同一批只能给同一种 disposition——需要不同处置时分批调用。' },
+      disposition: { type: 'string', enum: ['merged', 'updated', 'unrelated'], description: 'merged=已合流进这条候选（你用过 memory_merge）/ updated=已补写进这条候选（你用过 update）/ unrelated=判为无关。**注意 unrelated 是「判过无关」，不是「没判」**——两者在侧车里必须可区分。' },
+      reason: { type: 'string', description: '为什么这样处置，写进侧车留痕——将来重读时这是唯一线索。**必填**：无理由的销账等于把欠账藏起来。' },
+      refs: { type: 'array', items: { type: 'string' }, description: '证据指针（path:line / 记忆 id / 提交号）：「凭什么说处置了」。disposition=unrelated 时可为空。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          disposed: { type: 'array', items: { type: 'string' }, required: true },
+          unknown: { type: 'array', items: { type: 'string' }, required: true },
+          note: { type: 'string' },
+        },
+      },
+      render: (args, value) => [{
+        type: 'text',
+        text: value.ok
+          ? `已销账 ${value.disposed.length} 条：${value.disposed.join(', ')}（同一候选再撞上会重新进榜）`
+          : `⚠ 未写入任何记录：这 ${value.unknown.length} 个 id 没有撞车历史（可能是拼错，或从未撞过）：${value.unknown.join(', ')}`,
+      }],
+    },
+    async execute(args) {
+      if (deps.recordDedupeTrace === undefined) {
+        throw new Error('memory_dispose: 未接线（deps.recordDedupeTrace 缺失）——侧车不可写时不假装成功')
+      }
+      if (deps.readDedupeTrace === undefined) {
+        throw new Error('memory_dispose: 未接线（deps.readDedupeTrace 缺失）——无法校验候选是否真实存在')
+      }
+      // 运行时必填校验（schema 层可选，与 memory_review_mark 同纪律：fail-loud）
+      const rawIds = args.candidateIds
+      if (!Array.isArray(rawIds) || rawIds.length === 0) {
+        throw new Error('memory_dispose: candidateIds 必填且不能为空（不知道要销哪条就别销）')
+      }
+      const ids = [...new Set(rawIds.map((x) => (typeof x === 'string' ? x.trim() : '')).filter((x) => x.length > 0))]
+      if (ids.length === 0) throw new Error('memory_dispose: candidateIds 里没有有效 id')
+      const disposition = parseSimilarDisposition(args.disposition)
+      if (disposition === undefined) {
+        throw new Error('memory_dispose: disposition 必填（merged / updated / unrelated 三选一）')
+      }
+      const rawReason = args.reason
+      if (typeof rawReason !== 'string') throw new Error('memory_dispose: reason 必填')
+      const reason = rawReason.trim()
+      if (reason.length === 0) throw new Error('memory_dispose: reason 必填（无理由的销账等于把欠账藏起来）')
+      const refs = Array.isArray(args.refs)
+        ? args.refs.filter((x): x is string => typeof x === 'string' && x.trim().length > 0).map((x) => x.trim())
+        : []
+
+      // 校验「这些 id 真的撞过」：读不到侧车时**拒绝写**（fail-closed）——
+      // 读不到就无法判断 id 是否拼错，此时的「成功」会是凭空造出来的销账记录。
+      const existing = await deps.readDedupeTrace()
+      if (existing === undefined) {
+        throw new Error('memory_dispose: 近重复轨迹读取失败（权限 / IO）——读不到就无法校验候选，拒绝写入')
+      }
+      const hitIds = new Set(existing.filter((r) => r.kind === 'hit').map((r) => r.candidateId))
+      const known = ids.filter((id) => hitIds.has(id))
+      const unknown = ids.filter((id) => !hitIds.has(id))
+      // 只要有一个 id 不存在，**整批不写**：部分写入会让「我销了 3 条」变成
+      // 「我以为 5 条全销了，其实 2 条拼错」——这正是欠账类工具最该避免的静默失败。
+      if (unknown.length > 0) {
+        return { ok: false, disposed: [], unknown, note: '整批未写入（含未知 id 时不做部分销账）' }
+      }
+
+      const now = Date.now()
+      const records: DedupeTraceRecord[] = known.map((candidateId) => ({
+        kind: 'disposed',
+        atMs: now,
+        candidateId,
+        disposition,
+        reason,
+        ...(refs.length > 0 ? { refs } : {}),
+      }))
+      const ok = (await deps.recordDedupeTrace(records)) !== false
+      if (!ok) throw new Error('memory_dispose: 侧车写入失败')
+      return { ok: true, disposed: known, unknown: [] }
+    },
+  })
+}
+
 
 /**
  * 构建 memory_audit 工具（v0.6 价值体检器）——**只读提案器**。
@@ -1693,6 +1807,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildReviewMark(deps),
     buildRecompress(deps),
     buildCheck(deps),
+    buildDispose(deps),
     buildHealth(deps),
     buildVersion(),
   ]

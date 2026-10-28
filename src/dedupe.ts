@@ -101,6 +101,12 @@ export interface DedupeTraceRecord {
   strength?: number
   disposition?: SimilarDisposition
   reason?: string
+  /**
+   * 处置的证据指针（`path:line` / 记忆 id / 提交号）——**「凭什么说处置了」**。
+   * 只对 `disposed` 有意义：hit 是自动记录的，本来就有条目 id 可指；
+   * 而「我说我合流了」在侧车里只是一句话，refs 让未来的我自己能现读复算。
+   */
+  refs?: string[]
 }
 
 /** 未处置的撞车候选。 */
