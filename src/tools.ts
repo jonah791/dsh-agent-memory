@@ -329,12 +329,13 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         const fullNote = wouldCreate && active.length >= config.maxEntries
           ? `⚠ 库已满：${writeScope} ${active.length}/${config.maxEntries}，正式写入会被拒（先 forget 归档旧条目或调高配置）。`
           : ''
-        const dupHint = dups.length > 0 ? formatDuplicateHint(dups) : ''
-        const hints = [fullNote, dupHint].filter((s) => s.length > 0)
+        // ⚠ 不返回近重复的 hint：`similar[]` 已列全候选与强度，再走一遍 formatDuplicateHint
+        // 会让回执里同一份候选清单出现两遍（2026-11-03 上线后首次实调就看到了）。
+        // 正式写入路径仍用 hint —— 那里没有 similar 的渲染位，需要一句话把该做什么说完。
         return {
           dryRun: true as const,
           ...(dups.length > 0 ? { similar: dups.map((d) => `${d.id} — ${d.title}（强度 ${d.strength}）`) } : {}),
-          ...(hints.length > 0 ? { hint: hints.join('\n') } : {}),
+          ...(fullNote.length > 0 ? { hint: fullNote } : {}),
         }
       }
       if (wouldCreate && active.length >= config.maxEntries) {
