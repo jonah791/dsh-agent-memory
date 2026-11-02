@@ -15,7 +15,10 @@ import { corpusFingerprint, loadSearch } from './lib.mjs'
 import { mcnemar } from './stats.mjs'
 
 const SET_PATH = 'E:/alice/.dsh/recall-eval/eval-set.json'
-const RUN_LOG = 'E:/alice/.dsh/recall-eval/holdout-runs.jsonl'
+// 为什么允许环境变量覆盖（2026-11-03 加）：验证「记录格式改对没有」必须真跑一次，
+// 而真跑一次会往留出集 ledger 追加一行、把 runNo 推后（污染样本外性，见下方 runNo 警告）。
+// 指向临时文件才能既验证格式、又不动 ledger。缺省仍是真 ledger。
+const RUN_LOG = process.env.RECALL_EVAL_RUN_LOG || 'E:/alice/.dsh/recall-eval/holdout-runs.jsonl'
 
 /**
  * 被验证的两个配置：**写死在这里**，不读命令行。
@@ -139,7 +142,22 @@ appendFileSync(
       { label: BASELINE.label, tuning: BASELINE.tuning, top1: a.top1, mrr: a.mrr, noise: a.noise },
       { label: CANDIDATE.label, tuning: CANDIDATE.tuning, top1: b.top1, mrr: b.mrr, noise: b.noise },
     ],
-    mcnemar: { aOnly: t.aOnly, bOnly: t.bOnly, n: t.n, z: t.z, p: t.p, empty: t.empty, significant: t.significant },
+    // ⚠ aOnly/bOnly 的指代写在数据里，不能只靠代码（2026-11-03 实测教训）：
+    //   调用是 mcnemar(b.hits, a.hits)，实参**反了** ⇒ aOnly 指**候选**对/基线错，
+    //   而同一行的 arms 数组是 [基线, 候选]（基线在前）—— 两个顺序相反。
+    //   我自己读这一行时就把 aOnly=18 读成了「基线赢 18」，得出完全相反的结论。
+    //   口径与读数不同体 ⇒ 按「写在别处的口径 = 不存在」，必须落进记录。
+    mcnemar: {
+      aSide: CANDIDATE.label,
+      bSide: BASELINE.label,
+      aOnly: t.aOnly,
+      bOnly: t.bOnly,
+      n: t.n,
+      z: t.z,
+      p: t.p,
+      empty: t.empty,
+      significant: t.significant,
+    },
     deltaTop1: delta,
   })}\n`,
 )
