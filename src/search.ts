@@ -12,6 +12,7 @@
 
 import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RecallTuning, RelatedItem, TimelineLevel, WeightedTerm } from './types.ts'
 import { collapseFamilies, renderFamilyNote } from './family.ts'
+import { isTranscriptiveWithoutOrigin } from './origin.ts'
 
 /** 检索默认截断条数（未显式给 limit 时） */
 export const DEFAULT_RECALL_LIMIT = 20
@@ -651,6 +652,11 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     ...(entry.reviewAfter !== undefined ? { reviewAfter: entry.reviewAfter } : {}),
     ...(entry.watchFor !== undefined ? { watchFor: entry.watchFor } : {}),
     ...(entry.cue !== undefined ? { cue: entry.cue } : {}),
+    // 转述型·无出处（2026-11-03 · lh-d5e409bf）——**同一投影点、同一教训**（v0.13/v0.14/v0.15 连续
+    // 三版都栽在漏这一行：判定生效了、total 对，但结果项里没有该字段 ⇒ 渲染层打不出标记）。
+    // 判据在 origin.ts（纯函数，单测直接测）；这里只**透出布尔**，文案归渲染层。
+    // 只在该值为 true 时出现：false 与「未判定」在结果里同形，但两者对读者是同一件事（不需要看见）。
+    ...(isTranscriptiveWithoutOrigin(entry.title, entry.body) ? { transcriptiveUncited: true } : {}),
   }
 }
 

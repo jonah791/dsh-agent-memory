@@ -33,6 +33,7 @@ import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionId
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
 import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, parseGroundingArg, UNLABELED_GROUNDING } from './grounding.ts'
 import { countByStaleness, cueTag, filterByStaleness, parseReviewAfterArg, parseStalenessFilterArg, parseWatchForArg, stalenessTag, stalenessVerdict, watchForTag } from './temporal.ts'
+import { transcriptiveTag } from './origin.ts'
 import { auditMemory } from './audit.ts'
 
 /** 概要重压的外部结果（工具层回报用；与 timeline.RecompressResult 解耦，界面只认这几个读数） */
@@ -235,27 +236,54 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       cue: { type: 'array', items: { type: 'string' }, description: '情境形状（v0.16.0）：这条经验**在什么形状的情境下该被取出使用**（1–8 条短句）。与另两维**不可互相替代**：`aliases` 管**入口词**（可能被怎么问）、`watchFor` 管**时效**（什么新信息会让它失效）、`cue` 管**应用场景**（什么处境该用它）。**怎么填**：写情境的**形状**而不是本次任务的事实，才能在**另一件事**上触发。论文给的判据线（Harness² 的 experience cue）：太泛无用（`be thorough`）；太具体永不触发（`某日某费用涨到 250`）；正好是「当仪器执行若干顺序动作、且其中一个会终止行动者自身的权限时，把终止性动作排在最后」。它会被印在 recall 里——命中的那一刻我就看见「什么处境该用它」。' },
       similarDisposition: { type: 'string', enum: ['merged', 'updated', 'unrelated'], description: '近重复处置（2026-10-28）：当本次写入**命中相似条目**时，声明你怎么处置它们——`merged`（已合流）/ `updated`（已补写原条目）/ `unrelated`（判为无关）。作用对象是**本次全部命中候选**（不逐条指定：逐条会让参数变成数组、重到没人愿意用；差别靠 `dispositionReason` 说清）。不填 ⇒ 这次撞车进「欠账」，`memory_check` 会一直列出来。⚠ 处置是**时间轴上的重置**，不是永久免检：同一个候选之后再撞上会重新计欠账——否则「判过无关但阈值仍把它报出来」会被永久掩盖。' },
       dispositionReason: { type: 'string', description: '处置理由（配合 `similarDisposition`）：为什么这么判。写清「其中哪条是真同主题、哪些是弱相关噪音」——将来重读时这是唯一线索。' },
+      dryRun: { type: 'boolean', description: '预检（v0.19.1 · lh-0f54524a）：**只跑近重复检测、返回候选与强度，不落库**。用它兑现「先搜再写」——必须走它而不是先 `recall`，因为两者的候选集**不同源**（实测：先 recall 搜「测试期望写错」返回 96 条却不含真正的母条目，而 remember 报出了它）。命中候选后：要么带 `similarDisposition` 正式写入（合流/补写），要么确认无关后写入并标 `unrelated`。' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          id: { type: 'string', required: true },
-          action: { type: 'string', enum: ['created', 'updated', 'merged'], required: true },
+          // ⚠ 同一个工具有两种形态，必填项不同（dryRun 没有 id/action——没有写入就没有它们）。
+          // 用 additionalProperties:false + 一个显式 dryRun 分支表达，比 oneOf 更好读；
+          // 代价是非 dryRun 形态的「必有 id」从 schema 层降到了渲染层守卫（见 render 的第一行）。
+          id: { type: 'string', description: '条目 id（**dryRun 时不出现**——没有写入就没有 id）' },
+          action: { type: 'string', enum: ['created', 'updated', 'merged'], description: '本次写入的结果：新建 / 补写 / 合并进同名条目（**dryRun 时不出现**）' },
+          dryRun: { type: 'boolean', description: 'true = 只做了近重复检测、**未落库**；此时 id / action 均不出现' },
           similar: { type: 'array', items: { type: 'string' }, description: '高度相似的既有条目（id — 标题（强度 N））；无命中时省略该键' },
           hint: { type: 'string', description: '近重复提示（建议 update/merge）；无命中时省略该键' },
           pendingDisposition: { type: 'integer', description: '本次命中但**未给处置**的候选条数（>0 才出现）——它就是欠账，`memory_check` 会一直列出来' },
         },
       },
-      render: (args, value) => [{
-        type: 'text',
-        text: `已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`
-          + (typeof value.hint === 'string' && value.hint.length > 0 ? `\n${value.hint}` : '')
-          + (typeof value.pendingDisposition === 'number' && value.pendingDisposition > 0
-            ? `\n⚠ ${value.pendingDisposition} 条候选未处置，已进欠账（memory_check 可查）`
-            : ''),
-      }],
+      render: (args, value) => {
+        if (value.dryRun === true) {
+          const lines = ['dry-run：**未落库**。近重复检测用的是 `remember` 自己的检测器（不是 `recall` 的候选集）。']
+          const sim = value.similar
+          if (sim !== undefined && sim.length > 0) {
+            lines.push(`命中 ${sim.length} 条相似候选：`)
+            for (const s of sim) lines.push(`  - ${s}`)
+            lines.push('下一步：要么 `update` / `memory_merge` 合流（正式写入时带 `similarDisposition` + `dispositionReason`），要么确认无关后写入并标 `unrelated`。')
+          } else {
+            lines.push('未命中相似条目 ⇒ 可以正式写入（去掉 `dryRun`）。⚠ 这只证明**这个检测器**没命中，不等于 `recall` 也搜不到——两者候选集不同源。')
+          }
+          // hint 必须**无条件**印出：它不只装近重复提示，也装「库已满」这类与候选无关的警告。
+          // 2026-11-03 测试抓到过一版把它嵌进「有候选」分支里 ⇒ 库满提示整条被吞掉，
+          // 而回执照样说「可以正式写入」——正是「以为能写、其实会被拒」的形状。
+          if (typeof value.hint === 'string' && value.hint.length > 0) lines.push(value.hint)
+          return [{ type: 'text', text: lines.join('\n') }]
+        }
+        // 非 dryRun 形态必须同时有 id 与 action：这不是风格问题，缺了就是内部契约破了 → 响亮报错
+        if (value.id === undefined || value.action === undefined) {
+          return [{ type: 'text', text: '⚠ remember 返回缺 id / action（非 dryRun 形态必须有这两个字段）——内部契约破损，不要把这个当成功。' }]
+        }
+        return [{
+          type: 'text',
+          text: `已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`
+            + (typeof value.hint === 'string' && value.hint.length > 0 ? `\n${value.hint}` : '')
+            + (typeof value.pendingDisposition === 'number' && value.pendingDisposition > 0
+              ? `\n⚠ ${value.pendingDisposition} 条候选未处置，已进欠账（memory_check 可查）`
+              : ''),
+        }]
+      },
     },
     async execute(args, exec) {
       const { config, cwd } = await resolveRuntime(exec, deps)
@@ -289,6 +317,26 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         || ((kind === 'knowledge' || kind === 'episodic')
           && active.some((entry) => entry.kind === kind && titleFingerprint(entry.title) === titleFingerprint(title)))
       )
+      // dryRun（v0.19.1 · lh-0f54524a）：只跑近重复检测、返回候选与强度，**不落库**。
+      // 为什么必须复用这里的检测器：`remember` 与 `recall` 的候选集**不同源**——2026-11-02 实测，
+      // 先 recall 搜「测试期望写错」返回 96 条却**不含**真正的母条目 8b074a6e（标题「我的错误模式清单」
+      // 与查询措辞零字面重叠），而随后 remember 把它报了出来。⇒ 预检若走 recall，恰好救不了
+      // 「措辞不同、主题相同」这种情形，而那正是它该救的。
+      // 放在 maxEntries 守卫**之前**：预检不写库，所以「库满」不该表现为抛错（那会连「会不会撞车」
+      // 都问不出来）——它作为一条提示与候选一起返回。
+      if (args.dryRun === true) {
+        const dups = findNearDuplicates(active, { title, body, tags, kind, scope: writeScope })
+        const fullNote = wouldCreate && active.length >= config.maxEntries
+          ? `⚠ 库已满：${writeScope} ${active.length}/${config.maxEntries}，正式写入会被拒（先 forget 归档旧条目或调高配置）。`
+          : ''
+        const dupHint = dups.length > 0 ? formatDuplicateHint(dups) : ''
+        const hints = [fullNote, dupHint].filter((s) => s.length > 0)
+        return {
+          dryRun: true as const,
+          ...(dups.length > 0 ? { similar: dups.map((d) => `${d.id} — ${d.title}（强度 ${d.strength}）`) } : {}),
+          ...(hints.length > 0 ? { hint: hints.join('\n') } : {}),
+        }
+      }
       if (wouldCreate && active.length >= config.maxEntries) {
         throw new Error(`remember: ${writeScope} 已达 max_entries(${config.maxEntries})，请先 forget 归档旧条目或调高配置`)
       }
@@ -430,6 +478,10 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
                 snippet: { type: 'string', required: true },
                 tags: { type: 'array', required: true, items: { type: 'string' } },
                 scope: { type: 'string', required: true },
+                transcriptiveUncited: {
+                  type: 'boolean',
+                  description: 'v0.19.1：**转述型·无出处**标记（**仅命中时出现**）——标题是「精读/调研/评估/论文:/review」一类转述形态，而全文找不到可核出处（arXiv 编号）。语义不是「这条错了」，而是**它的权威不是我实测来的**：拿它当自己的结论用之前，回去核对原文，或把它当「别人的说法」。',
+                },
                 ...DIMENSION_ITEM_FIELDS,
                 level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
                 score: { type: 'number', required: true },
@@ -498,7 +550,10 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // 由我判断此刻是否正撞上那个事件。（独立 router 等有尸体再做，见 temporal.ts 决定 1）
           const watchNote = watchForTag(item.watchFor)
           const cueNote = cueTag(item.cue)
-          return `- ${stalenessNote}${subjectNote}${groundingNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${relatedNote}`
+          // 转述型·无出处（v0.19.1）：与 groundingTag 同类——都是「这条的权威归谁」的警示，
+          // 所以并排放在前缀，不进元数据方括号。
+          const transcriptiveNote = transcriptiveTag(item.transcriptiveUncited)
+          return `- ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${relatedNote}`
         })
         return [{
           type: 'text',
@@ -1092,6 +1147,10 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
                       snippet: { type: 'string', required: true },
                       tags: { type: 'array', required: true, items: { type: 'string' } },
                       scope: { type: 'string', required: true },
+                      transcriptiveUncited: {
+                        type: 'boolean',
+                        description: 'v0.19.1：**转述型·无出处**标记（**仅命中时出现**）——与 `recall` 同一字段同一判据（`origin.ts`）。翻档案时同样需要它：这条记忆的权威不是我实测来的。',
+                      },
                       ...DIMENSION_ITEM_FIELDS,
                       level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
                       updatedAt: { type: 'string', required: true },
@@ -1122,9 +1181,11 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               const stalenessNote = stalenessTag(item.reviewAfter, renderNow)
               const subjectNote = subjectTag(normalizeSubject(item.subject))
               const groundingNote = groundingTag(normalizeGrounding(item.grounding))
+              // 转述型·无出处（v0.19.1）：与 recall 同一判据同一位置——两个界面同一事实不能长得不一样
+              const transcriptiveNote = transcriptiveTag(item.transcriptiveUncited)
               const watchNote = watchForTag(item.watchFor)
               const cueNote = cueTag(item.cue)
-              return `  - ${stalenessNote}${subjectNote}${groundingNote}[${item.kind}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}`
+              return `  - ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}[${item.kind}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}`
             })
             .join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
