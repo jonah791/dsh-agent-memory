@@ -93,8 +93,8 @@ export interface RecompressResult {
   summary: Entry | null
   /** true = 本次未执行 */
   skipped: boolean
-  /** 结果原因：recompressed | no-summary | within-budget | raced（他方已改动，让位不覆盖） */
-  reason: 'recompressed' | 'no-summary' | 'within-budget' | 'raced'
+  /** 结果原因：recompressed | no-summary | within-budget | raced（他方已改动，让位不覆盖）| over-budget（产出仍超预算，fail-closed 不落盘） */
+  reason: 'recompressed' | 'no-summary' | 'within-budget' | 'raced' | 'over-budget'
   /** 重压前正文长度（字符） */
   beforeChars: number
   /** 重压后正文长度（字符） */
@@ -532,6 +532,17 @@ ${text}`,
     const fresh = this.store.get(scope, existing.id)
     if (fresh === undefined || fresh.body.length !== beforeChars) {
       return { summary: fresh ?? null, skipped: true, reason: 'raced', beforeChars, afterChars: fresh?.body.length ?? 0 }
+    }
+
+    // 长度校验（fail-closed · 2026-11-03 两个独立样本）：
+    // `summarizer.ts` 的 prompt 已写明「正文不超过 ${limit} 字」，但 **LLM 不照做时代码照样落盘**：
+    // 月概要 20,710→20,973（+263），次日再压 20,973→20,960（只省 13，仍超预算 3.5 倍），
+    // 两次都返回 `recompressed`。重压的整个存在意义就是「压回预算内」，
+    // 不校验 = 这个工具可以反向工作，且失败被报成成功，`memory_audit` 会一直把它列进 REVIEW。
+    if (trimmed.length > maxChars) {
+      // afterChars 报**产出长度**而非正文长度：skipped=true 已声明「本次未执行」，
+      // 调用方需要知道「LLM 到底产了多长」才能判断要不要换策略（分片压 vs 再压一次）。
+      return { summary: existing, skipped: true, reason: 'over-budget', beforeChars, afterChars: trimmed.length }
     }
 
     const updated = await this.store.update(scope, existing.id, {

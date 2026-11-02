@@ -97,6 +97,32 @@ describe('recompressUnit：把超预算概要用它自己的正文压回去', ()
     const after = store.list(WID, { includeArchive: true }).find((e) => e.id === created)
     assert.equal(after.body, BIG, '★ 正文原样：抛错发生在 update 之前')
   })
+
+  // ---------- 2026-11-03 缺陷修复：产出仍超预算时必须 fail-closed ----------
+  test('★ 产出仍超预算 ⇒ over-budget 且**正文一字未动**（尸体样本）', async () => {
+    // 尸体：LLM「不照做」——prompt 里写了「不超过 4000 字」，它照旧产 9000 字。
+    // 修复前的真实行为（两个独立样本）：月概要 20,710→20,973（**变长 263**）、
+    // 次日再压 20,973→20,960（只省 13），两次都返回 `recompressed` —— 失败被报成成功。
+    const r = await new TimelineCompressor(store, DEFAULT_CONFIG, async () => 'z'.repeat(9000))
+      .recompressUnit(WID, 'day', '2026-09-24')
+
+    assert.equal(r.skipped, true, '★ 必须是「跳过」，不能是「已完成」')
+    assert.equal(r.reason, 'over-budget')
+    assert.equal(r.beforeChars, BIG.length)
+    assert.equal(r.afterChars, 9000, '★ afterChars 报**产出长度**：调用方要看得见 LLM 产了多少才能判断下一步')
+
+    const after = store.list(WID, { includeArchive: true }).find((e) => e.id === created)
+    assert.equal(after.body, BIG, '★ 正文一字未动：宁可保持原样，也不落盘一份没压下去的「压缩结果」')
+  })
+
+  test('反向回归：能压进预算的样本仍报 recompressed（新判据没误伤）', async () => {
+    const r = await new TimelineCompressor(store, DEFAULT_CONFIG, async () => 'y'.repeat(3900))
+      .recompressUnit(WID, 'day', '2026-09-24')
+    assert.equal(r.skipped, false, '3900 < 4000 预算 ⇒ 允许落盘')
+    assert.equal(r.reason, 'recompressed')
+    const after = store.list(WID, { includeArchive: true }).find((e) => e.id === created)
+    assert.ok(after.body.includes('重压自 9000 字'), '正常路径的抬头仍在')
+  })
 })
 
 /** 直接构造 Entry 对象（createdAt/bucket 可控，绕过 remember 的 now 戳） */

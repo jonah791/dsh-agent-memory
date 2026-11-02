@@ -1767,7 +1767,11 @@ function buildRecompress(deps: MemoryToolDeps): ToolDefinition {
       render: (args, value) => [{
         type: 'text',
         text: value.skipped
-          ? `未重压：${value.note}（原 ${value.beforeChars} 字）`
+          ? (value.note === 'over-budget'
+            // 2026-11-03 实测两样本：月概要 20,710→20,973（变长）、20,973→20,960（只省 13）。
+            // 两万字级别的概要靠「再压一次」压不动 ⇒ 这里必须给出下一步，否则它是个没有出口的状态。
+            ? `未重压：产出仍超预算（LLM 产了 ${value.afterChars} 字，正文保持原 ${value.beforeChars} 字不动）—— 这个量级再压一次通常无效，改用分片压（分段产出摘要再合并）`
+            : `未重压：${value.note}（原 ${value.beforeChars} 字）`)
           : `已重压：${value.beforeChars} → ${value.afterChars} 字（省 ${value.beforeChars - value.afterChars}；旧版仍在 revisions 里可回溯）`,
       }],
     },
