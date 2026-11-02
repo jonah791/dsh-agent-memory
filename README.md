@@ -14,7 +14,7 @@
   <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.17.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-337%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-387%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：给 DSH 里的 agent 装上**跨会话的长期记忆**——把「经历过的事」结构化写入持久层，再在恰当的时机（会话启动、每条主人消息、时间桶结束、会话压缩完成）把它带回上下文，并允许 agent 检索、修订、归档、沿关系行走。
@@ -234,6 +234,8 @@ npm test          # = tsc -p tsconfig.json && node --test "tests/*.test.mjs"
 npm run test:ts   # = tsc && node --test "tests/*.test.ts"   （需 node ≥ 24）
 npm run test:all  # = 两套一起
 ```
+
+**实测（2026-11-03，v0.19.1）：`npm test` → `# tests 387 / # suites 29 / # pass 387 / # fail 0`** —— 本轮新增 14 条：`tests/origin.test.mjs`（7 条，含与 `scripts/memory-origin-audit.mjs` 的**正则逐字对齐**——同源不同文件靠测试锁住，脚本要能在 clone 上直接跑故不能 import 编译产物）与 `tests/dry-run.test.mjs`（7 条，含用 2026-11-02 实况做的尸体样本：`recall` 搜不到而 `remember` 检测器报得出的那条）。
 
 **实测（2026-10-27，v0.17.0）：`node --test tests/*.test.mjs` → `# tests 337 / # pass 337 / # fail 0`**（同一构建含 recall v0.17 的 BM25 长度归一 + 相对分门槛，与 v0.16.0 `cue` 维度的接线）。本轮补的三处守卫：`A109c`（`cueTag` 的脏值域：非数组 / 非字符串项 ⇒ 空串，**不许抛错**——抛错会连累整条 `recall` 渲染）· `A113b`（改写为**从 `DIMENSION_ITEM_FIELDS` 真源遍历**：它原先硬编码 `reviewAfter` / `watchFor` 两个字段，v0.16 加 `cue` 时**静默漏掉了新字段**，并新增「未声明字段确实会被剥掉」的判据自证，防止它退化成恒真的假守卫）· `A119`（render 打出「◎适用处境」）。
 
