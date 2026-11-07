@@ -43,6 +43,36 @@ export function isTranscriptiveWithoutOrigin(title: string, body: string): boole
   return !RE_ARXIV.test(text)
 }
 
+/** 全文是否含可核出处（当前只认 arXiv 编号——边界见文件头） */
+export function hasOrigin(text: string): boolean {
+  return RE_ARXIV.test(typeof text === 'string' ? text : '')
+}
+
+/**
+ * **条目级**判定（v0.21.0）：`provenance` 有值时由它接管，无值时回退标题正则。
+ *
+ * 为什么加这一层：`provenance` 是**声明**，本文件的正则是**猜测**。声明比猜测准，
+ * 而且能覆盖正则的已知盲区（引网页 / 书 / 口述的转述，编号判据看不见 ⇒ 漏标）：
+ * 只要写明 `provenance: 'web'`，判据就从「标题像不像转述」变成「**它自己说的来源有没有
+ * 可核出处**」——后者对网页类来源同样成立。
+ *
+ * 三种情形：
+ * - `provenance: 'web'`      ⇒ 查出处。有编号/链接即不标；没有 ⇒ 标（**它确实没给出处**）
+ * - `provenance` 为其他值     ⇒ **不标**。`master` 的权威是主人、`measured` 的权威是我自己
+ *   的读数——它们不是「转述」，拿正则去判只会误标（标题写「评估」而结论是我实测的条目，
+ *   正是文件头承认的那类误标）
+ * - `provenance` 未标注       ⇒ 回退旧启发式（存量条目的既有行为，零回归）
+ */
+export function transcriptiveFlagOf(entry: {
+  provenance?: import('./types.ts').Provenance
+  title: string
+  body: string
+}): boolean {
+  if (entry.provenance === 'web') return !hasOrigin(`${entry.title}\n${entry.body}`)
+  if (entry.provenance !== undefined) return false
+  return isTranscriptiveWithoutOrigin(entry.title, entry.body)
+}
+
 /**
  * 渲染标记（拼接用）：仅在判定为真时给文案，否则空串。
  *

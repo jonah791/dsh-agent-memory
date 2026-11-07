@@ -12,7 +12,8 @@
 
 import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RecallTuning, RelatedItem, TimelineLevel, WeightedTerm } from './types.ts'
 import { collapseFamilies, renderFamilyNote } from './family.ts'
-import { isTranscriptiveWithoutOrigin } from './origin.ts'
+import { transcriptiveFlagOf } from './origin.ts'
+import { archivalOf } from './archive.ts'
 
 /** 检索默认截断条数（未显式给 limit 时） */
 export const DEFAULT_RECALL_LIMIT = 20
@@ -441,6 +442,25 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
 }
 
 /**
+ * 标签匹配语义（v0.20 · 2026-11-04）：**包含**，不是精确相等。
+ *
+ * 为什么改：打分路径（`scoreEntry`）一直是 `tag.includes(token)`，而过滤路径
+ * 曾经是 `entry.tags.includes(tag)`（精确相等）——同一份 tag 数据两套口径。
+ * 实测代价（活跃 1418 条）：「技能」df/N=26.5% 触发泛词门 ⇒ 该词 idf 归零 ⇒
+ * 自由文本搜它是 0 条；唯一入口是 tags 过滤，而它只认 `技能` 不认
+ * `技能维护`/`技能熔炉` 等 39 条变体 ⇒ 双重失效，条目搜不到也不报错。
+ * 改为包含后，29 个主干概念的 782 条变体条目自动被覆盖（不必逐条回补 tag）。
+ *
+ * 方向性（刻意）：查 `技能维护` 仍只命中含该串的 tag，**不会**反向扩大到所有
+ * `技能`——粒度由调用方给的词决定，不由数据决定。
+ * 空串保护：`wanted` 为空时不匹配任何东西（否则 `includes('')` 恒真，一次
+ * 误传空数组元素就会让过滤形同虚设）。
+ */
+function tagMatches(entryTag: string, wanted: string): boolean {
+  return entryTag === wanted || (wanted.length > 0 && entryTag.includes(wanted))
+}
+
+/**
  * 过滤阶段：kind（任一命中）/ tags（全部命中）/ since-until（createdAt 区间）/
  * scope（精确）/ archived（默认剔除）。
  * 返回原始条目数组（不拷贝——下游只读）。
@@ -452,7 +472,7 @@ function filterEntries(entries: Entry[], query: RecallQuery): Entry[] {
   const tags = query.tags
   return entries.filter((entry) => {
     if (kinds !== undefined && kinds.length > 0 && !kinds.includes(entry.kind)) return false
-    if (tags !== undefined && tags.length > 0 && !tags.every((tag) => entry.tags.includes(tag))) return false
+    if (tags !== undefined && tags.length > 0 && !tags.every((tag) => entry.tags.some((et) => tagMatches(et, tag)))) return false
     if (!query.includeArchive && entry.archived) return false
     if (query.scope !== undefined && entry.scope !== query.scope) return false
     if (since !== undefined && entry.createdAt < since) return false
@@ -626,6 +646,9 @@ function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: R
 
 /** 结果项组装：概要字段 + score + 层级标注（level 原样透出，标注文案由工具层给模型） */
 function toResultItem(entry: Entry, score: number): RecallResultItem {
+  // 归档因果归一（v0.21.0）：读一次、下面透出两格（存量条目要走 source.reason 回退，
+  // 重复调用会让「归一口径」出现两个调用点）。
+  const archival = archivalOf(entry)
   return {
     id: entry.id,
     kind: entry.kind,
@@ -652,11 +675,20 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     ...(entry.reviewAfter !== undefined ? { reviewAfter: entry.reviewAfter } : {}),
     ...(entry.watchFor !== undefined ? { watchFor: entry.watchFor } : {}),
     ...(entry.cue !== undefined ? { cue: entry.cue } : {}),
-    // 转述型·无出处（2026-11-03 · lh-d5e409bf）——**同一投影点、同一教训**（v0.13/v0.14/v0.15 连续
-    // 三版都栽在漏这一行：判定生效了、total 对，但结果项里没有该字段 ⇒ 渲染层打不出标记）。
+    // 来源类型（v0.21.0）——**同一投影点、同一教训**（v0.13/v0.14/v0.15 连续三版都栽在漏这里）。
+    ...(entry.provenance !== undefined ? { provenance: entry.provenance } : {}),
+    // 归档因果（v0.21.0）：只对**已归档**条目出现。经 `archivalOf` 归一而不是直取存储字段
+    // ——存量 1260 条的归档原因还在 `source.reason` 里（零迁移方案，理由见 archive.ts 决定 1），
+    // 不归一就会出现「老条目查不到为什么没了」。
+    // ⚠ 透出的是**两个平级标量**，不是嵌套对象：存储层就是平的，且 schema DSL 的 required
+    // 只支持字段级（嵌套对象归一化后会被改形 ⇒ A118 红 + 泛型推断退化）。
+    ...(archival !== undefined ? { archivedReasonType: archival.reasonType } : {}),
+    ...(archival?.reason !== undefined ? { archivedReason: archival.reason } : {}),
+    // 转述型·无出处（2026-11-03 · lh-d5e409bf；v0.21.0 起由 provenance 接管）——
+    // **同一投影点、同一教训**（v0.13/v0.14/v0.15 连续三版都栽在漏这一行）。
     // 判据在 origin.ts（纯函数，单测直接测）；这里只**透出布尔**，文案归渲染层。
     // 只在该值为 true 时出现：false 与「未判定」在结果里同形，但两者对读者是同一件事（不需要看见）。
-    ...(isTranscriptiveWithoutOrigin(entry.title, entry.body) ? { transcriptiveUncited: true } : {}),
+    ...(transcriptiveFlagOf(entry) ? { transcriptiveUncited: true } : {}),
   }
 }
 
@@ -715,7 +747,7 @@ function browseBucketOf(entry: Entry): string {
 export function browseEntries(entries: Entry[], query: BrowseQuery = {}): BrowseResult {
   const filtered = entries.filter((entry) => {
     if (query.kind !== undefined && query.kind.length > 0 && !query.kind.includes(entry.kind)) return false
-    if (query.tags !== undefined && query.tags.length > 0 && !query.tags.every((tag) => entry.tags.includes(tag))) return false
+    if (query.tags !== undefined && query.tags.length > 0 && !query.tags.every((tag) => entry.tags.some((et) => tagMatches(et, tag)))) return false
     if (query.includeArchive !== true && entry.archived) return false
     if (query.scope !== undefined && entry.scope !== query.scope) return false
     if (query.since !== undefined && entry.createdAt < query.since) return false

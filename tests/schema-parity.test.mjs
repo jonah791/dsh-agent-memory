@@ -86,7 +86,7 @@ const EXEC = {
 
 /** 带**全部**维度字段的条目（★ 尸体样本：缺任一字段都会让 A117 对那个字段恒真） */
 async function seedFull(store) {
-  return store.remember({
+  const created = await store.remember({
     kind: 'knowledge',
     title: '带全维度的条目',
     body: '带全维度的条目 的正文',
@@ -99,7 +99,24 @@ async function seedFull(store) {
     reviewAfter: '2020-01-01',
     watchFor: ['某事件发生'],
     cue: ['某处境形状'],
+    // v0.21.0：来源链（`p` 轴）
+    provenance: 'measured',
   })
+  // v0.21.0：`archival`（返回弧）只在**已归档**条目上出现 ⇒ 另造一条并归档，
+  // 否则 A117 对 archival 恒真（「返回里没有该键」不构成证据）。
+  // 同时这也是判据自证的一半：归档原因必须带类型，否则下面 includeArchive 的比对
+  // 只是在比对一个空壳。
+  const doomed = await store.remember({
+    kind: 'knowledge',
+    title: '带归档记录的条目',
+    body: '这条会被归档，用来让 archival 出现在返回里',
+    tags: ['schema-parity'],
+    scope: WID,
+    level: null,
+    bucket: null,
+  })
+  await store.forget(WID, doomed.id, { reasonType: 'refuted', reason: 'schema-parity 夹具' })
+  return created
 }
 
 function renderText(tool, args, value) {
@@ -136,26 +153,34 @@ test('A117 ★ schema 一致性：execute 返回的每个键都被 output schema
   //   'reviewAfter','watchFor']，v0.16.0 加 `cue` 时它**静默漏掉了新字段**——正是 A118 注释里
   //   警告的「枚举式守卫在命名空间扩张时静默失效」。改成从真源出发，加字段自动被覆盖。
   const recallTool = byName.get('recall')
-  const recallValue = await recallTool.execute({}, EXEC)
+  // includeArchive: true —— `archival` 只在归档条目上出现，默认视图里看不到它
+  const recallValue = await recallTool.execute({ includeArchive: true }, EXEC)
   assert.ok(recallValue.results.length > 0, '夹具没落盘条目')
   assert.ok(Object.keys(DIMENSION_ITEM_FIELDS).length > 0, '前提：维度常量不得为空（否则本循环恒真）')
   for (const field of Object.keys(DIMENSION_ITEM_FIELDS)) {
+    // ⚠ 用 `some` 而非 `results[0]`：v0.21.0 起 `archival` 只出现在**归档**条目上，
+    // 而归档条目未必排第一（排序按相关度）。用 [0] 会让这条夹具自证恒假/恒真。
     assert.ok(
-      field in recallValue.results[0],
+      recallValue.results.some((item) => field in item),
       `夹具未落盘 ${field} ⇒ A117 对该字段恒真（无分辨力）。先修夹具（seedFull 补该字段）。`,
     )
   }
 
   for (const name of ['recall', 'memory_browse']) {
-    const tool = byName.get(name)
-    const value = await tool.execute({}, EXEC)
-    const problems = []
-    collectUndeclared(tool.output.schema, value, name, problems)
-    assert.deepEqual(
-      problems,
-      [],
-      `${name}: 返回了 output schema 未声明的键 ⇒ 线上会被 additionalProperties:false 整条拒收（工具不可用）：${problems.join(', ')}`,
-    )
+    // 两种视图都验：默认（无 archival）与 includeArchive（有 archival）。
+    // 只验一种会让「只在另一种视图出现的键」逃过 schema 校验 —— 2026-10-17 的
+    // memory_browse 事故就是这一类（工具整条被拒收）。
+    for (const args of [{}, { includeArchive: true }]) {
+      const tool = byName.get(name)
+      const value = await tool.execute(args, EXEC)
+      const problems = []
+      collectUndeclared(tool.output.schema, value, name, problems)
+      assert.deepEqual(
+        problems,
+        [],
+        `${name}(${JSON.stringify(args)}): 返回了 output schema 未声明的键 ⇒ 线上会被 additionalProperties:false 整条拒收（工具不可用）：${problems.join(', ')}`,
+      )
+    }
   }
 })
 

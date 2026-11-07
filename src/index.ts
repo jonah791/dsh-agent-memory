@@ -70,6 +70,23 @@ export const entrySchema = zod.object({
     reason: zod.string().optional(),
   }).optional(),
   archiveRef: zod.array(zod.string()).optional(),
+  /**
+   * 归档原因（v0.21.0）：这条**怎么没了**——平级标量，**不是嵌套对象**。
+   * 与 `source`（这条从哪来）分离；旧实现把归档原因塞进 `source.reason`，是 `p` 轴语义错配的根因。
+   * ⚠ 平级而非对象：本仓 schema DSL 的 required 只支持字段级，嵌套对象在归一化时会被改形
+   * （schema-parity A118 红 + `defineTool` 泛型推断退化成 never）——实测踩过两次。
+   * ⚠ **必须在此声明**（同一个坑**第六次**：v0.12 `aliases`、v0.13 `subject`、
+   * v0.14 `grounding`、v0.15 `reviewAfter/watchFor`、v0.16 `cue`）：
+   * storage-domain 在写入边界用本 schema 校验，**未声明的字段会被静默剥掉**——
+   * 存了等于没存，而写入**仍返回成功**，是最难查的一类缺陷。
+   */
+  archivedReasonType: zod.enum(['refuted', 'merged', 'superseded', 'stale', 'capacity', 'unspecified']).optional(),
+  archivedReason: zod.string().optional(),
+  /**
+   * 来源类型（v0.21.0）：`master` / `web` / `self` / `measured`。缺省 = 未标注。
+   * ⚠ **必须在此声明**（同一个坑**第七次**，见上方 `archivedReasonType` 的清单）。
+   */
+  provenance: zod.enum(['master', 'web', 'self', 'measured']).optional(),
   // v0.5 角色维度（多智能体工作台模式）：归属 + 写入者溯源
   role: zod.string().optional(),
   /**

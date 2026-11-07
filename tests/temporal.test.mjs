@@ -353,6 +353,16 @@ test('A113b ★写入边界 schema：维度字段**不得被静默剥掉**（真
   const sampleOf = (schema) => {
     if (schema.type === 'string') return schema.enum ? schema.enum[0] : '样例'
     if (schema.type === 'array') return ['样例']
+    // v0.21.0 起维度里出现嵌套对象（`archival`）：按它自己声明的 required 造**最小合法**
+    // 样例。不造可选字段（`reason`）——造了会让下面「可选字段不得被填默认值」的对照组失去分辨力。
+    if (schema.type === 'object') {
+      const required = Array.isArray(schema.required)
+        ? schema.required
+        : Object.entries(schema.properties ?? {})
+          .filter(([, sub]) => sub.required === true)
+          .map(([k]) => k)
+      return Object.fromEntries(required.map((k) => [k, sampleOf(schema.properties[k])]))
+    }
     throw new Error(`样例生成器不认识维度字段类型「${schema.type}」——新增类型时须先扩这里，不许静默返回 undefined`)
   }
   const dims = Object.fromEntries(Object.entries(DIMENSION_ITEM_FIELDS).map(([k, s]) => [k, sampleOf(s)]))

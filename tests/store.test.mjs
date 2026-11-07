@@ -143,11 +143,14 @@ describe('MemoryStore · 基础 CRUD', () => {
     assert.equal(await store.update('workspace-a', 'missing', { title: 'x' }), undefined)
   })
 
-  test('forget：置 archived 并记录 reason；list 默认过滤、includeArchive 可查', async () => {
+  test('forget：置 archived 并记录因果（archival）；list 默认过滤、includeArchive 可查', async () => {
     const created = await store.remember(draft())
-    const forgotten = await store.forget('workspace-a', created.id, '过时了')
+    const forgotten = await store.forget('workspace-a', created.id, { reason: '过时了' })
     assert.equal(forgotten.archived, true)
-    assert.equal(forgotten.source.reason, '过时了')
+    // v0.21.0：归档原因从 `source.reason` 迁到 `archival`（source 该答「从哪来」不是「怎么没了」）
+    assert.equal(forgotten.archivedReason, '过时了')
+    assert.equal(forgotten.archivedReasonType, 'unspecified', '未给 reasonType 时落「未判断」，不猜具体原因')
+    assert.equal(forgotten.source?.reason, undefined, '归档原因不得再污染 source')
     assert.equal(forgotten.id, created.id)
 
     assert.deepEqual(store.list('workspace-a'), [])
@@ -296,7 +299,7 @@ describe('MemoryStore · 去重合并（规格 §2.2）', () => {
 
   test('归档条目不参与查重：forget 后同 key 再 remember → created 新条目', async () => {
     const first = await store.remember(draft({ key: 'pref.retired' }))
-    await store.forget('workspace-a', first.id, '废弃')
+    await store.forget('workspace-a', first.id, { reason: '废弃' })
     const second = await store.remember(draft({ key: 'pref.retired', body: '新生命' }))
     assert.equal(second.action, 'created')
     assert.notEqual(second.id, first.id)

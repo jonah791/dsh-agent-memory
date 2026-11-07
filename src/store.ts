@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { Entry, EntryKind, Grounding, RememberResult, Subject, TimelineLevel } from './types.ts'
+import type { ArchiveReasonType, ArchiveRecord, Entry, EntryKind, Grounding, Provenance, RememberResult, Subject, TimelineLevel } from './types.ts'
 
 /**
  * kv 最小接口：KvTable<string, Entry> 的能力子集。
@@ -90,6 +90,15 @@ export interface EntryDraft {
   reviewAfter?: string
   /** 时效维（v0.15.0）：观察条件（1–8 条短句，在等什么新信息）——只在新建时生效，理由同 `reviewAfter`。 */
   watchFor?: string[]
+  /**
+   * 来源类型（v0.21.0）：这条记忆的**信息从哪来**（`master` / `web` / `self` / `measured`）。
+   *
+   * 与 `subject` / `grounding` 同形：**只在新建时生效**——命中已有条目（key 覆盖 / 标题
+   * 合并）时保留原标注。理由：合并路径下两条来源可能不同（比如原条是主人说的、新写的是
+   * 我从网页读的），静默覆盖会把「主人说的」降级成「外部」或反过来；两条来源都该留，
+   * 但一个字段放不下 ⇒ 保留原值（先到者），冲突由正文承载。显式纠正走 `update({ provenance })`。
+   */
+  provenance?: Provenance
   /** 写入者溯源（v0.5）：新建时记录，后续修订不覆盖（保留「谁创建」） */
   author?: Entry['author']
 }
@@ -136,6 +145,14 @@ export interface EntryPatch {
   reviewAfter?: string | null
   /** 时效维（v0.15.0）——观察条件整体替换，三态同 `reviewAfter`（`null` = 清空）。 */
   watchFor?: string[] | null
+  /**
+   * 来源类型（v0.21.0）——显式纠正 / 回填路径，三态同 `subject`：
+   * `undefined` = 不动 / `null` = 清除回**未标注** / 值 = 设置。
+   *
+   * 为什么允许转移：与 `grounding` 同理——存量条目要回填（写的时候没这个字段），
+   * 若禁止转移则回填无路可走，这个维度等于白建。
+   */
+  provenance?: Provenance | null
 }
 
 /** 存储层统计（memory_stats 工具用） */
@@ -272,6 +289,9 @@ export class MemoryStore {
       // 其实把别人的死线抹了」）。两个字段都只在**有值**时出现（无损 JSON 纪律）。
       ...(draft.reviewAfter !== undefined ? { reviewAfter: draft.reviewAfter } : {}),
       ...(draft.watchFor !== undefined && draft.watchFor.length > 0 ? { watchFor: draft.watchFor } : {}),
+      // 来源类型（v0.21.0）：只在新建时盖章（与 subject/grounding 同形——合并路径保留原标注，
+      // 理由见 EntryDraft.provenance 注释）。
+      ...(draft.provenance !== undefined ? { provenance: draft.provenance } : {}),
       ...(draft.author !== undefined ? { author: draft.author } : {}),
     }
     await this.kv.put(memoryKey(scope, kind, entry.id), entry)
@@ -317,22 +337,62 @@ export class MemoryStore {
       if (patch.watchFor === null || patch.watchFor.length === 0) delete updated.watchFor
       else updated.watchFor = patch.watchFor
     }
+    // 来源类型显式转移 / 清除（v0.21.0）：三态同 subject / grounding。
+    // 存量回填（写的时候还没有这个字段）走的就是这条路径。
+    if (patch.provenance !== undefined) {
+      if (patch.provenance === null) delete updated.provenance
+      else updated.provenance = patch.provenance
+    }
     await this.kv.put(memoryKey(scope, existing.kind, id), updated)
     return { ...updated }
   }
 
-  /** 归档（软删除）：置 archived，不进活跃检索；reason 记入 source */
-  async forget(scope: string, id: string, reason?: string): Promise<Entry | undefined> {
+  /**
+   * 归档（软删除）：置 archived，不进活跃检索；**因果记入 `archival`**（v0.21.0）。
+   *
+   * ## 为什么改签名（v0.21.0）
+   *
+   * 旧形态 `forget(scope, id, reason?)` 把原因写进 `source.reason`——那是**字段语义错配**：
+   * `source` 该答「这条从哪来」，归档原因答「这条怎么没了」。代价不是难看，是**无法按类型
+   * 查询**：自由文本没法回答「我引用的那条是被证伪了还是被合并了」，而这两者对引用方的处置
+   * 完全相反（前者必须撤、后者内容还在只是换了位置）。
+   *
+   * ## 关于 `reasonType` 缺省 `'unspecified'`
+   *
+   * 这不是「替我做断言」的默认值（AGENTS.md §1.3 禁的是那个），而是**「未判断」的显式表示**
+   * ——与 `grounding` 缺省 = 未标注同一立场。真实调用方应当给明确值：`forget` 工具要求
+   * 调用者填；`memory_merge` 内部传 `merged`；`timeline` 压缩传 `merged`。
+   *
+   * @param opts.reasonType - 归档原因类型；缺省 `'unspecified'`（= 未判断）
+   * @param opts.reason - 人类可读详情（可选，类型之外的补充）
+   */
+  async forget(
+    scope: string,
+    id: string,
+    opts: { reason?: string; reasonType?: ArchiveReasonType } = {},
+  ): Promise<Entry | undefined> {
+    // 运行时守卫（v0.21.0）：第三参数从「字符串 reason」改成了对象。纯 JS 调用方传旧形态
+    // **不会编译报错**，而字符串的 `.reason` 是 undefined ⇒ 静默丢掉原因、`reasonType`
+    // 退化成 `unspecified`。静默降级正是本维度要防的失败（「我判断过」与「我传错了形态」
+    // 在库里同形），故此处 fail-loud 而不做兼容。
+    if (typeof opts === 'string') {
+      throw new Error(
+        'forget: 第三参数已改为对象（v0.21.0）——请传 { reason, reasonType }。'
+        + '旧形态的字符串会被静默当成「没有原因类型」，故此处报错而不是兼容。',
+      )
+    }
     const existing = this.get(scope, id)
     if (existing === undefined) return undefined
     const now = new Date().toISOString()
+    const trimmedReason = typeof opts.reason === 'string' ? opts.reason.trim() : ''
     const archived: Entry = {
       ...existing,
       archived: true,
       updatedAt: now,
-      ...(reason !== undefined
-        ? { source: { ...existing.source, reason } }
-        : {}),
+      // 平级标量而非嵌套对象（理由见 types.ts::Entry.archivedReasonType 的注释：
+      // 本仓 schema DSL 的 required 只支持字段级，嵌套对象会被归一化改形）。
+      archivedReasonType: opts.reasonType ?? 'unspecified',
+      ...(trimmedReason.length > 0 ? { archivedReason: trimmedReason } : {}),
     }
     await this.kv.put(memoryKey(scope, existing.kind, id), archived)
     return { ...archived }

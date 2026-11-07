@@ -177,7 +177,7 @@ test('A72 forget 单条模式零回归：id 回填 + archived=true + 旧文案�
   assert.equal(forget.output.render({ id: 'old-1' }, value)[0].text, '已归档记忆条目 old-1')
   const stored = kv.map.get(`${WID}:knowledge:old-1`)
   assert.equal(stored.archived, true)
-  assert.equal(stored.source.reason, '测试归档')
+  assert.equal(stored.archivedReason, '测试归档')
 })
 
 test('A73 forget 批量：dryRun 不写库，去掉后真归档并自动记 reason', async () => {
@@ -197,7 +197,7 @@ test('A73 forget 批量：dryRun 不写库，去掉后真归档并自动记 reas
   assert.equal(real.archivedCount, 2)
   assert.equal(real.dryRun, false)
   assert.equal(store.list(WID).length, 1)
-  assert.equal(kv.map.get(`${WID}:knowledge:b1`).source.reason, 'forget: bulk（2 条）')
+  assert.equal(kv.map.get(`${WID}:knowledge:b1`).archivedReason, 'forget: bulk（2 条）')
 })
 
 test('A74 forget tier：ARCHIVE 走体检；KEEP 被拒；未知 tier 报错（尸体样本）', async () => {
@@ -243,7 +243,7 @@ test('A76 memory_merge：正文追加带来源 + 被并入者归档 + 跳过分�
   assert.equal(canon.revisions.length, 1)
   assert.equal(canon.revisions[0].prevBody, '主正文')
   assert.equal(kv.map.get(`${WID}:knowledge:dup-1`).archived, true)
-  assert.equal(kv.map.get(`${WID}:knowledge:dup-1`).source.reason, 'merged into canon')
+  assert.equal(kv.map.get(`${WID}:knowledge:dup-1`).archivedReason, 'merged into canon')
   assert.ok(value.notes.some((n) => n.includes('canonical 自身')))
   assert.ok(value.notes.some((n) => n.includes('列表内重复')))
   assert.ok(value.notes.some((n) => n.includes('视野内不存在')))

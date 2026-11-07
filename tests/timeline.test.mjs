@@ -430,7 +430,9 @@ describe('TimelineCompressor.compressUnit 压缩执行', () => {
     for (const id of ['a', 'b']) {
       const e = store.get('workspace-a', id)
       assert.equal(e.archived, true)
-      assert.match(e.source.reason, /已压缩入概要/)
+      // v0.21.0：因果记入 archival，且压缩归档的类型是 `merged`（内容换进概要，**不是被否定**）
+      assert.match(e.archivedReason, /已压缩入概要/)
+      assert.equal(e.archivedReasonType, 'merged', '压缩归档必须标 merged——标 refuted 会让引用方误撤')
     }
     // fact/knowledge 不参与压缩，仍在活跃列表（集合比较，顺序无关）
     assert.deepEqual(

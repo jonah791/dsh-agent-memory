@@ -112,7 +112,7 @@ const VERIFIER_EXEC = execOf({ sessionId: 'ffffffff-1111-2222-3333-444444444444'
 /** 直接塞条目（绕过 remember，显式控制 role/scope/kind） */
 async function seed(store, { scope = WID, kind = 'knowledge', title, role, archived = false }) {
   const entry = await store.remember({ kind, title, body: `${title} 的正文`, tags: [], scope, level: null, bucket: null, role })
-  if (archived) await store.forget(scope, entry.id, '测试归档')
+  if (archived) await store.forget(scope, entry.id, { reason: '测试归档' })
   return entry
 }
 

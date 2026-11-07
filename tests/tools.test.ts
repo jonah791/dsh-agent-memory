@@ -243,7 +243,7 @@ test('recall：kind/tags/since/limit/includeArchive 过滤', async () => {
   const all = await byName.get('recall')!.execute({}, exec)
   assert.equal(all.total, 2)
   const archived = store.list(WID).find((entry) => entry.title === '今天完成 T2')
-  await store.forget(WID, archived!.id, '测试')
+  await store.forget(WID, archived!.id, { reason: '测试' })
   const active = await byName.get('recall')!.execute({}, exec)
   assert.equal(active.total, 1)
   const withArchive = await byName.get('recall')!.execute({ includeArchive: true }, exec)

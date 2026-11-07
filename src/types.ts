@@ -49,6 +49,64 @@ export type Subject = 'self' | 'master'
 export type Grounding = 'established' | 'proposed' | 'scoped' | 'rejected'
 
 /**
+ * 来源类型（v0.21.0）：这条记忆的**信息从哪来**——八元组的 `p` 轴（来源链）。
+ *
+ * **为什么需要**（2026-11-07 体检）：`source` 字段名义上是来源链（sessionId / seq），
+ * 实际只用来装归档原因，**真正的来源信息一个字段都没有**。后果可指认：
+ * “这条结论是主人说的、我实测的、还是从网页读来的”决定它该怎么被用——主人的话是授权，
+ * 网页是别人的说法（要核对），我实测的是读数（要问样本多大），我自推的是**提议**（等回应）。
+ * 四者在库里同形同语气，只能靠正文措辞去猜。
+ *
+ * 与 `grounding` **正交且不可合并**：`grounding` 答「是否已被共同建立」（授权维 `a`），
+ * `provenance` 答「信息从哪来」（来源维 `p`）。一条「我实测某通道可用率 80%」⇒
+ * grounding 未标注（不涉及授权）+ provenance = `measured`；一条「主人否决了 RAG」⇒ 两者都有。
+ *
+ * 与 `origin.ts` 的关系：那个模块是**补丁**（用正则从标题形态猜「这可能是转述」，只能
+ * 标一种坏情况，引网页/书/口述的漏标）。`provenance` 是**声明**——写的时候我自己说。
+ * ⇒ 有 `provenance` 时由它接管判据，无值时回退正则（见 `origin.ts::transcriptiveFlagOf`）。
+ *
+ * 缺省 = **未标注**（不知道），不是某个默认来源。
+ */
+export type Provenance = 'master' | 'web' | 'self' | 'measured'
+
+/**
+ * 归档原因类型（v0.21.0）：这条为什么被归档——**返回弧的语义承载**。
+ *
+ * 动机（论文 Always-On Agents · arXiv:2606.30306）：435 篇语料里 retrieve 269 / write 200，
+ * 而 **rollback 只有 27**、forget 66 ⇒ 返回弧被系统性忽视。论文给「删除传播不变式」：
+ * 忘掉一条事实必须沿派生链撤到抽取自的原始情节 / 吸收了它的摘要 / 以它为条件的技能 /
+ * 别人的共享副本 / 它曾授权的外部副作用。**要传播，先要能分类**：一条被**证伪**的条目
+ * 必须撤；被**合并**的条目内容还在（只是换了位置）；**过时**的降到低置信；**容量清理**的
+ * 什么都不用做。四者对「引用它的活跃条目」的处置完全不同。
+ *
+ * 而旧实现把它写成自由文本（`store.ts::forget` → `source.reason`）⇒ 无法按类型查询，
+ * 「我引用的那条为什么没了」只能逐条读正文猜。
+ *
+ * `unspecified` 是**「未判断」的显式表示**，不是替我做断言的默认值——与 `grounding`
+ * 缺省 = 未标注同一立场（AGENTS.md §1.3 判断型字段禁默认值）。
+ */
+export type ArchiveReasonType = 'refuted' | 'merged' | 'superseded' | 'stale' | 'capacity' | 'unspecified'
+
+/**
+ * 归档记录（v0.21.0）：`forget` 的因果留痕，**从 `source` 分离出来**。
+ *
+ * 为什么不在 `source` 上加一个 `reasonType` 了事：`source` 该答「这条从哪来」，
+ * 归档记录答「这条怎么没了」——两件事装进一个字段，就是当前 `p` 轴 47% 覆盖、
+ * 语义错配的根因。分开之后两边都能干净地填。
+ *
+ * ⚠ 存量兼容走**读取归一**而不是批量迁移（见 `archive.ts::archivalOf`）：2701 条里有
+ * 1260 条带 `source.reason`，一次迁移的数据风险远大于收益。
+ */
+export interface ArchiveRecord {
+  /** 归档时刻（ISO） */
+  at: string
+  /** 原因类型（枚举——让活跃条目能按类型问「我引用的东西为什么没了」） */
+  reasonType: ArchiveReasonType
+  /** 人类可读原因（自由文本，可选——类型之外的细节） */
+  reason?: string
+}
+
+/**
  * 角色准入策略（v0.5 多智能体工作台模式，借鉴 MAGE role policy index + Γ 准入）：
  * 描述「某个角色能看见什么」。字段缺省 = 不限制该维度。
  */
@@ -127,6 +185,28 @@ export interface Entry {
   bucket: string | null
   /** 冷归档标记（不进活跃检索） */
   archived: boolean
+  /**
+   * 归档原因类型（v0.21.0）：这条**怎么没了**——返回弧的语义承载，与 `source`（从哪来）分离。
+   *
+   * 旧形态是 `forget` 把原因写进 `source.reason`，即「归档原因」与「来源」共用一个字段
+   * （`p` 轴语义错配的根因）。分开之后 `source` / `provenance` 管来路，本字段管去路。
+   * 论文依据（arXiv:2606.30306）：435 篇里 retrieve 269、**rollback 只有 27** ⇒ 返回弧被
+   * 系统性忽视；而「删除传播」要求先能**分类**（被证伪必须撤 / 被合并内容还在 / 过时降置信）。
+   *
+   * ⚠ **为什么是平级标量而不是嵌套对象**（2026-11-07 实测）：本仓 schema DSL 的 `required`
+   * 只支持字段级 `required: true`；嵌套对象在归一化时会被提成对象级 `required: ['a','b']`
+   * ⇒ 既与常量比对不上（schema-parity A118 红），也让 `defineTool` 泛型推断退化成 never
+   * （TS2719/TS2322）。⇒ 与 `subject` / `grounding` / `provenance` 同形：平级、标量、enum。
+   *
+   * 归档时刻**不单独存**：`store.forget` 会刷新 `updatedAt`，那就是归档时刻。存两份会让
+   * 「哪个才算」变成第二个真源（同 `archivalOf` 的取舍）。
+   *
+   * 存量 1260 条带 `source.reason` 的旧条目**不迁移**，由 `archive.ts::archivalOf` 读取时
+   * 归一（`reasonType: 'unspecified'`）——零数据改动，新旧并存不歧义。
+   */
+  archivedReasonType?: ArchiveReasonType
+  /** 归档原因的人类可读详情（v0.21.0；类型之外的补充，可选） */
+  archivedReason?: string
   source?: { sessionId?: string; seq?: number; reason?: string }
   /** summary → 原始条目 id 列表 */
   archiveRef?: string[]
@@ -186,6 +266,18 @@ export interface Entry {
    * 那条尸体成立再补 router。
    */
   watchFor?: string[]
+  /**
+   * 来源类型（v0.21.0）：这条记忆的**信息从哪来**（`master` / `web` / `self` / `measured`）。
+   *
+   * 与 `grounding` **正交且不可合并**：`grounding` 答「是否已被共同建立」（授权维 `a`），
+   * 本字段答「信息从哪来」（来源维 `p`）。一条「我实测某通道可用率 80%」⇒ grounding 未标注
+   * + `provenance: 'measured'`；一条「主人否决了 RAG」⇒ 两者都有值。合并任何一个都会让
+   * 另一维失去分辨力。
+   *
+   * 缺省 = **未标注**（不知道），不是某个默认来源——与 `grounding` 同一立场（判断不代填）。
+   * 写入纪律：写的时候我知道这信息从哪来，**那时就该填**；事后再补常已想不起。
+   */
+  provenance?: Provenance
   /** 写入者溯源（v0.5）：谁写的（会话 id / 委派深度 / 预设名）——与可见性无关，只作溯源 */
   author?: { sessionId?: string; delegationDepth?: number; preset?: string }
   /**
@@ -475,6 +567,15 @@ export interface RecallResultItem {
   watchFor?: string[]
   /** 情境形状（v0.16.0；仅当条目设了时出现在结果里）——什么处境的「形状」该用这条经验 */
   cue?: string[]
+  /** 来源类型（v0.21.0；仅当条目设了时出现在结果里）——`master` / `web` / `self` / `measured` */
+  provenance?: Provenance
+  /**
+   * 归档原因（v0.21.0；**仅对已归档条目出现**）——这条怎么没了。
+   * 由 `archive.ts::archivalOf` 归一（v0.20 及以前的存量原因在 `source.reason` 里，
+   * 读取时读成 `archivedReasonType: 'unspecified'`）。归档时刻 = 条目的 `updatedAt`。
+   */
+  archivedReasonType?: ArchiveReasonType
+  archivedReason?: string
   /**
    * 转述型·无出处（v0.19.1；**仅在判定为真时出现**）——标题是「精读/调研/评估/review…」一类
    * 转述形态，而全文找不到可核出处（arXiv 编号）。

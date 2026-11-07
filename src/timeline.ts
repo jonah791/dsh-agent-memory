@@ -459,10 +459,15 @@ ${text}`,
       archiveRef: sources.map((e) => e.id),
     })
 
-    // 原料冷归档（保留不删，可 includeArchive 深挖）；reason 记录溯源
+    // 原料冷归档（保留不删，可 includeArchive 深挖）；因果记入 archival（v0.21.0）。
+    // `merged` 而非 `refuted`：内容并进了概要、换了位置，**不是被否定**——引用方不必撤，
+    // 只需知道「原文在概要的 archiveRef 里」。
     const archivedIds: string[] = []
     for (const source of sources) {
-      await this.store.forget(scope, source.id, `已压缩入概要 ${created.id}（${level} ${bucket}）`)
+      await this.store.forget(scope, source.id, {
+        reasonType: 'merged',
+        reason: `已压缩入概要 ${created.id}（${level} ${bucket}）`,
+      })
       archivedIds.push(source.id)
     }
 

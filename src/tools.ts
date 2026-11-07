@@ -34,6 +34,7 @@ import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, sub
 import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, parseGroundingArg, UNLABELED_GROUNDING } from './grounding.ts'
 import { countByStaleness, cueTag, filterByStaleness, parseReviewAfterArg, parseStalenessFilterArg, parseWatchForArg, stalenessTag, stalenessVerdict, watchForTag } from './temporal.ts'
 import { transcriptiveTag } from './origin.ts'
+import { archivalOf, archiveReasonTag, countByArchiveReason, countByProvenance, filterByProvenance, parseArchiveReasonTypeArg, parseProvenanceArg, provenanceTag } from './archive.ts'
 import { auditMemory } from './audit.ts'
 
 /** 概要重压的外部结果（工具层回报用；与 timeline.RecompressResult 解耦，界面只认这几个读数） */
@@ -233,6 +234,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       grounding: { type: 'string', description: '约定状态（v0.14.0）：这条记忆涉及的事**是否已被主人与我共同建立**——`established`（主人明确说过/定调过）· `proposed`（**我自己提的、主人未回应**）· `scoped`（主人接受但限定范围）· `rejected`（主人否决过）。缺省 = 未标注。⚠ **写入纪律**：我提出的、主人没回应的方案，**必须标 `proposed`**——否则未来的我会把它当成「主人说过的」而当授权用（论文实测：未接受提议被记成「已确认信息」的比例高达 86–100%）。' },
       reviewAfter: { type: 'string', description: '复查死线（v0.15.0）：这条结论**该在什么时候被重看**——那是「未来的我执行它」的时刻。接受 `YYYY-MM-DD`（如 2026-11-01）/ ISO 时刻 / 相对写法 `+7d`（7 天后）或 `+2w`（2 周后）。**什么时候填**：这条结论依赖**会变的外部状态**时——环境坐标（端口/路径/版本号/目录布局）、工具或通道的可用率读数、别人的系统行为、价格与限额、尚未定稿的方案。**什么时候不填**：结论永久成立时（原则 / 教训 / 主人偏好 / 我的代码风格 / 已发生事件的事实）——**空是常态，填是例外**。⚠ 到期**不等于作废**，只表示该去核实；核实后 `update` 续新死线或清除。' },
       watchFor: { type: 'array', items: { type: 'string' }, description: '观察条件（v0.15.0）：**什么样的新信息会让这条失效**（1–8 条短句，每条 ≤200 字）。**为什么值得填**（论文实测）：决策时写下的观察条件能达 92.2% 的关键新信息、只带 20 条无关噪音；而「把全部背景事实都索引上」虽达 100%，却带 89 条噪音——**少而准**才划算。**怎么填**：写「什么事件会让它不成立」，点名具体实体（含它的**别名**与**上游依赖**），**略去用不到的**。例：`["DuckDuckGo 通道可用率重测低于 80%", "busDir 或 web 端口改变", "该插件被卸载或改名"]`。**写入时机只有一次——就是现在**（我记得为什么这样判断）；事后再补，我想不起当时在等什么。它会被印在 recall 结果里，命中的那一刻我就看见「它在等什么」。' },
+      provenance: { type: 'string', description: '来源类型（v0.21.0）：这条记忆的信息**从哪来**——`master`（主人说的：原话 / 指令 / 定调 / 纠正）/ `web`（外部：网页 / 论文 / 他人代码 / 第三方工具输出）/ `self`（**我自己推出或提议的**）/ `measured`（我实测 / 运行 / 读数得到的）。**为什么填**：`grounding` 只覆盖「需要授权判断」的条目（约 7%），技术结论、论文笔记、实测读数全落在它之外——于是「这条是我实测的还是我从网上读来的」在库里无法区分，而两者该怎么用完全不同（读数要问样本多大，网上读来的要回原文核对）。**什么时候不填**：真的想不起来源时留空（省略 = 不知道，不是某个默认值）。⚠ 与 `grounding` 不冲突、可同时填：一条「主人否决了 RAG」既是 `master` 又可以是 `established`。' },
       cue: { type: 'array', items: { type: 'string' }, description: '情境形状（v0.16.0）：这条经验**在什么形状的情境下该被取出使用**（1–8 条短句）。与另两维**不可互相替代**：`aliases` 管**入口词**（可能被怎么问）、`watchFor` 管**时效**（什么新信息会让它失效）、`cue` 管**应用场景**（什么处境该用它）。**怎么填**：写情境的**形状**而不是本次任务的事实，才能在**另一件事**上触发。论文给的判据线（Harness² 的 experience cue）：太泛无用（`be thorough`）；太具体永不触发（`某日某费用涨到 250`）；正好是「当仪器执行若干顺序动作、且其中一个会终止行动者自身的权限时，把终止性动作排在最后」。它会被印在 recall 里——命中的那一刻我就看见「什么处境该用它」。' },
       similarDisposition: { type: 'string', enum: ['merged', 'updated', 'unrelated'], description: '近重复处置（2026-10-28）：当本次写入**命中相似条目**时，声明你怎么处置它们——`merged`（已合流）/ `updated`（已补写原条目）/ `unrelated`（判为无关）。作用对象是**本次全部命中候选**（不逐条指定：逐条会让参数变成数组、重到没人愿意用；差别靠 `dispositionReason` 说清）。不填 ⇒ 这次撞车进「欠账」，`memory_check` 会一直列出来。⚠ 处置是**时间轴上的重置**，不是永久免检：同一个候选之后再撞上会重新计欠账——否则「判过无关但阈值仍把它报出来」会被永久掩盖。' },
       dispositionReason: { type: 'string', description: '处置理由（配合 `similarDisposition`）：为什么这么判。写清「其中哪条是真同主题、哪些是弱相关噪音」——将来重读时这是唯一线索。' },
@@ -308,6 +310,9 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       const rememberNow = new Date()
       const reviewAfter = parseReviewAfterArg(args.reviewAfter, rememberNow, 'remember.reviewAfter')
       const watchFor = parseWatchForArg(args.watchFor, 'remember.watchFor')
+      // 来源类型（v0.21.0）：同纪律——**显式给值才盖章**，非法值 fail-loud
+      // （静默当「未标注」正是本维度要防的失败：我以为标了、其实没标）。
+      const provenance = parseProvenanceArg(args.provenance, 'remember.provenance')
       const { writeScope } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
       const { title, body } = splitText(text)
       // max_entries 守卫：仅当会新建时拦截（更新/合并不受限）
@@ -357,6 +362,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         ...(grounding !== undefined ? { grounding } : {}),
         ...(reviewAfter !== undefined ? { reviewAfter } : {}),
         ...(watchFor !== undefined ? { watchFor } : {}),
+        ...(provenance !== undefined ? { provenance } : {}),
       })
       // 近重复提示（2026-09-17 主人「存记忆时先搜索记忆」的机制层）：
       // 用写入前的既有条目快照做检测，复用 search.ts 的打分（判据单一真源）；
@@ -427,6 +433,9 @@ export const DIMENSION_ITEM_FIELDS = {
   reviewAfter: { type: 'string', description: '时效维（v0.15.0）：复查死线 `YYYY-MM-DD`；未设死线的条目省略该键。⚠ 档位（已过期 / N 天后复查）由**渲染层按当前时刻现算**，不预存——存了就会与读取时刻脱钩。' },
   watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）：观察条件——这条记忆在等什么新信息会让它失效；未设的条目省略该键。' },
   cue: { type: 'array', items: { type: 'string' }, description: '情境形状（v0.16.0）：这条经验适用的处境**形状**；未设的条目省略该键。与 watchFor（在等什么）不同，它答的是「什么处境该用它」。' },
+  provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源类型（v0.21.0）：这条的信息**从哪来**——`master`（主人说的）/ `web`（外部：网页·论文·他人代码）/ `self`（我自己推出或提议的）/ `measured`（我实测·运行·读数得到的）。未标注的条目省略该键（⚠ 省略 = 不知道，**不是**某个默认来源）。与 grounding 正交：grounding 答「是否已被共同建立」，本字段答「信息从哪来」。' },
+  archivedReasonType: { type: 'string', enum: ['refuted', 'merged', 'superseded', 'stale', 'capacity', 'unspecified'], description: '归档原因类型（v0.21.0）：这条**怎么没了**——仅已归档条目出现。它决定引用它的活跃条目该怎么处置：`refuted`/`superseded`/`stale` ⇒ 结论不能再当依据（引用方必须撤或降置信）；`merged`/`capacity` ⇒ 内容仍在（换了位置 / 只是清位）。`unspecified` = 未判断（v0.20 及以前的存量归档）。' },
+  archivedReason: { type: 'string', description: '归档原因详情（v0.21.0）：类型之外的人类可读补充；仅已归档且给了原因时出现。' },
 } as const
 
 /** 构建 recall 工具 */
@@ -437,7 +446,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
     parameters: {
       query: { type: 'string', description: '检索关键词（多个词空格分隔，任一命中即计分；省略则按新鲜度排序）。' },
       kind: { type: 'array', items: { type: 'string', enum: ['fact', 'knowledge', 'episodic', 'summary'] }, description: '层级过滤（任一命中）。' },
-      tags: { type: 'array', items: { type: 'string' }, description: '标签过滤（全部命中）。' },
+      tags: { type: 'array', items: { type: 'string' }, description: '标签过滤（全部命中；**包含**匹配：给 `技能` 也命中 `技能维护`/`技能熔炉` 等变体，给 `技能维护` 只命中该串。v0.20 起与打分路径口径一致）。' },
       since: { type: 'string', description: '起始时间（ISO 时间或 YYYY-MM-DD，按创建时间过滤）。' },
       until: { type: 'string', description: '截止时间（ISO 时间或 YYYY-MM-DD）。' },
       scope: { type: 'string', description: '作用域覆盖：global 只查全局；workspaceId 跨项目查（global 仍附加）。' },
@@ -446,6 +455,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       role: { type: 'string', description: '角色视角覆盖（v0.5）：以指定角色检索。缺省 = 按调用者会话身份推导（人类会话→主脑角色；子代理/队员→派生角色）。仅当项目启用 roles 时生效。' },
       subject: { type: 'string', description: '主体层过滤（v0.13.0）：只看「关于谁」的条目——`self` = 只看关于我自己的，`master` = 只看关于主人的。缺省 = 不过滤（通用条目照常返回）。⚠ 与 role 的**准入**不同：这是**可选筛子**，不是可见性边界——它只是不匹配就不返回，不改变任何条目的可见性。想「关于我的 + 关于主人的、排除通用」目前需分两次调用。' },
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` = **只看我自己提的、主人未回应的事**——自查「我有没有把提议当成定论」时用它；`rejected` = 只看主人否决过的（防我旧事重提）；`established` = 只看主人明确说过的。缺省 = 不过滤。⚠ 同为**可选筛子**，不是可见性边界。' },
+      provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源过滤（v0.21.0）：只看某类来源的条目——`master`（主人说的）/ `web`（外部：网页·论文）/ `self`（我推的·我提议的）/ `measured`（我实测的）。缺省 = 不过滤。**典型用法**：`self` = 自查「哪些结论的权威只在我这边」；`web` = 找出「该回原文核对」的条目；`master` = 「主人到底说过哪些」。⚠ 与 grounding 不同：那个筛「主人回应了没有」，这个筛「信息从哪来」。' },
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看**该重看**的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`（还早）。典型用法：`["expired","due-soon"]` = 「**我的哪些结论该重看了**」。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目在任何取值下都不返回（它们的时效状态是「**不知道**」，不是「有效」）。' },
       collapseFamily: { type: 'boolean', description: '家族折叠（v0.16.0 · 论文 Memory Echo 的 Family 组件）：把**候选池内**的「时间桶概要 + 它 archiveRef 的原料」压成**每族一位**（族内得分最高者为代表），其余不占本次服务位。论文依据：「Repeated writes therefore add records, not independent votes」（arXiv 2610.17763v1 §5.1）——同一来源的派生不该当多个独立证据占位。**缺省 false**：论文消融显示 Family 单独上线会把准确率从 0.825 打到 0.651（≈ −33 题），须与「当前事实优先」配对才安全，故先做成可选。⚠ 只在 `includeArchive: true` 时有实际效果（默认视图下原料已冷归档，不会与概要同时命中）；折叠不删数据，只是本次不占位。' },
     },
@@ -554,7 +564,14 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // 转述型·无出处（v0.19.1）：与 groundingTag 同类——都是「这条的权威归谁」的警示，
           // 所以并排放在前缀，不进元数据方括号。
           const transcriptiveNote = transcriptiveTag(item.transcriptiveUncited)
-          return `- ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${relatedNote}`
+          // 来源标记（v0.21.0）：只凸显**权威不在我这一侧**的（`[外部]` 别人的说法、
+          // `[自推]` 我推的）。`master` / `measured` / 未标注留空——标记要挑着打。
+          const provenanceNote = provenanceTag(item.provenance)
+          // 归档标记（v0.21.0）：只在**结论已不能用**的原因上打（`[被证伪]` / `[被取代]` /
+          // `[已过时]`）；`merged` / `capacity` / 未分类留空——内容还在，换位置而已。
+          // 仅在 includeArchive 时才有归档条目进来，但一旦进来这一格就是「能不能引用它」的答案。
+          const archiveNote = archiveReasonTag(item.archivedReasonType)
+          return `- ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${relatedNote}`
         })
         return [{
           type: 'text',
@@ -582,9 +599,16 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       // ⚠ 它不是「过滤掉过期的」——是**审查入口**：`staleness:['expired']` 把该重看的捞出来。
       // now 在这里取**一次**、整批共用：避免长批处理里前后条目的判定基准漂移（§仪器纪律）。
       const staleness = parseStalenessFilterArg(args.staleness, 'recall.staleness')
+      // 来源筛（v0.21.0）：同为可选筛子。它是**审查入口**而不是分类展示——
+      // `provenance:'self'` = 「这些结论的权威其实在我这边」（我推的、不是主人定的、也不是实测），
+      // `'web'` = 「从外面读来的」（拿它当自己的结论用之前回原文核对）。
+      const provenance = parseProvenanceArg(args.provenance, 'recall.provenance')
       const now = new Date()
       const entries = filterByStaleness(
-        filterByGrounding(filterBySubject(gathered.entries, subject), grounding),
+        filterByProvenance(
+          filterByGrounding(filterBySubject(gathered.entries, subject), grounding),
+          provenance,
+        ),
         staleness,
         now,
       )
@@ -759,6 +783,7 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       grounding: { type: 'string', description: '约定状态（v0.14.0）——**显式纠正/回填**已存在条目的「是否已被共同建立」：给 `established`/`proposed`/`scoped`/`rejected` = 设置，给空字符串 = 清除回未标注，缺省 = 不动。**主要用途是回填**：把库里「我自己提的、主人未回应」的条目标成 `proposed`，防止未来的我把它当授权用；批量回填请先用 recall({ grounding: ... }) 定位 id。' },
       reviewAfter: { type: 'string', description: '时效维（v0.15.0）——**显式续期 / 清除**复查死线：给 `YYYY-MM-DD`（或相对写法 `+7d` / `+2w`，按**此刻**折算成绝对日期）= 设置；给**空字符串** = 清除（不再跟踪）；缺省 = 不动。**主要用途是「到期后的动作链」**：核实完 → 改内容 + 续新死线（或清除）。必须允许转移——死线一旦过期就永远卡在过期态，标记天天亮而消不掉。' },
       watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）——**整体替换**观察条件：给 1–8 条（每条 ≤200 字）= 设置；给**空数组** = 清空；缺省 = 不动。' },
+      provenance: { type: 'string', description: '来源类型（v0.21.0）——**显式纠正 / 回填**已存在条目的「信息从哪来」：给 `master`/`web`/`self`/`measured` = 设置，给空字符串 = 清除回未标注，缺省 = 不动。**主要用途是回填**：存量条目写入时还没有这个字段，而「这条是主人说的还是我从网页读来的」决定它该怎么被用；批量回填请先用 recall 定位 id。' },
     },
     output: {
       schema: {
@@ -829,6 +854,11 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       if (args.watchFor !== undefined) {
         patch.watchFor = parseWatchForArg(args.watchFor, 'update.watchFor') ?? null
       }
+      // 来源类型显式转移 / 清除（v0.21.0）：三态同 subject / grounding——给值 = 设置 /
+      // 空串 = 清除回未标注 / 缺省 = 不动。这是**存量回填的唯一入口**。
+      if (args.provenance !== undefined) {
+        patch.provenance = parseProvenanceArg(args.provenance, 'update.provenance') ?? null
+      }
       await deps.store.update(entry.scope, args.id, patch)
       recordAction(deps, config, { action: 'update', id: args.id, mode })
       return { id: args.id }
@@ -852,7 +882,8 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
       tier: { type: 'string', description: '分档批量：按 memory_audit 的档位选目标（ARCHIVE / DEMOTE / REVIEW；KEEP 被拒绝）。' },
       max: { type: 'integer', description: `批量上限（缺省 ${DEFAULT_BULK_FORGET}，硬上限 ${MAX_BULK_FORGET}）。` },
       dryRun: { type: 'boolean', description: 'true = 只列清单不写库（批量前必做）。' },
-      reason: { type: 'string', description: '归档原因（记入条目 source）。' },
+      reason: { type: 'string', description: '归档原因（人类可读详情，记入条目 `archivedReason`）。' },
+      reasonType: { type: 'string', description: '归档原因**类型**（v0.21.0）——决定引用它的活跃条目该怎么处置：`refuted`（被证伪·结论不能再当依据，引用方必须撤）/ `superseded`（被取代·有更新结论覆盖）/ `stale`（过时·依赖的外部状态变了）/ `merged`（被合并·内容换位置了，原文在别处）/ `capacity`（容量清理·不因为错，只因占位）/ `unspecified`（未判断）。**单条归档请务必判断一次**：这一格是「我引用的那条为什么没了」唯一可查的答案（旧实现把它写成自由文本，查不了）。' },
     },
     output: {
       schema: {
@@ -936,8 +967,14 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
         return { ...idField, archived: false, archivedCount: 0, ids, skipped, truncated, dryRun: true, notes }
       }
       const reason = args.reason ?? (targets.length > 1 ? `forget: bulk（${targets.length} 条）` : undefined)
+      // 解析入参（v0.21.0）：非法值 fail-loud——静默当成 `unspecified` 会让「我判断过」
+      // 与「我打错了字」在库里同形，而这两件事对未来读它的人完全不同。
+      const reasonType = parseArchiveReasonTypeArg(args.reasonType, 'forget.reasonType') ?? 'unspecified'
       for (const target of targets) {
-        await deps.store.forget(target.scope, target.id, reason)
+        await deps.store.forget(target.scope, target.id, {
+          ...(reason !== undefined ? { reason } : {}),
+          reasonType,
+        })
         recordAction(deps, config, {
           action: 'forget',
           id: target.id,
@@ -1029,7 +1066,8 @@ function buildMerge(deps: MemoryToolDeps): ToolDefinition {
       const reason = args.reason ?? `merged into ${canonical.id}`
       const archived: string[] = []
       for (const other of merged) {
-        await deps.store.forget(other.scope, other.id, reason)
+        // 合并路径的语义是确定的：内容并进了 canonical，换位置而不是被否定 ⇒ `merged`。
+        await deps.store.forget(other.scope, other.id, { reason, reasonType: 'merged' })
         recordAction(deps, config, { action: 'forget', id: other.id, reason })
         archived.push(other.id)
       }
@@ -1060,6 +1098,8 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           byGrounding: { type: 'object', additionalProperties: true, required: true, description: '约定状态分布（v0.14.0）：established / proposed / scoped / rejected / unlabeled（未标注）。⚠ **unlabeled 与 established 是两件事**——前者是「不知道」，后者是「主人明确说过」；把未标注读成已建立正是论文点名的失败。' },
           byStaleness: { type: 'object', additionalProperties: true, required: true, description: '时效维分布（v0.15.0）：expired（**已过复查死线**）/ due-soon（7 天内到期）/ fresh（已跟踪且还早）/ untracked（**未设死线**）。⚠ untracked 与 fresh 是两件事——前者是「**不知道它会不会过期**」，后者是「已跟踪且还早」。若 untracked 长期等于总数，说明这个维度没被用起来（退出判据见 src/temporal.ts 文件头）。' },
           scopes: { type: 'array', required: true, items: { type: 'string' } },
+          byProvenance: { type: 'object', additionalProperties: true, required: true, description: '来源分布（v0.21.0）：master（主人说的）/ web（外部）/ self（我推的）/ measured（我实测的）/ unlabeled（**未标注**）。⚠ unlabeled 是常态不是缺陷——但若它长期≈总数，说明这一维没被用起来，「这条是主人说的还是我从网上读来的」仍然无法区分。' },
+          byArchiveReason: { type: 'object', additionalProperties: true, required: true, description: '归档原因分布（v0.21.0）：refuted（被证伪）/ superseded（被取代）/ stale（已过时）/ merged（已合并）/ capacity（容量清理）/ unspecified（未分类）。⚠ unspecified 大意味着大量归档没标原因（含 v0.16 及以前的存量，它们的原因还在 `source.reason` 里、没有类型）。' },
         },
       },
       render: (args, value) => [{
@@ -1067,7 +1107,10 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
         text: `记忆统计（${value.scopes.join(' + ')}）：共 ${value.total} 条（按层 ${JSON.stringify(value.byKind)}；主体层 ${JSON.stringify(value.bySubject)}；约定状态 ${JSON.stringify(value.byGrounding)}；已归档 ${value.archiveCount}）`
           // 时效维（v0.15.0）：**单独一行给结论**——它是「有哪些结论该重看了」的动作入口，
           // 挤在括号里会被读成一堆数字（过期数 > 0 时这行 verdict 自带处置指引）。
-          + `\n${stalenessVerdict(value.byStaleness)}`,
+          + `\n${stalenessVerdict(value.byStaleness)}`
+          // 来源 + 归档（v0.21.0）：同样单独一行——覆盖率的意义是「看得见才知道该不该补」，
+          // 挤进括号会被读成一堆数字（同 staleness 的教训）。
+          + `\n来源：${JSON.stringify(value.byProvenance)}；归档原因：${JSON.stringify(value.byArchiveReason)}`,
       }],
     },
     async execute(args, exec) {
@@ -1095,6 +1138,12 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
         // 否则「总 N 条但分档加起来不等」这种不自洽会在读数层制造新疑问。
         // now 取一次、整批共用（同一批条目的判定基准不漂移）。
         byStaleness: countByStaleness(entries, new Date()),
+        // 来源 + 归档原因（v0.21.0）：同一批 entries，口径同体。
+        // `byArchiveReason` 走 `archivalOf` 归一 ⇒ v0.16 及以前的存量归档全部落在
+        // `unspecified`（它们的原因还在 `source.reason` 里、没有类型）——这是诚实的读数，
+        // 不是「这些条目没原因」。
+        byProvenance: countByProvenance(entries),
+        byArchiveReason: countByArchiveReason(entries),
       }
     },
   })
@@ -1107,7 +1156,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
     description: '浏览记忆档案：按时间桶分组翻看记忆（年/月/周/日），支持按层级/类型/标签/时间过滤与分页。与 recall 互补——recall 用于「知道要找什么」，memory_browse 用于「不知道有什么、翻档案发现」。**每条都带 id**（可直接用于 update / forget / memory_merge）。概要通过 archiveRef 关联原始条目，可用 recall 展开。',
     parameters: {
       kind: { type: 'array', items: { type: 'string', enum: ['fact', 'knowledge', 'episodic', 'summary'] }, description: '条目类型过滤（任一命中）。' },
-      tags: { type: 'array', items: { type: 'string' }, description: '标签过滤（全部命中）。' },
+      tags: { type: 'array', items: { type: 'string' }, description: '标签过滤（全部命中；**包含**匹配：给 `技能` 也命中 `技能维护`/`技能熔炉` 等变体，给 `技能维护` 只命中该串。v0.20 起与打分路径口径一致）。' },
       since: { type: 'string', description: '起始时间（YYYY-MM-DD 或 ISO）。' },
       until: { type: 'string', description: '截止时间（YYYY-MM-DD 或 ISO）。' },
       level: { type: 'string', enum: ['day', 'week', 'month', 'year'], description: '只看该层级概要（如 day=只看日概要，week=只看周概要）。' },
@@ -1118,6 +1167,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       role: { type: 'string', description: '角色视角覆盖（v0.5）：缺省按调用者会话身份推导。仅当项目启用 roles 时生效。' },
       subject: { type: 'string', description: '主体层过滤（v0.13.0）：只看「关于谁」的条目——`self` / `master`。缺省 = 不过滤。用于翻看某一层的积累（如「我对主人的认识都记了些什么」）。' },
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` / `rejected` / `scoped` / `established`。缺省 = 不过滤。用于翻档案自查（如「我提过哪些主人没回应的方案」）。' },
+      provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源过滤（v0.21.0）：`master` / `web` / `self` / `measured`。缺省 = 不过滤。用于翻档案自查（如「我读过的东西都记了些什么」「哪些结论是我自己推的」）。' },
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看某档时效状态的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`。用于**按时间线**翻「哪些结论该重看了」（recall 要查询词，这里不要）。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目时效状态是「不知道」，不是「有效」。' },
     },
     output: {
@@ -1184,9 +1234,12 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               const groundingNote = groundingTag(normalizeGrounding(item.grounding))
               // 转述型·无出处（v0.19.1）：与 recall 同一判据同一位置——两个界面同一事实不能长得不一样
               const transcriptiveNote = transcriptiveTag(item.transcriptiveUncited)
+              // 来源 / 归档标记（v0.21.0）：与 recall 同一套渲染纪律（同一事实两个界面不能长得不一样）
+              const provenanceNote = provenanceTag(item.provenance)
+              const archiveNote = archiveReasonTag(item.archivedReasonType)
               const watchNote = watchForTag(item.watchFor)
               const cueNote = cueTag(item.cue)
-              return `  - ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}[${item.kind}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}`
+              return `  - ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}[${item.kind}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}`
             })
             .join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
@@ -1207,9 +1260,12 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       // **审查入口必须在所有读路径上可达**：否则「我以为能翻到，结果那个工具不支持」
       // 会复现 2026-09-26 那个坑（知道标题却拿不到 id，因为 render 层漏了字段）。
       const entries = filterByStaleness(
-        filterByGrounding(
-          filterBySubject(gathered.entries, parseSubjectArg(args.subject, 'memory_browse.subject')),
-          parseGroundingArg(args.grounding, 'memory_browse.grounding'),
+        filterByProvenance(
+          filterByGrounding(
+            filterBySubject(gathered.entries, parseSubjectArg(args.subject, 'memory_browse.subject')),
+            parseGroundingArg(args.grounding, 'memory_browse.grounding'),
+          ),
+          parseProvenanceArg(args.provenance, 'memory_browse.provenance'),
         ),
         parseStalenessFilterArg(args.staleness, 'memory_browse.staleness'),
         new Date(),
