@@ -11,7 +11,15 @@
  * - **不再写哨兵/不再重启**：压缩在进程内已完整，零打断当前思维（忙时排队等
  *   当前 turn 结束，空闲立即处理）；压缩时 agent 必醒着（活跃期决策发起），
  *   不存在睡眠被打断的场景（2026-08-16 主人定调：完成即送达，不等主人下一条消息）
- * 失败（end 带 error）不落库不通知；落库失败静默（幂等，下次压缩再试）。
+ * 失败（end 带 error）不落库不通知。
+ *
+ * ⚠ **「落库失败」不是静默，也不再能「下次再试」**（2026-11-12 修正，台账 lh-2659bafb）：
+ * 旧注释写「落库失败静默（幂等，下次压缩再试）」——**半句是假的**：
+ * `compaction/end` 处理时 pending 记录在 L131 就已删除，而下一次压缩是新 `compactionId`
+ * ⇒ 这一条 checkpoint 的原文**永不重试**。于是「提交了但没入档」变成不可发现的事故
+ * （既不落库、也不落日志、也不通知）。现改为：失败**落侧车 JSONL**
+ * （`memory-compaction-sink-failures.jsonl`：compactionId + 错误 + 时间 + scope），
+ * 工具面不阻塞、不影响会话，但事后可查、可数。
  *
  * **v0.11.0 存档粒度修正（2026-09-26 实测）**：标题此前带精确时刻 ⇒ 每次压缩都躲过
  * `store.remember` 的 title 指纹查重（store.ts L167：knowledge/episodic 同标题自动合并），
@@ -23,7 +31,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MemoryStore } from './store.ts'
+import { COLD_CHECKPOINT_TAG } from './store.ts'
 import { workspaceIdOf } from './scope.ts'
+import { appendJsonl } from './access-trace.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -39,6 +49,47 @@ interface CompactionRecord {
 /** 落库依赖 */
 export interface CompactionSinkDeps {
   store: MemoryStore
+  /**
+   * 落库失败侧车路径（JSONL）。缺省 = 不落盘（测试/嵌入式场景），
+   * 但**生产装配必须给**——否则「提交了但没入档」又变回不可发现。
+   */
+  failureTracePath?: string
+  /** 侧车轮转阈值（字节；≤0 = 不轮转，缺省不轮转）。 */
+  failureTraceMaxBytes?: number
+}
+
+/** 一条「保底存档失败」记录（侧车落盘形状；字段即事后排查所需全部信息）。 */
+export interface CompactionSinkFailure {
+  /** 落盘时刻（ms）——**由写入方注入**，纯函数不取时钟。 */
+  atMs: number
+  /** 压缩事务 id（对应会话事件里的 compactionId；主机排查的第一把钥匙）。 */
+  compactionId: string
+  sessionId: string
+  scope: string
+  /** 错误文本（`Error.message` 或 `String(err)`；不落堆栈，避免侧车无限膨胀）。 */
+  error: string
+}
+
+/**
+ * 把 `catch` 到的未知错误规整成一行文本（纯函数）。
+ *
+ * 为什么不落 `err.stack`：侧车要能被反复 grep 与计数，堆栈里全是路径与噪声；
+ * 真正需要的两个问题是「哪次压缩」与「为什么」——前者是 compactionId，后者是 message。
+ * 异常值不是 Error（字符串 / 对象 / undefined 都可能）时按 `String()` 兜，绝不抛。
+ * @param err - catch 到的任意值
+ * @returns 非空文本（永不返回空串，否则侧车读数含糊）
+ */
+export function describeSinkError(err: unknown): string {
+  if (err instanceof Error) {
+    const msg = err.message.trim()
+    return msg.length > 0 ? msg : err.name
+  }
+  if (typeof err === 'string') return err.trim().length > 0 ? err : '(空字符串错误)'
+  try {
+    return String(err)
+  } catch {
+    return '(错误值不可字符串化)'
+  }
 }
 
 /**
@@ -137,7 +188,7 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
     const now = new Date()
     // 标题 = 日粒度合并键（同日多次压缩并入一条）；精确时刻进正文抬头（见文件头 v0.11.0 说明）
     const title = `会话压缩检查点 · ${dayStampOf(now)}`
-    // 保底存档（fire-and-forget：失败静默，压缩幂等下次再试）
+    // 保底存档（fire-and-forget：不阻塞会话事件流）
     const notify = (entryId: string) => {
       // 智能体核心（2026-08-16 主人定调：压缩完成自动送达）：wakeup=true——
       // 空闲立即唤醒处理；忙则当前思维结束后处理（压缩时 agent 必醒着，无睡眠打断）；
@@ -158,11 +209,31 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
       kind: 'episodic',
       title,
       body: `> 压缩于 ${formatLocalStamp(now)}\n\n${text}`,
-      tags: ['compaction'],
+      // 两个标签，语义不同、都要盖：
+      // - `compaction`：分类（「这是压缩相关条目」），历史条目也用它
+      // - `COLD_CHECKPOINT_TAG`：**读取侧判据**（v0.22.1）——让本条从一落库起就退出
+      //   活跃检索面。理由见 types.ts::COLD_CHECKPOINT_TAG 的读数：这类条目是「容器」，
+      //   包含几乎所有查询词 ⇒ 在归档前的窗口期里靠词命中累加霸榜，一次命中 25KB 噪音。
+      //   与 archived 互补（归档后靠 archived 挡），回查走 get(id) 或 includeArchive ✓
+      tags: ['compaction', COLD_CHECKPOINT_TAG],
       scope,
       level: null,
       bucket: null,
       source: { sessionId: session.id, reason: 'compaction/end' },
-    }).then((result) => { notify(result.id) }).catch(() => { /* 落库失败静默 */ })
+    }).then((result) => { notify(result.id) }).catch((err: unknown) => {
+      // ⚠ **不许空吞**（2026-11-12 · 台账 lh-2659bafb）：pending 已删、下次是新 compactionId
+      // ⇒ 「下次压缩再试」不存在。这一条原文**就此永久丢失**，唯一能做的就是把它记下来。
+      // 侧车写入本身吞错（appendJsonl 恒不抛）：证据层坏了也不能把压缩流程带崩。
+      const path = deps.failureTracePath
+      if (path === undefined || path === '') return
+      const record: CompactionSinkFailure = {
+        atMs: Date.now(),
+        compactionId: ev.data.compactionId,
+        sessionId: session.id,
+        scope,
+        error: describeSinkError(err),
+      }
+      void appendJsonl(path, record, deps.failureTraceMaxBytes ?? 0)
+    })
   })
 }

@@ -79,7 +79,10 @@ test('工具齐备，名称与契约一致', () => {
   const { byName } = setup()
   // 2026-10-14 对齐（**预先存在的债**，非本轮引入——v0.15 只在既有工具上加参数、不改工具集合）：
   // v0.11 `memory_recompress` 与 v0.13 期 `memory_review_mark` 上线时，本断言未同步。
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_check', 'memory_health', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_review_mark', 'memory_stats', 'memory_version', 'recall', 'remember', 'update'])
+  // 2026-11-12：`memory_dispose`（v0.22 近重复欠账销账）同样漏补 —— 已一并补齐。
+  // ⚠ 这行的用途是「工具集合被意外增删时变红」，但它每漏补一次就变成**恒红**，
+  //   而恒红的断言不再是指标（读数纪律：两次读数是同一个坏值 ⇒ 先怀疑量法）。
+  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_check', 'memory_dispose', 'memory_health', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_review_mark', 'memory_stats', 'memory_version', 'recall', 'remember', 'update'])
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
 })
@@ -280,12 +283,18 @@ test('update：未知 id → 报错', async () => {
 test('forget：归档条目并记录 reason，不再进活跃检索', async () => {
   const { byName, store, exec } = setup()
   const { id } = await seed(store, WID, 'fact', '要归档的条目')
-  const result = await byName.get('forget')!.execute({ id, reason: '过时了' }, exec)
+  // 注意：必须显式传 reasonType——v0.21.0 起归档原因是**类型化**的（决定引用方怎么处置），
+  // 缺省 `unspecified` = 未判断。旧断言读 `source.reason`（v0.21.0 前的落点）恒 undefined，
+  // 而实现是对的 ⇒ 那条断言测的是**已废弃的字段**，红了两天不是 bug 是断言落后。
+  const result = await byName.get('forget')!.execute({ id, reason: '过时了', reasonType: 'stale' }, exec)
   assert.equal(result.id, id)
   assert.equal(result.archived, true)
   const entry = store.get(WID, id)!
   assert.equal(entry.archived, true)
-  assert.equal(entry.source?.reason, '过时了')
+  assert.equal(entry.archivedReason, '过时了')
+  assert.equal(entry.archivedReasonType, 'stale')
+  // 回归面：`source` 仍答「从哪来」，不得再被归档原因污染
+  assert.equal(entry.source?.reason, undefined)
   const recall = await byName.get('recall')!.execute({}, exec)
   assert.equal(recall.total, 0)
 })
@@ -319,10 +328,17 @@ test('memory_stats：显式 scope 只统计指定库', async () => {
 
 // ---------- memory_check ----------
 
-test('memory_check：v0.1 返回空建议', async () => {
+test('memory_check：未接线时不冒充零欠账', async () => {
   const { byName, exec } = setup()
   const result = await byName.get('memory_check')!.execute({}, exec)
-  assert.deepEqual(result, { suggestions: [] })
+  // 本工具的**设计核心**就是这一条：「零欠账」有四种来路（未接线 / 读不到 / 侧车空 /
+  // 有记录但全处置过），前两种是「不知道」。旧断言 `deepEqual(result, { suggestions: [] })`
+  // 恰好把「不知道」的形状固化成「零欠账」——它红了两天是对的，红的是断言本身。
+  assert.deepEqual(result.suggestions, [])
+  assert.ok(
+    typeof result.note === 'string' && result.note.includes('未接线'),
+    `应显式标注「未接线」而不是给一个空数组了事，实际：${JSON.stringify(result)}`,
+  )
 })
 
 // ---------- schema 校验 ----------

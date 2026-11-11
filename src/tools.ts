@@ -27,7 +27,7 @@ import type { CompressSummary } from './compress-trace.ts'
 import { formatSkipped } from './compress-trace.ts'
 import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
-import { findNearDuplicates, formatDuplicateHint, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
+import { findNearDuplicates, formatCandidate, formatDuplicateHint, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
 import type { DedupeTraceRecord, SimilarDisposition } from './dedupe.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
@@ -221,7 +221,7 @@ function mergeCounts(target: Record<string, number>, source: Record<string, numb
 function buildRemember(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'remember',
-    description: '记录一条记忆。适用于：事实（主人偏好/环境事实/决策结论）、可复用知识（项目知识/学习沉淀/教训）、有结果的情景（重要事件/经历时间线）。不记录：临时状态、文件可索引内容（代码/文档全文）、凭证（密钥/口令）。L1 事实可用 key 精确覆盖（同 key 再次写入=更新）；L2/L3 同标题自动合并（标签并集+正文追加）。**写入前会做近重复检测**：命中高度相似的既有条目时返回 `similar[]` + `hint`——此时优先 `update` 补写或 `memory_merge` 合流，不要新建平行条目（§5.8 先搜再写）。**`aliases` 强烈建议填**（2026-10-13 重做）：检索是字面匹配，而「记忆的措辞 ≠ 提问的措辞」——实测三个案例靠补别名从 #2/#4/#5 全部升到 #1。',
+    description: '记录一条记忆。适用于：事实（主人偏好/环境事实/决策结论）、可复用知识（项目知识/学习沉淀/教训）、有结果的情景（重要事件/经历时间线）。不记录：临时状态、文件可索引内容（代码/文档全文）、凭证（密钥/口令）。L1 事实可用 key 精确覆盖（同 key 再次写入=更新）；L2/L3 同标题自动合并（标签并集+正文追加）。**写入前会做近重复检测**：命中相关条目（带强度数值）时返回 `similar[]` + `hint`——逐条判它是否真重复：重复就 `update` 补写或 `memory_merge` 合流；判为无关就标 `similarDisposition=unrelated`，不要新建平行条目（§5.8 先搜再写）。**`aliases` 强烈建议填**（2026-10-13 重做）：检索是字面匹配，而「记忆的措辞 ≠ 提问的措辞」——实测三个案例靠补别名从 #2/#4/#5 全部升到 #1。',
     parameters: {
       text: { type: 'string', required: true, description: '记忆内容（markdown；首行自动作为标题）。' },
       key: { type: 'string', description: 'L1 精确覆盖键：同一 (scope, key) 再次写入 = 覆盖更新。' },
@@ -251,7 +251,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
           id: { type: 'string', description: '条目 id（**dryRun 时不出现**——没有写入就没有 id）' },
           action: { type: 'string', enum: ['created', 'updated', 'merged'], description: '本次写入的结果：新建 / 补写 / 合并进同名条目（**dryRun 时不出现**）' },
           dryRun: { type: 'boolean', description: 'true = 只做了近重复检测、**未落库**；此时 id / action 均不出现' },
-          similar: { type: 'array', items: { type: 'string' }, description: '高度相似的既有条目（id — 标题（强度 N））；无命中时省略该键' },
+          similar: { type: 'array', items: { type: 'string' }, description: '相关度 ≥ 阈值的既有条目（`id — 标题（强度 N）`；有内容时附一行「节：小节标题 / …」，让人不必再去读正文就能判断覆盖范围）；无命中时省略该键' },
           hint: { type: 'string', description: '近重复提示（建议 update/merge）；无命中时省略该键' },
           pendingDisposition: { type: 'integer', description: '本次命中但**未给处置**的候选条数（>0 才出现）——它就是欠账，`memory_check` 会一直列出来' },
         },
@@ -339,7 +339,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         // 正式写入路径仍用 hint —— 那里没有 similar 的渲染位，需要一句话把该做什么说完。
         return {
           dryRun: true as const,
-          ...(dups.length > 0 ? { similar: dups.map((d) => `${d.id} — ${d.title}（强度 ${d.strength}）`) } : {}),
+          ...(dups.length > 0 ? { similar: dups.map(formatCandidate) } : {}),
           ...(fullNote.length > 0 ? { hint: fullNote } : {}),
         }
       }
@@ -402,7 +402,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       return {
         id: written.id,
         action: written.action,
-        ...(dups.length > 0 ? { similar: dups.map((d) => `${d.id} — ${d.title}（强度 ${d.strength}）`) } : {}),
+        ...(dups.length > 0 ? { similar: dups.map(formatCandidate) } : {}),
         ...(hint.length > 0 ? { hint } : {}),
         ...(pendingDisposition > 0 ? { pendingDisposition } : {}),
       }
@@ -875,7 +875,8 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
 function buildForget(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'forget',
-    description: '归档记忆条目（软删除：不再进活跃检索，可从 includeArchive 找回）。三种选择器任一：id（单条）/ ids[]（批量）/ tier（按 memory_audit 分档批量，ARCHIVE|DEMOTE|REVIEW）。批量请先 dryRun=true 看清单；max 护栏缺省 100、上限 500。reason 记入条目 source。',
+    deferLoading: true,
+    description: '归档记忆条目（软删除：不再进活跃检索，可从 includeArchive 找回）。三种选择器任一：id（单条）/ ids[]（批量）/ tier（按 memory_audit 分档批量，ARCHIVE|DEMOTE|REVIEW）。批量请先 dryRun=true 看清单；max 护栏缺省 100、上限 500。reason 记入条目 `archivedReason`，reasonType 记入 `archivedReasonType`（v0.21.0 起不再写 `source.reason`——那个字段答「从哪来」，不答「怎么没了」）。',
     parameters: {
       id: { type: 'string', description: '单条模式：目标条目 id（来自 remember/recall/audit 返回）。' },
       ids: { type: 'array', items: { type: 'string' }, description: '批量模式：目标条目 id 列表。' },
@@ -994,6 +995,7 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
 function buildMerge(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_merge',
+    deferLoading: true,
     description: '合并近重复条目（处理 memory_audit 的 REVIEW 簇）：把 ids 的正文并入 canonical（带「合并自 <id>」来源标注，信息不丢），并把被并入者软归档（includeArchive 可找回）。strategy=keep-canonical 时只归档、不动正文。',
     parameters: {
       canonical: { type: 'string', required: true, description: '保留的条目 id（合并目标，正文被追加）。' },
@@ -1080,6 +1082,7 @@ function buildMerge(deps: MemoryToolDeps): ToolDefinition {
 function buildStats(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_stats',
+    deferLoading: true,
     description: '记忆统计：按层级（kind）/ 压缩层级（level）/ 时间桶（bucket）计数 + 归档数。缺省统计当前项目 + global，scope 参数可只统计指定库。',
     parameters: {
       scope: { type: 'string', description: '作用域覆盖：只统计该 scope（global 或 workspaceId）。' },
@@ -1153,6 +1156,7 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
 function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_browse',
+    deferLoading: true,
     description: '浏览记忆档案：按时间桶分组翻看记忆（年/月/周/日），支持按层级/类型/标签/时间过滤与分页。与 recall 互补——recall 用于「知道要找什么」，memory_browse 用于「不知道有什么、翻档案发现」。**每条都带 id**（可直接用于 update / forget / memory_merge）。概要通过 archiveRef 关联原始条目，可用 recall 展开。',
     parameters: {
       kind: { type: 'array', items: { type: 'string', enum: ['fact', 'knowledge', 'episodic', 'summary'] }, description: '条目类型过滤（任一命中）。' },
@@ -1294,6 +1298,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
 function buildRelate(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_relate',
+    deferLoading: true,
     description: '联想导航：按 id 找到一条记忆并展开它的关联网络（related 链：共享标签/标题/正文关联的邻居记忆，关联强度降序）。depth=1（默认）单跳；depth>1 沿关系网 BFS 多跳探索记忆社区（hop 标注层级）。用于从已知记忆沿关系行走——「这条记忆还连着谁」。返回目标条目摘要 + 关联链（hop/共享标签数/关联强度）。',
     parameters: {
       id: { type: 'string', required: true, description: '目标记忆条目 id（来自 recall/remember/memory_browse）。' },
@@ -1377,6 +1382,7 @@ function buildRelate(deps: MemoryToolDeps): ToolDefinition {
 function buildHealth(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_health',
+    deferLoading: true,
     description: '查看记忆插件运行时状态：各作用域条目数、归档数、启动注入是否启用。',
     parameters: {},
     output: {
@@ -1461,6 +1467,7 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
 function buildVersion(): ToolDefinition {
   return defineTool({
     name: 'memory_version',
+    deferLoading: true,
     description: '查看记忆插件版本（HMR 热重载验证用）。',
     parameters: {},
     output: {
@@ -1672,6 +1679,7 @@ function buildDispose(deps: MemoryToolDeps): ToolDefinition {
 function buildAudit(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_audit',
+    deferLoading: true,
     description: '价值体检（只读）：回答「哪些条目值得继续占位置、哪些该降级/归档」。输出四档提案——KEEP（承重：被概要 archiveRef 引用 / 新 / 有角色归属）、DEMOTE（未引用且体量大，可降级压缩）、ARCHIVE（未引用 + 老 + 无溯源，归档候选）、REVIEW（近重复簇 / 超大条目 / 概要超预算，交人裁决）——每条带证据行，并给出按层级聚合的体量视图。**只读**：不归档、不删除、不刷新 accessedAt；分数是序数（权重为启发式先验，非拟合值）。',
     parameters: {
       scope: { type: 'string', description: '作用域覆盖（缺省当前 workspace + global；受调用者角色视野约束）。' },
@@ -1816,6 +1824,7 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
 function buildReviewMark(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_review_mark',
+    deferLoading: true,
     description: '给一条体检候选打「已裁决」标记：此后 memory_audit 不再把它当待办反复报（归 KEEP，理由里标注已裁决时刻）。**只写侧车，绝不改条目**——不刷新 accessedAt/updatedAt。⚠ 标记只对「当时那一版」有效：条目若再变动（updatedAt 晚于标记时刻）会自动重新纳入常规分档，因此它**不会**变成永久免检。',
     parameters: {
       id: { type: 'string', description: '条目 id（来自 memory_audit 的候选，或 recall / memory_browse 的输出）。' },
@@ -1866,6 +1875,7 @@ function buildReviewMark(deps: MemoryToolDeps): ToolDefinition {
 function buildRecompress(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_recompress',
+    deferLoading: true,
     description: '重压一条已超预算的概要（正文超过 summary_max_chars）：用**它自己的正文**再压一次，压完**整体替换**（旧版进 revisions 可回溯）。⚠ 只对 kind=summary 且 level/bucket 齐全的条目有效；已在预算内则跳过（不白跑一次 LLM）。与常规时间压缩的分工：常规压缩「已存在即跳过」，本工具正是那个幂等结果的**显式出口**。',
     parameters: {
       id: { type: 'string', description: '概要条目 id（来自 memory_audit 的候选，或 recall / memory_browse 的输出）。' },

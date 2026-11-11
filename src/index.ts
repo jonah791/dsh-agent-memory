@@ -408,7 +408,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   installAutoRecallInject(ctx, { store, loadConfig, recordAccess })
 
   // 6. 压缩即记忆（v0.2 通道 C）：compaction 成功 → checkpoint 自动落库
-  installCompactionSink(ctx, { store })
+  //    失败侧车（2026-11-12 · 台账 lh-2659bafb）：落库失败 = 这条原文**永久丢失**（pending 已删、
+  //    下次是新 compactionId ⇒ 没有「下次再试」），所以必须留下可数的证据，不许空吞。
+  installCompactionSink(ctx, {
+    store,
+    failureTracePath: join(dshHome, 'memory-compaction-sink-failures.jsonl'),
+    failureTraceMaxBytes: DEFAULT_AUDIT_CONFIG.proposalLog.maxBytes,
+  })
 
   // 7. 周期补压（v0.3，主人 2026-08-21 定调）：可靠触发时间桶压缩，不依赖「访问记忆才触发」。
   //    路由：config 显式 → resolveActiveRoute（活跃会话当前路由，同 requestHeader 原本设计）→ lastRoute 缓存

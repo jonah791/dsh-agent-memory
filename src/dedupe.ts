@@ -2,7 +2,9 @@
  * dedupe.ts — 写入前的近重复检测（纯逻辑，可离线单测）
  *
  * 动机（主人 2026-09-17 指令「存记忆的时候先搜索记忆」）：把「先搜再写」从**纪律**变成**机制**——
- * `remember` 命中高度相似的既有条目时当场提示，而不是默默造平行副本。
+ * `remember` 命中相关度 ≥ 阈值的既有条目时当场提示，而不是默默造平行副本。
+ * ⚠ 措辞是「相关」不是「高度相似」（2026-11-12 · lh-708ed26c）：阈值 6 只代表「值得看一眼」，
+ *   实测 5 条候选强度 19–21 而内容全无关 ⇒ 把它读成「高度相似」会带偏判断。
  *
  * 判据单一真源：复用 `search.ts::relatedOf` 的打分
  * （共享标签×3 + 标题 2-gram 重叠×2 + 正文 2-gram 重叠×1），不另立一套相似度。
@@ -23,12 +25,67 @@ export interface NearDuplicate {
   title: string
   strength: number
   sharedTags: number
+  /**
+   * 候选条目的**小节大纲**（`##` / `###` 标题，至多 6 条；无小节时退回正文首句）。
+   *
+   * 存在理由（2026-11-11 · lh-23124786）：回执原本只给「id — 标题（强度 N）」。
+   * 标题是**条目名**不是**内容清单**，于是「这条到底覆盖了什么」读不出来。实测代价：
+   * 母条目 `42c01e24`（标题「四道卡口与工程锁陷阱」）的第八、九节写的就是相机换算链，
+   * 而我只看见标题 ⇒ 判断成「不同主题」⇒ 写了一条子集平行条目，事后才发现要归档。
+   * 大纲让「覆盖范围」在**不必额外调用**的情况下可见——这是把「先搜再写」从
+   * 「记得去读正文」变成「回执里就有」。
+   */
+  outline?: string[]
 }
 
 /** 阈值 6 = 2 个共享标签（2×3）或标题 2-gram 命中 ≥3（3×2）；低于此视为弱关联，不打扰。 */
 export const NEAR_DUP_THRESHOLD = 6
 
-/** 找出与新条目高度相似的既有条目（按强度降序，取前 limit 条）。 */
+/**
+ * 提取条目大纲：优先 `##` / `###` 小节标题，无小节时退回「正文首个非标题行」前 80 字。
+ *
+ * 只认二级及以下：一级 `# ` 是标题的重复（`remember` 写入时首行自动作标题），
+ * 把它算进大纲会让每条候选都多一行噪声。
+ * 返回空数组 = 这条候选没有可说的内容（body 为空或只有标题），此时调用方不该印「节：」。
+ *
+ * 超过 `max` 时**保留尾部**，不是截掉尾部。理由见下方截断分支的注释。
+ */
+export function extractOutline(body: string, max = 6): string[] {
+  if (typeof body !== 'string' || body.trim() === '') return []
+  const lines = body.split('\n').map((l) => l.trim())
+  const heads: string[] = []
+  for (const line of lines) {
+    const m = /^#{2,3}\s+(.+)$/.exec(line)
+    if (m === null) continue
+    const text = (m[1] ?? '').replace(/[`*]/g, '').trim()
+    if (text.length === 0) continue
+    heads.push(text.length > 40 ? `${text.slice(0, 40)}…` : text)
+  }
+  if (heads.length === 0) {
+    const firstBody = lines.find((l) => l.length > 0 && !l.startsWith('#'))
+    if (firstBody === undefined) return []
+    const text = firstBody.replace(/[`*]/g, '').trim()
+    return text.length === 0 ? [] : [text.length > 80 ? `${text.slice(0, 80)}…` : text]
+  }
+  if (heads.length <= max) return heads
+  // ⚠ 截断必须**保留尾部**，不能只取前 max 条。小节的末尾常是后来追加的内容，
+  // 而那恰恰最容易与新条目重叠——实测母条目 42c01e24 有 9 节，相机换算链在第八、九节；
+  // 只取前 6 节的话，我在写相机条目时**正好看不见它**，而这整条机制就是为了救那次失误
+  // （2026-11-11 上线后首次实调就复现了这个形状：回执只列到「六、实测性能」）。
+  // 输出「前 N + 占位 + 最后 2」，占位写明总节数，避免被读成「只有这些」。
+  if (max < 3) return heads.slice(0, max)
+  const tailCount = Math.min(2, Math.max(1, max - 2))
+  const headCount = Math.max(1, max - 1 - tailCount)
+  return [...heads.slice(0, headCount), `…（共 ${heads.length} 节）`, ...heads.slice(-tailCount)]
+}
+
+/** 单条候选的一行回执：基础信息 + （有内容时）大纲缩进换行。 */
+export function formatCandidate(d: NearDuplicate): string {
+  const base = `${d.id} — ${d.title}（强度 ${d.strength}）`
+  return d.outline !== undefined && d.outline.length > 0 ? `${base}\n     节：${d.outline.join(' / ')}` : base
+}
+
+/** 找出与新条目**相关**（强度 ≥ threshold）的既有条目（按强度降序，取前 limit 条）。 */
 export function findNearDuplicates(
   entries: Entry[],
   candidate: DuplicateCandidate,
@@ -47,16 +104,42 @@ export function findNearDuplicates(
     scope: candidate.scope ?? '',
     archived: false,
   } as unknown as Entry
+  // 大纲要从候选条目的 body 取，而 relatedOf 的回执不带 body ⇒ 先建 id → body 索引
+  const bodyById = new Map(entries.map((e) => [e.id, e.body ?? '']))
   return relatedOf(entries, probe, limit)
     .filter((r) => r.strength >= threshold)
-    .map((r) => ({ id: r.id, title: r.title, strength: r.strength, sharedTags: r.sharedTags }))
+    .map((r) => ({
+      id: r.id,
+      title: r.title,
+      strength: r.strength,
+      sharedTags: r.sharedTags,
+      outline: extractOutline(bodyById.get(r.id) ?? ''),
+    }))
 }
 
-/** 提示文案（无近重复时返回空串——调用方据此省略字段，保持无损 JSON）。 */
+/**
+ * 提示文案（无近重复时返回空串——调用方据此省略字段，保持无损 JSON）。
+ *
+ * ⚠ **措辞在 2026-11-12 降级过**（台账 lh-708ed26c）：原文写「命中 N 条**高度相似**的既有条目」。
+ * 实测反例：一次 remember 回了 5 条候选，强度只有 19–21（阈值 6），**逐条看全是无关**——
+ * 阈值 6 的语义是「值得看一眼」，不是「高度相似」。把它读成后者的代价是判断被措辞带偏：
+ * 明明是弱关联，我却按「已有同主题条目」去合并/补写，等于用一条错前提去改记忆库。
+ * ⇒ 文案改成**「相关，请判是否重复」**（判断权交回读者），并**把强度读数印在抬头**：
+ * 强度是这条提示唯一可核的量，读者要能一眼看出「这批候选到底有多像」。
+ *
+ * **不动的东西**（主人 2026-09-17 建的机制）：阈值 `NEAR_DUP_THRESHOLD = 6`、
+ * 判据 `relatedOf`、命中后的归档/处置闭环——本次只改文案，不改判据。
+ * @param dups - `findNearDuplicates` 的结果（空数组 ⇒ 空串）
+ * @returns 多行提示；调用方原样塞进 `hint` 字段
+ */
 export function formatDuplicateHint(dups: NearDuplicate[]): string {
   if (dups.length === 0) return ''
-  const list = dups.map((d) => `${d.id}（${d.title}，强度 ${d.strength}）`).join(' · ')
-  return `⚠ 命中 ${dups.length} 条高度相似的既有条目——**先考虑 update 补写或 memory_merge 合流，而不是新建平行条目**（§5.8 先搜再写）：${list}`
+  const strengths = dups.map((d) => d.strength)
+  const spread = `${Math.min(...strengths)}–${Math.max(...strengths)}`
+  const list = dups.map(formatCandidate).join('\n')
+  return `⚠ 命中 ${dups.length} 条相关条目（强度 ${spread}，阈值 ≥${NEAR_DUP_THRESHOLD}）`
+    + `——**请逐条判断是否与本次写入重复**：重复就 update 补写或 memory_merge 合流；`
+    + `判为无关就标 similarDisposition=unrelated（不要新建平行条目，§5.8 先搜再写）：\n${list}`
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

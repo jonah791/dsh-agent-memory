@@ -13,6 +13,10 @@
 
 import { randomUUID } from 'node:crypto'
 import type { ArchiveReasonType, ArchiveRecord, Entry, EntryKind, Grounding, Provenance, RememberResult, Subject, TimelineLevel } from './types.ts'
+import { COLD_CHECKPOINT_TAG } from './types.ts'
+
+/** 转出冷存档标签（v0.22.1）：读取侧（list 的跳过判据）与写入侧（compaction-sink 盖章）共用同一真源 */
+export { COLD_CHECKPOINT_TAG }
 
 /**
  * kv 最小接口：KvTable<string, Entry> 的能力子集。
@@ -212,12 +216,23 @@ export class MemoryStore {
     return [...set]
   }
 
-  /** 当前 scope 全量条目（快照拷贝，防止外部误改存储对象；可含归档） */
+  /**
+   * 当前 scope 全量条目（快照拷贝，防止外部误改存储对象；可含归档）
+   *
+   * ⚠ 两道跳过判据，**语义不同但目的一致**（v0.22.1 · 2026-11-12）：
+   * - `archived`：「这条曾经活跃，现在不活跃了」
+   * - `COLD_CHECKPOINT_TAG`：「这条**生来**就是冷数据」——压缩检查点在落库到时间桶归档
+   *   之间有一段窗口期是 `archived:false`，而整段会话摘要包含几乎所有查询词 ⇒ 它会以
+   *   「容器」形态霸占榜首（实测 27KB 那条在三个不相关查询里排第 1/第 2/第 2）。
+   *   核对级放在这里而不是打分里：**长度归一路线 2026-10-27 已试过、v0.18 样本外证伪退役**。
+   * 两者互补无缝隙：归档后靠前者挡，归档前靠后者挡 ⇒ 消掉了「周期摘要跑没跑」的时间依赖。
+   * 回查不受影响：`get()` 不经本方法；显式 `includeArchive:true` 一律放行。
+   */
   list(scope: string, opts: { includeArchive?: boolean } = {}): Entry[] {
     const out: Entry[] = []
     for (const [, entry] of this.kv.entries()) {
       if (entry.scope !== scope) continue
-      if (!opts.includeArchive && entry.archived) continue
+      if (!opts.includeArchive && (entry.archived || entry.tags?.includes(COLD_CHECKPOINT_TAG))) continue
       out.push({ ...entry })
     }
     return out
