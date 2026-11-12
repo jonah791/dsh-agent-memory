@@ -27,7 +27,7 @@ import type { CompressSummary } from './compress-trace.ts'
 import { formatSkipped } from './compress-trace.ts'
 import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
-import { findNearDuplicates, formatCandidate, formatDuplicateHint, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
+import { findNearDuplicates, formatCandidate, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
 import type { DedupeTraceRecord, SimilarDisposition } from './dedupe.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
@@ -221,7 +221,7 @@ function mergeCounts(target: Record<string, number>, source: Record<string, numb
 function buildRemember(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'remember',
-    description: '记录一条记忆。适用于：事实（主人偏好/环境事实/决策结论）、可复用知识（项目知识/学习沉淀/教训）、有结果的情景（重要事件/经历时间线）。不记录：临时状态、文件可索引内容（代码/文档全文）、凭证（密钥/口令）。L1 事实可用 key 精确覆盖（同 key 再次写入=更新）；L2/L3 同标题自动合并（标签并集+正文追加）。**写入前会做近重复检测**：命中相关条目（带强度数值）时返回 `similar[]` + `hint`——逐条判它是否真重复：重复就 `update` 补写或 `memory_merge` 合流；判为无关就标 `similarDisposition=unrelated`，不要新建平行条目（§5.8 先搜再写）。**`aliases` 强烈建议填**（2026-10-13 重做）：检索是字面匹配，而「记忆的措辞 ≠ 提问的措辞」——实测三个案例靠补别名从 #2/#4/#5 全部升到 #1。',
+    description: '记录一条记忆。适用于：事实（主人偏好/环境事实/决策结论）、可复用知识（项目知识/学习沉淀/教训）、有结果的情景（重要事件/经历时间线）。不记录：临时状态、文件可索引内容（代码/文档全文）、凭证（密钥/口令）。L1 事实可用 key 精确覆盖（同 key 再次写入=更新）；L2/L3 同标题自动合并（标签并集+正文追加）。**写入前不会自动查重**（2026-11-12 下线，判据不可行——证据见 `src/dedupe.ts` 顶部）：要「先搜再写」（§5.8）就用 `dryRun:true` 显式预检，它会返回候选；L1 同 key 精确覆盖与 L2/L3 同标题自动合并仍照常生效。**`aliases` 强烈建议填**（2026-10-13 重做）：检索是字面匹配，而「记忆的措辞 ≠ 提问的措辞」——实测三个案例靠补别名从 #2/#4/#5 全部升到 #1。',
     parameters: {
       text: { type: 'string', required: true, description: '记忆内容（markdown；首行自动作为标题）。' },
       key: { type: 'string', description: 'L1 精确覆盖键：同一 (scope, key) 再次写入 = 覆盖更新。' },
@@ -236,9 +236,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       watchFor: { type: 'array', items: { type: 'string' }, description: '观察条件（v0.15.0）：**什么样的新信息会让这条失效**（1–8 条短句，每条 ≤200 字）。**为什么值得填**（论文实测）：决策时写下的观察条件能达 92.2% 的关键新信息、只带 20 条无关噪音；而「把全部背景事实都索引上」虽达 100%，却带 89 条噪音——**少而准**才划算。**怎么填**：写「什么事件会让它不成立」，点名具体实体（含它的**别名**与**上游依赖**），**略去用不到的**。例：`["DuckDuckGo 通道可用率重测低于 80%", "busDir 或 web 端口改变", "该插件被卸载或改名"]`。**写入时机只有一次——就是现在**（我记得为什么这样判断）；事后再补，我想不起当时在等什么。它会被印在 recall 结果里，命中的那一刻我就看见「它在等什么」。' },
       provenance: { type: 'string', description: '来源类型（v0.21.0）：这条记忆的信息**从哪来**——`master`（主人说的：原话 / 指令 / 定调 / 纠正）/ `web`（外部：网页 / 论文 / 他人代码 / 第三方工具输出）/ `self`（**我自己推出或提议的**）/ `measured`（我实测 / 运行 / 读数得到的）。**为什么填**：`grounding` 只覆盖「需要授权判断」的条目（约 7%），技术结论、论文笔记、实测读数全落在它之外——于是「这条是我实测的还是我从网上读来的」在库里无法区分，而两者该怎么用完全不同（读数要问样本多大，网上读来的要回原文核对）。**什么时候不填**：真的想不起来源时留空（省略 = 不知道，不是某个默认值）。⚠ 与 `grounding` 不冲突、可同时填：一条「主人否决了 RAG」既是 `master` 又可以是 `established`。' },
       cue: { type: 'array', items: { type: 'string' }, description: '情境形状（v0.16.0）：这条经验**在什么形状的情境下该被取出使用**（1–8 条短句）。与另两维**不可互相替代**：`aliases` 管**入口词**（可能被怎么问）、`watchFor` 管**时效**（什么新信息会让它失效）、`cue` 管**应用场景**（什么处境该用它）。**怎么填**：写情境的**形状**而不是本次任务的事实，才能在**另一件事**上触发。论文给的判据线（Harness² 的 experience cue）：太泛无用（`be thorough`）；太具体永不触发（`某日某费用涨到 250`）；正好是「当仪器执行若干顺序动作、且其中一个会终止行动者自身的权限时，把终止性动作排在最后」。它会被印在 recall 里——命中的那一刻我就看见「什么处境该用它」。' },
-      similarDisposition: { type: 'string', enum: ['merged', 'updated', 'unrelated'], description: '近重复处置（2026-10-28）：当本次写入**命中相似条目**时，声明你怎么处置它们——`merged`（已合流）/ `updated`（已补写原条目）/ `unrelated`（判为无关）。作用对象是**本次全部命中候选**（不逐条指定：逐条会让参数变成数组、重到没人愿意用；差别靠 `dispositionReason` 说清）。不填 ⇒ 这次撞车进「欠账」，`memory_check` 会一直列出来。⚠ 处置是**时间轴上的重置**，不是永久免检：同一个候选之后再撞上会重新计欠账——否则「判过无关但阈值仍把它报出来」会被永久掩盖。' },
-      dispositionReason: { type: 'string', description: '处置理由（配合 `similarDisposition`）：为什么这么判。写清「其中哪条是真同主题、哪些是弱相关噪音」——将来重读时这是唯一线索。' },
-      dryRun: { type: 'boolean', description: '预检（v0.19.1 · lh-0f54524a）：**只跑近重复检测、返回候选与强度，不落库**。用它兑现「先搜再写」——必须走它而不是先 `recall`，因为两者的候选集**不同源**（实测：先 recall 搜「测试期望写错」返回 96 条却不含真正的母条目，而 remember 报出了它）。命中候选后：要么带 `similarDisposition` 正式写入（合流/补写），要么确认无关后写入并标 `unrelated`。' },
+      dryRun: { type: 'boolean', description: '预检（v0.19.1 · lh-0f54524a）：**只跑近重复检测、返回候选与强度，不落库**。⚠ 2026-11-12 起这是这条检测器**唯一**的入口（写入路径不再自动跑它，见 `src/dedupe.ts` 顶部证据）。它**宁滥勿缺**：会列出一批字面相关的条目供你自己筛，`强度` 是绝对计数、**不代表语义相似**。仍值得走它而不是先 `recall`，因为两者候选集**不同源**（实测：先 recall 搜「测试期望写错」返回 96 条却不含真正的母条目，而这条检测器报出了它）。' },
     },
     output: {
       schema: {
@@ -251,21 +249,20 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
           id: { type: 'string', description: '条目 id（**dryRun 时不出现**——没有写入就没有 id）' },
           action: { type: 'string', enum: ['created', 'updated', 'merged'], description: '本次写入的结果：新建 / 补写 / 合并进同名条目（**dryRun 时不出现**）' },
           dryRun: { type: 'boolean', description: 'true = 只做了近重复检测、**未落库**；此时 id / action 均不出现' },
-          similar: { type: 'array', items: { type: 'string' }, description: '相关度 ≥ 阈值的既有条目（`id — 标题（强度 N）`；有内容时附一行「节：小节标题 / …」，让人不必再去读正文就能判断覆盖范围）；无命中时省略该键' },
-          hint: { type: 'string', description: '近重复提示（建议 update/merge）；无命中时省略该键' },
-          pendingDisposition: { type: 'integer', description: '本次命中但**未给处置**的候选条数（>0 才出现）——它就是欠账，`memory_check` 会一直列出来' },
+          similar: { type: 'array', items: { type: 'string' }, description: '（**仅 dryRun 形态**）字面相关候选（`id — 标题（强度 N）`；有内容时附一行「节：小节标题 / …」，让人不必再去读正文就能判断覆盖范围）；无候选时省略该键' },
+          hint: { type: 'string', description: '（**仅 dryRun 形态**）与候选无关的补充警告（如「库已满」）；无内容时省略该键' },
         },
       },
       render: (args, value) => {
         if (value.dryRun === true) {
-          const lines = ['dry-run：**未落库**。近重复检测用的是 `remember` 自己的检测器（不是 `recall` 的候选集）。']
+          const lines = ['dry-run：**未落库**。近重复检测用的是 `remember` 自己的检测器（不是 `recall` 的候选集）；⚠ 2026-11-12 起它只在 `dryRun` 里跑，写入路径不再自动查重。']
           const sim = value.similar
           if (sim !== undefined && sim.length > 0) {
-            lines.push(`命中 ${sim.length} 条相似候选：`)
+            lines.push(`列出 ${sim.length} 条字面相关候选（**宁滥勿缺，「强度」是绝对计数、不代表语义相似**，请自己筛）：`)
             for (const s of sim) lines.push(`  - ${s}`)
-            lines.push('下一步：要么 `update` / `memory_merge` 合流（正式写入时带 `similarDisposition` + `dispositionReason`），要么确认无关后写入并标 `unrelated`。')
+            lines.push('下一步：判为真重复就 `update` 补写或 `memory_merge` 合流；判为无关则直接正式写入（不会再产生待处置欠账）。')
           } else {
-            lines.push('未命中相似条目 ⇒ 可以正式写入（去掉 `dryRun`）。⚠ 这只证明**这个检测器**没命中，不等于 `recall` 也搜不到——两者候选集不同源。')
+            lines.push('这个检测器没列出候选 ⇒ 可以正式写入（去掉 `dryRun`）。⚠ 这不等于 `recall` 也搜不到——两者候选集不同源，而且**字面不相关 ≠ 语义不重复**。')
           }
           // hint 必须**无条件**印出：它不只装近重复提示，也装「库已满」这类与候选无关的警告。
           // 2026-11-03 测试抓到过一版把它嵌进「有候选」分支里 ⇒ 库满提示整条被吞掉，
@@ -277,13 +274,10 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         if (value.id === undefined || value.action === undefined) {
           return [{ type: 'text', text: '⚠ remember 返回缺 id / action（非 dryRun 形态必须有这两个字段）——内部契约破损，不要把这个当成功。' }]
         }
+        // 写入形态的回执只报结果本身：`similar` / `hint` / 欠账计数都是 dryRun 形态的东西（2026-11-12 起）
         return [{
           type: 'text',
-          text: `已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`
-            + (typeof value.hint === 'string' && value.hint.length > 0 ? `\n${value.hint}` : '')
-            + (typeof value.pendingDisposition === 'number' && value.pendingDisposition > 0
-              ? `\n⚠ ${value.pendingDisposition} 条候选未处置，已进欠账（memory_check 可查）`
-              : ''),
+          text: `已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`,
         }]
       },
     },
@@ -364,47 +358,19 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         ...(watchFor !== undefined ? { watchFor } : {}),
         ...(provenance !== undefined ? { provenance } : {}),
       })
-      // 近重复提示（2026-09-17 主人「存记忆时先搜索记忆」的机制层）：
-      // 用写入前的既有条目快照做检测，复用 search.ts 的打分（判据单一真源）；
-      // 无命中时不带任何额外键（无损 JSON 纪律）。
-      const dups = findNearDuplicates(active, { title, body, tags, kind, scope: writeScope })
-      const hint = formatDuplicateHint(dups)
-      // 处置闭环（2026-10-28 · lh-0f54524a）：命中就要么处置、要么进欠账，不能停在「提示过」。
-      // 键是 candidateId 而非 (newId, candidateId)——每次写入都产生新 id，「同一对」在结构上不存在。
-      const disposition = parseSimilarDisposition(args.similarDisposition)
-      const traceMs = Date.now()
-      if (dups.length > 0 && deps.recordDedupeTrace !== undefined) {
-        const hits: DedupeTraceRecord[] = dups.map((d) => ({
-          kind: 'hit',
-          atMs: traceMs,
-          candidateId: d.id,
-          newId: written.id,
-          strength: d.strength,
-        }))
-        const reason = typeof args.dispositionReason === 'string' ? args.dispositionReason.trim() : ''
-        const disposals: DedupeTraceRecord[] = disposition === undefined
-          ? []
-          : dups.map((d) => ({
-            kind: 'disposed' as const,
-            atMs: traceMs,
-            candidateId: d.id,
-            newId: written.id,
-            disposition,
-            ...(reason.length > 0 ? { reason } : {}),
-          }))
-        // 吞错（§5.22 规则 3）：侧车写不进去不该让记忆写入失败——但也不假装写了
-        try {
-          await deps.recordDedupeTrace([...hits, ...disposals])
-        } catch { /* 侧车不可写不阻塞主流程 */ }
-      }
-      // 只报**本次**未处置的条数（不是全库欠账——那个归 memory_check，它有完整轨迹）
-      const pendingDisposition = dups.length > 0 && disposition === undefined ? dups.length : 0
+      // ⚠ 自动近重复检测已于 2026-11-12 下线（判据不可行的三条硬证据见 dedupe.ts 顶部注释）。
+      //
+      // 后果是**有意**的、且要说清：
+      //   - 写入路径不再跑相似度、不再写 `hit` 轨迹 ⇒ **也不会再产生「欠账」**
+      //   - 「先搜再写」（主人 2026-09-17 的指令）的入口改为三处：
+      //       ① 显式 `dryRun`（上面那一支，仍是 `remember` 自己的检测器）
+      //       ② L1 同 key 精确覆盖
+      //       ③ L2/L3 同标题自动合并
+      //   - **已知缺口**：写入路径上现在没有布线化的「先搜」，剩下的是我在写之前的 `recall` 纪律。
+      //     这不是我以为已经解决了的事——它记在长期台账上，替代方案要求先标定再上线（见 dedupe.ts 注释）。
       return {
         id: written.id,
         action: written.action,
-        ...(dups.length > 0 ? { similar: dups.map(formatCandidate) } : {}),
-        ...(hint.length > 0 ? { hint } : {}),
-        ...(pendingDisposition > 0 ? { pendingDisposition } : {}),
       }
     },
   })
@@ -1500,7 +1466,7 @@ function buildVersion(): ToolDefinition {
 function buildCheck(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_check',
-    description: '查看**待处置的近重复欠账**（2026-10-28 起，取代原先恒空的「待沉淀建议」壳）。`remember` 命中相似条目却没给 `similarDisposition` 时，那些候选会一直列在这里——它们就是「提示过但没处置」的存量。⚠ 处置是时间轴上的重置：同一个候选之后再撞上会重新进榜。',
+    description: '查看**待处置的近重复欠账**（2026-10-28 起；⚠ **2026-11-12 起这个源已关闭**：`remember` 不再自动查重，所以**不再产生新欠账**）。剩下的是历史存量，清完即永久为空。⚠ **列表空 ≠ 你处置得好**——它只表示机制已下线；要「先搜再写」请用 `remember({dryRun:true})` 或 `recall`。',
     parameters: {},
     output: {
       schema: {
@@ -1530,7 +1496,7 @@ function buildCheck(deps: MemoryToolDeps): ToolDefinition {
         const shown = typeof value.note === 'string' && value.note.length > 0 && value.suggestions.length === 0
           ? `memory_check：${value.note}`
           : value.suggestions.length === 0
-            ? '无欠账：没有「命中相似却未处置」的候选。'
+            ? '无欠账——注意这**不是**「你处置得好」：自动查重已于 2026-11-12 下线，不再产生新欠账（理由见 src/dedupe.ts 文件头）。'
             : `待处置 ${value.suggestions.length} 条近重复撞车：\n`
               + value.suggestions.map((s) => `- ${s.summary}`).join('\n')
               + (typeof value.note === 'string' && value.note.length > 0 ? `\n（${value.note}）` : '')

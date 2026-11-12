@@ -83,8 +83,9 @@ test('未命中 ⇒ 明说「可以正式写入」，但不许把它说成「rec
   const r = await s.remember({ text: '量子色动力学的色彩因子\n完全无关的一条。', dryRun: true })
   assert.equal(r.similar, undefined, '未命中时省略 similar（无损 JSON）')
   const text = s.render({}, r).map((c) => c.text).join('\n')
-  assert.match(text, /未命中相似条目/)
+  assert.match(text, /没列出候选/)
   assert.match(text, /不等于 `recall` 也搜不到/, '边界必须写在文案里：两个检测器不同源')
+  assert.match(text, /字面不相关 ≠ 语义不重复/, '2026-11-12 教训：这条检测器测的是字面，必须自己承认')
 })
 
 test('库满时 dryRun 不抛错，只提示（预检不写库 ⇒ 守卫不该阻断它）', async () => {
@@ -96,13 +97,28 @@ test('库满时 dryRun 不抛错，只提示（预检不写库 ⇒ 守卫不该�
   assert.match(text, /库已满/)
 })
 
-test('渲染说清「未落库」，有候选时给出下一步（合流 / 或标 unrelated）', async () => {
+test('渲染说清「未落库」，有候选时给出下一步（合流 / 或直接写入）', async () => {
   const s = setup()
   await s.remember({ text: '我的错误模式清单\n把测试期望写错当成实现 bug。', tags: ['错误', '测试'] })
   const r = await s.remember({ text: '测试期望写错\n再来一次。', tags: ['错误', '测试'], dryRun: true })
   const text = s.render({}, r).map((c) => c.text).join('\n')
   assert.match(text, /未落库/)
-  assert.match(text, /similarDisposition/)
+  assert.match(text, /写入路径不再自动查重/, '必须说清它已是唯一入口，否则读者会以为正式写入也会提示')
+  assert.match(text, /memory_merge/, '下一步仍要给合流出路')
+  assert.doesNotMatch(text, /similarDisposition/, '该参数已于 2026-11-12 移除，文案不得再指向它')
+})
+
+// ─── 自动检测下线（2026-11-12 · 台账 lh-1f8c4a72）───────────────────────────
+//
+// 判据不可行的证据在 src/dedupe.ts 文件头（空模型 100% 触发 / 历史精度 6.4% /
+// 换判据后召回 0%）。本条把**行为**钉住：正式写入不再返回 similar、不再进欠账。
+test('★ 正式写入不再做自动查重：不返回 similar / hint / pendingDisposition', async () => {
+  const s = setup()
+  await s.remember({ text: '我的错误模式清单\n把测试期望写错当成实现 bug。', tags: ['错误', '测试'] })
+  const r = await s.remember({ text: '测试期望写错\n再来一次。', tags: ['错误', '测试'] })
+  assert.equal(r.similar, undefined, '自动路径不得再返回候选（那是 76 次/天噪音的来源）')
+  assert.equal(r.hint, undefined)
+  assert.equal(r.pendingDisposition, undefined, '不自动检测 ⇒ 不得再产生欠账')
 })
 
 test('回归：不带 dryRun 的正式写入仍返回 id / action，且真的落库', async () => {
