@@ -101,6 +101,10 @@ async function seedFull(store) {
     cue: ['某处境形状'],
     // v0.21.0：来源链（`p` 轴）
     provenance: 'measured',
+    // v0.23.0：执行位置。**两级一起给**——taskId 只在 project 内唯一，单给会被 store 层
+    // 按「两级不可拆」剥掉，那样 A117 对 taskId 就恒真了（无分辨力）。
+    project: 'alice',
+    taskId: 'ps-parity',
   })
   // v0.21.0：`archival`（返回弧）只在**已归档**条目上出现 ⇒ 另造一条并归档，
   // 否则 A117 对 archival 恒真（「返回里没有该键」不构成证据）。

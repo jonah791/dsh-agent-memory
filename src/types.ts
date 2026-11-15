@@ -255,6 +255,29 @@ export interface Entry {
    */
   subject?: Subject
   /**
+   * 执行位置·领域（v0.23.0）：这条记忆是在**哪个项目**里得到的——`alice` / `pp` / 不设（通用）。
+   *
+   * **与 `scope` 正交且不可互换**：`scope` 是**准入**（存哪个分区、谁看得见，值是路径）；
+   * `project` 是**语义标记**（哪来的），只是可选筛子，不改变任何条目的可见性。
+   * 理由与三条反例见 `src/execution.ts` 文件头。
+   *
+   * 动机 = 主人 2026-11-15 架构定调（「Project 不属于 Agent 也不属于 Session」）+
+   * MAGE（EMNLP 2026）的实测结论（按语义相似度组织记忆会导致状态碎片化与错误无法隔离）。
+   *
+   * 缺省 = 通用（不知道属于哪个项目），不是某个默认项目——判断型字段不代填。
+   */
+  project?: string
+  /**
+   * 执行位置·节点（v0.23.0）：这条记忆是在**哪个任务**里得到的（server 侧的任务 id）。
+   *
+   * **只在 `project` 内唯一**（`ps-4a2b` 在 alice 与 pp 里可以是两个任务）
+   * ⇒ 写入 / 查询时给 `taskId` **必须同时给 `project`**，否则二义（见 `execution.ts`）。
+   *
+   * 与 `project` 的分工：`project` 是「哪棵树」，`taskId` 是「树上哪个节点」——
+   * 只有前者等于按池子分家（还是语义组织），加后者才够得着 MAGE 说的**执行路径**。
+   */
+  taskId?: string
+  /**
    * 约定状态（v0.14.0）：事项**是否已被共同建立**——`established`（主人明确说过）/
    * `proposed`（**我提的、主人未回应**）/ `scoped`（主人接受但限定范围）。
    *
@@ -516,6 +539,17 @@ export interface RecallQuery {
    */
   subject?: Subject
   /**
+   * 执行位置过滤（v0.23.0）：只看某个项目 / 某个任务的条目。
+   *
+   * 级联语义：只给 `project` = 该项目全部（含其下所有任务）；给 `project` + `taskId` =
+   * 精确到任务。**给 `taskId` 必须同时给 `project`**（任务 id 只在项目内唯一）。
+   * 缺省 = 不过滤（通用条目照常返回）。
+   * ⚠ 同为**可选筛子**，不是可见性边界（理由同 subject）。
+   */
+  project?: string
+  /** 执行位置过滤（v0.23.0）：任务节点 id；必须与 `project` 同时给 */
+  taskId?: string
+  /**
    * 约定状态过滤（v0.14.0）：只看向「**是否已被共同建立**」的条目——
    * `proposed` = **只看我自己提的、主人未回应的事**（自查「我有没有把提议当成定论」时用它）。
    * `established` = 只看主人明确说过的。缺省 = 不过滤。
@@ -586,6 +620,10 @@ export interface RecallResultItem {
   role?: string
   /** 主体层（v0.13.0，缺省 = 通用；仅当条目已标注时出现在结果里） */
   subject?: Subject
+  /** 执行位置（v0.23.0；仅当条目已标注时出现在结果里）——这条记忆是在哪个项目得到的 */
+  project?: string
+  /** 执行位置（v0.23.0；仅当条目已标注时出现）——哪个任务节点（只在 project 内唯一） */
+  taskId?: string
   /** 约定状态（v0.14.0；仅当条目已标注时出现在结果里——缺省表示「未标注」而非「已建立」） */
   grounding?: Grounding
   /**
@@ -653,6 +691,10 @@ export interface BrowseQuery {
   role?: string
   /** 主体层过滤（v0.13.0）：只看「关于谁」的条目。缺省 = 不过滤。 */
   subject?: Subject
+  /** 执行位置过滤（v0.23.0）：只看某个项目的条目。缺省 = 不过滤。 */
+  project?: string
+  /** 执行位置过滤（v0.23.0）：任务节点 id；必须与 `project` 同时给 */
+  taskId?: string
   /** 约定状态过滤（v0.14.0）：`proposed` = 只看我自己提的、主人未回应的事。缺省 = 不过滤。 */
   grounding?: Grounding
 }

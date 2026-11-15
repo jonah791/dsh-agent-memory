@@ -20,6 +20,7 @@ import type { MemoryStore } from './store.ts'
 import { workspaceIdOf, GLOBAL_SCOPE } from './scope.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, type RoleCarrier } from './role.ts'
 import { normalizeSubject, subjectTag } from './subject.ts'
+import { executionTag } from './execution.ts'
 import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
 
@@ -52,7 +53,12 @@ function lineOf(entry: Entry): string {
   // 速览是每个会话最先看到的文本——把「这条结论的复查死线已过」摆在最前，
   // 成本是每行几字符，收益是我在**用**它之前就看见它该重看了。
   const stalenessNote = stalenessTag(entry.reviewAfter, new Date())
-  return `- ${stalenessNote}${subject}${groundingNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
+  // 执行位置标记（v0.23.0）：有值才打（通用条目留空——标记要挑着打）。
+  // 速览是每个会话最先看到的东西，在这里标出的理由与 stalenessNote 同：
+  // 「这条结论来自哪个项目」决定它适不适用——在期货工程里读到 alice 项目的结论，
+  // 我该先想「这还成立吗」，而不是直接照做。
+  const projectNote = executionTag(entry.project, entry.taskId)
+  return `- ${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
 }
 
 /**

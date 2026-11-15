@@ -74,6 +74,22 @@ export interface EntryDraft {
    */
   subject?: Subject
   /**
+   * 执行位置·领域（v0.23.0）：这条记忆是在**哪个项目**里得到的（`alice` / `pp`；不设 = 通用）。
+   *
+   * 与 `subject` 同形：**只在新建时生效**——命中已有条目（key 覆盖 / 标题合并）时保留原标注。
+   * 理由：合并路径下两条记忆可能来自不同项目，静默覆盖会把「这个项目的结论」变成
+   * 「那个项目的」（反之亦然），而一个字段放不下两条归属 ⇒ 保留先到者，冲突由正文承载。
+   * 显式纠正 / 清除走 `update({ project })`。
+   */
+  project?: string
+  /**
+   * 执行位置·节点（v0.23.0）：这条记忆是在**哪个任务**里得到的。
+   *
+   * **只在 `project` 内唯一** ⇒ 写入时给 `taskId` 必须同时给 `project`（工具层已 fail-loud）。
+   * 同形理由同 `project`：只在新建时生效，显式纠正走 `update({ taskId })`。
+   */
+  taskId?: string
+  /**
    * 约定状态（v0.14.0）：事项**是否已被共同建立**（`established` / `proposed` / `scoped`；
    * 不设 = 未标注）。与 `subject` 同形：**只在新建时生效**，命中已有条目时保留原标注；
    * 显式纠正走 `update({ grounding })`。
@@ -131,6 +147,16 @@ export interface EntryPatch {
    * 本条反对的只是**静默**转移：不给该字段就绝不动它。
    */
   subject?: Subject | null
+  /**
+   * 执行位置（v0.23.0）——显式转移 / 清除路径，三态同 `subject`：
+   * `undefined` = 不动 / `null` = 清除 / 值 = 设置。
+   *
+   * ⚠ **清 `project` 会连带清 `taskId`**（任务 id 无项目归属则无法定位，留着是悬空指针）。
+   * 只清 `taskId` 则不动 `project`。这条级联规则住在这里，消费者不要各写一遍。
+   */
+  project?: string | null
+  /** 执行位置（v0.23.0）——显式转移 / 清除路径，三态同 `subject`；清它不动 `project`。 */
+  taskId?: string | null
   /**
    * 约定状态（v0.14.0）——显式转移路径，三态同 `subject`：
    * `undefined` = 不动 / `null` = 清除回**未标注** / 值 = 设置。
@@ -299,6 +325,10 @@ export class MemoryStore {
       ...(draft.archiveRef !== undefined ? { archiveRef: draft.archiveRef } : {}),
       ...(draft.role !== undefined ? { role: draft.role } : {}),
       ...(draft.subject !== undefined ? { subject: draft.subject } : {}),
+      // 执行位置（v0.23.0）：只在新建时盖章（与 subject/grounding 同形，理由见
+      // EntryDraft.project 注释）。两级不可拆——taskId 没有 project 时不落盘。
+      ...(draft.project !== undefined ? { project: draft.project } : {}),
+      ...(draft.project !== undefined && draft.taskId !== undefined ? { taskId: draft.taskId } : {}),
       ...(draft.grounding !== undefined ? { grounding: draft.grounding } : {}),
       // 时效维（v0.15.0）：只在新建时盖章——命中已有条目时保留原死线（防「我以为续了期、
       // 其实把别人的死线抹了」）。两个字段都只在**有值**时出现（无损 JSON 纪律）。
@@ -335,6 +365,21 @@ export class MemoryStore {
     if (patch.subject !== undefined) {
       if (patch.subject === null) delete updated.subject
       else updated.subject = patch.subject
+    }
+    // 执行位置显式转移 / 清除（v0.23.0）：三态同 subject（见 EntryPatch.project）。
+    // ⚠ 级联：清 project 必须连带清 taskId——任务 id 没有项目归属就成了悬空指针
+    //（会出现在「按 taskId 查得到、但不知道该属于谁」的状态里）。
+    if (patch.project !== undefined) {
+      if (patch.project === null) {
+        delete updated.project
+        delete updated.taskId
+      } else {
+        updated.project = patch.project
+      }
+    }
+    if (patch.taskId !== undefined) {
+      if (patch.taskId === null) delete updated.taskId
+      else updated.taskId = patch.taskId
     }
     // 约定状态显式转移 / 清除（v0.14.0）：三态同 subject（见 EntryPatch.grounding）。
     // 存量回填 `proposed` 走的就是这条路径——本维度若不回填，保护等于没有。

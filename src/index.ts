@@ -87,6 +87,19 @@ export const entrySchema = zod.object({
    * ⚠ **必须在此声明**（同一个坑**第七次**，见上方 `archivedReasonType` 的清单）。
    */
   provenance: zod.enum(['master', 'web', 'self', 'measured']).optional(),
+  /**
+   * 执行位置（v0.23.0）：`project`（那个项目）+ `taskId`（那个任务，**只在 project 内唯一**）。
+   *
+   * ⚠ **必须在此声明**（同一个坑**第八次**：v0.12 `aliases`、v0.13 `subject`、
+   * v0.14 `grounding`、v0.15 `reviewAfter/watchFor`、v0.16 `cue`、v0.21 `provenance` 与
+   * `archivedReasonType`）：storage-domain 在写入边界用本 schema 校验，**未声明的字段会被
+   * 静默剥掉**——存了等于没存，而写入**仍返回成功**，是最难查的一类缺陷。
+   *
+   * ⇒ 判据（第三次重申，因为前两次重申都没拦住）：**任何新字段加进 `Entry`，
+   * 必须同时来这里声明一次**——类型层不会报错，运行层不会报错，只有「读数不对」会报错。
+   */
+  project: zod.string().optional(),
+  taskId: zod.string().optional(),
   // v0.5 角色维度（多智能体工作台模式）：归属 + 写入者溯源
   role: zod.string().optional(),
   /**
@@ -399,7 +412,29 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   }
 
   // 4. 注册记忆工具（remember/recall/update/forget/browse/relate/stats/audit/health/version/check）
-  registerMemoryTools(ctx, { store, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace })
+  // 执行位置自动判定（v0.23.0）：与 `dsh-project-state` 联动的**唯一接缝**。
+  //
+  // 三个设计决定，每个都为了「缺了这个插件，记忆插件照常工作」：
+  //   1. **软依赖**——`ctx.reflect.get(name, false)` 的 strict=false 让服务缺失时返回
+  //      undefined 而不抛（直接写 `ctx.projectState` 会抛
+  //      `cannot get property "projectState" without inject`，2026-11-15 实测）；
+  //      写进 `inject` 就变成硬依赖，没装 project-state 的 profile 连记忆插件都起不来。
+  //   2. **每次调用现取**，不在 apply 时缓存——插件可能在运行中装卸，缓存会把「当时没有」
+  //      固化成「永远没有」（同 `dsh-project-orientation` 的写法）。
+  //   3. **失败静默**——盖章是增值，不是前置条件；服务抛错不该让「记记忆」失败。
+  const resolveProject: NonNullable<MemoryToolDeps['resolveProject']> = (cwd) => {
+    try {
+      const svc = ctx.reflect?.get('projectState', false) as
+        | { resolveProjectByPath?: (p: string) => { projectId?: string } | null }
+        | undefined
+      const hit = svc?.resolveProjectByPath?.(cwd)
+      return typeof hit?.projectId === 'string' && hit.projectId !== '' ? hit.projectId : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  registerMemoryTools(ctx, { store, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })

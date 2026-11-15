@@ -31,6 +31,7 @@ import { findNearDuplicates, formatCandidate, parseSimilarDisposition, unresolve
 import type { DedupeTraceRecord, SimilarDisposition } from './dedupe.ts'
 import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
+import { countByProject, executionTag, filterByExecution, normalizeProject, parseExecutionArgs, parseExecutionId } from './execution.ts'
 import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, parseGroundingArg, UNLABELED_GROUNDING } from './grounding.ts'
 import { countByStaleness, cueTag, filterByStaleness, parseReviewAfterArg, parseStalenessFilterArg, parseWatchForArg, stalenessTag, stalenessVerdict, watchForTag } from './temporal.ts'
 import { transcriptiveTag } from './origin.ts'
@@ -53,6 +54,25 @@ export interface RecompressOutcome {
 export interface MemoryToolDeps {
   /** 记忆存储（T7 用 storage-domain kv 表构造 MemoryStore） */
   store: MemoryStore
+  /**
+   * 执行位置自动判定（v0.23.0）——与 `dsh-project-state` 联动的**唯一接缝**。
+   *
+   * ## 为什么是回调，不是 import
+   *
+   * 消费方**不 import 提供方**：那样会变成构建期硬依赖，没装 `dsh-project-state` 的
+   * profile 连记忆插件都起不来。`index.ts` 用 `ctx.reflect.get('projectState', false)`
+   * （cordis 的可选服务读取）取到服务、包成这个纯函数传进来；服务不在时传 `undefined`，
+   * 工具层**静默降级为「不盖章」**——绝不因为缺一个可选插件让「记记忆」失败。
+   *
+   * ## 为什么只有这一个方法
+   *
+   * 工具层需要的只有一件事：**这个目录属于哪个项目**。最小接口 = 最小耦合；
+   * 别的方法（取任务列表 / 写回状态）不属于记忆插件的职责，需要时再加。
+   *
+   * @param cwd - 当前会话工作目录（已由 `sessionCwdOf(exec)` 取出）
+   * @returns 项目 id；无归属返回 `undefined`（**不猜**）
+   */
+  resolveProject?: (cwd: string) => string | undefined
   /** 配置加载：workspace 根目录 → MemoryConfig；缺省读 <root>/.dsh/memory.yml */
   loadConfig?: (workspaceRoot: string) => Promise<MemoryConfig> | MemoryConfig
   /** 懒压缩钩子（T7 接线：TimelineCompressor.compressPending；访问记忆时补压上一自然单位，DESIGN.md §五） */
@@ -231,6 +251,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       scope: { type: 'string', description: '写入作用域覆盖：global 或 workspaceId（缺省按项目 memory.yml 路由）。' },
       role: { type: 'string', description: '角色归属（v0.5 多智能体工作台）：条目归属的角色隔间。缺省时——项目启用 roles 则盖调用者角色，否则为共享记忆（所有角色可见）。' },
       subject: { type: 'string', description: '主体层（v0.13.0）：这条记忆**关于谁**——`self`（关于我：我的判断/错误/成长/决策理由）或 `master`（关于主人：主人的偏好/定调/习惯/反馈）。缺省 = **通用**（技术知识/项目工作/外部论文这类不关于特定主体的）。⚠ 它不是隔离：设了 subject 的条目**依然对所有调用方可见**，只是可被过滤与统计。只在**新建**时盖章；命中已有条目（key 覆盖/标题合并）时不覆盖原标注——纠正用 update。' },
+      project: { type: 'string', description: '执行位置·领域（v0.23.0）：这条记忆是在**哪个项目**里得到的（如 `alice` / `pp`）。**缺省自动判定**——按会话工作目录查项目注册表（`dsh-project-state`），命中则盖章、没有则留空（不猜）。**什么时候要显式给**：① 在别的目录里干活时（注入只覆盖会话 cwd）② 想纠正自动判定。⚠ 与 `scope` 不同：scope 是存储分区与准入（值是路径，目录改名就漂），本字段是语义标记（只是可选筛子，不改变可见性）。⚠ **通用知识不要盖项目标记**（不属于任何项目的方法论 / 外部论文）——自动判定可能盖错，用 `update({ project: "" })` 清除。' },
+      taskId: { type: 'string', description: '执行位置·节点（v0.23.0）：这条记忆是在**哪个任务**里得到的（`dsh-project-state` 的任务 id，如 `ps-4a2b`）。**只在 project 内唯一** ⇒ 给 taskId 必须同时给 project，否则报错。**不自动判定**——「这条记忆是否来自该任务」是判断，不由机制替你断言；只在确实是从某个任务里得到结论时才填。用途：项目侧可反查「这个任务留下了哪些经验」，记忆侧可按任务聚合出**执行路径**（而不是按内容相似度捞条目）。' },
       grounding: { type: 'string', description: '约定状态（v0.14.0）：这条记忆涉及的事**是否已被主人与我共同建立**——`established`（主人明确说过/定调过）· `proposed`（**我自己提的、主人未回应**）· `scoped`（主人接受但限定范围）· `rejected`（主人否决过）。缺省 = 未标注。⚠ **写入纪律**：我提出的、主人没回应的方案，**必须标 `proposed`**——否则未来的我会把它当成「主人说过的」而当授权用（论文实测：未接受提议被记成「已确认信息」的比例高达 86–100%）。' },
       reviewAfter: { type: 'string', description: '复查死线（v0.15.0）：这条结论**该在什么时候被重看**——那是「未来的我执行它」的时刻。接受 `YYYY-MM-DD`（如 2026-11-01）/ ISO 时刻 / 相对写法 `+7d`（7 天后）或 `+2w`（2 周后）。**什么时候填**：这条结论依赖**会变的外部状态**时——环境坐标（端口/路径/版本号/目录布局）、工具或通道的可用率读数、别人的系统行为、价格与限额、尚未定稿的方案。**什么时候不填**：结论永久成立时（原则 / 教训 / 主人偏好 / 我的代码风格 / 已发生事件的事实）——**空是常态，填是例外**。⚠ 到期**不等于作废**，只表示该去核实；核实后 `update` 续新死线或清除。' },
       watchFor: { type: 'array', items: { type: 'string' }, description: '观察条件（v0.15.0）：**什么样的新信息会让这条失效**（1–8 条短句，每条 ≤200 字）。**为什么值得填**（论文实测）：决策时写下的观察条件能达 92.2% 的关键新信息、只带 20 条无关噪音；而「把全部背景事实都索引上」虽达 100%，却带 89 条噪音——**少而准**才划算。**怎么填**：写「什么事件会让它不成立」，点名具体实体（含它的**别名**与**上游依赖**），**略去用不到的**。例：`["DuckDuckGo 通道可用率重测低于 80%", "busDir 或 web 端口改变", "该插件被卸载或改名"]`。**写入时机只有一次——就是现在**（我记得为什么这样判断）；事后再补，我想不起当时在等什么。它会被印在 recall 结果里，命中的那一刻我就看见「它在等什么」。' },
@@ -307,6 +329,18 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       // 来源类型（v0.21.0）：同纪律——**显式给值才盖章**，非法值 fail-loud
       // （静默当「未标注」正是本维度要防的失败：我以为标了、其实没标）。
       const provenance = parseProvenanceArg(args.provenance, 'remember.provenance')
+      // 执行位置（v0.23.0）：与 `dsh-project-state` 联动的**那一跳**。
+      //   - `project` 缺省**自动判定**：cwd 属于哪个已注册项目是**查表**（事实），不是判断；
+      //   - `taskId` **不自动**：「这条记忆是否来自这个任务」是判断，不由机制替我断言
+      //     （§1.3 禁自动决策 · 判断型字段禁默认值）。
+      // ⚠ 自动判定会盖错（通用方法论写在项目目录里也是常事）⇒ 本维**必须**可清除
+      //   （`update({ project: "" })`）且渲染可见（`executionTag`）——移植的是可见性，不是拦截。
+      const execPos = parseExecutionArgs({ project: args.project, taskId: args.taskId }, 'remember')
+      const autoProject = execPos.project !== undefined || cwd === undefined || deps.resolveProject === undefined
+        ? undefined
+        : deps.resolveProject(cwd)
+      const project = execPos.project ?? normalizeProject(autoProject)
+      const taskId = execPos.taskId
       const { writeScope } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
       const { title, body } = splitText(text)
       // max_entries 守卫：仅当会新建时拦截（更新/合并不受限）
@@ -357,6 +391,9 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         ...(reviewAfter !== undefined ? { reviewAfter } : {}),
         ...(watchFor !== undefined ? { watchFor } : {}),
         ...(provenance !== undefined ? { provenance } : {}),
+        // 执行位置（v0.23.0）：两级不可拆——taskId 没有 project 时不落盘（见 execution.ts）。
+        ...(project !== undefined ? { project } : {}),
+        ...(project !== undefined && taskId !== undefined ? { taskId } : {}),
       })
       // ⚠ 自动近重复检测已于 2026-11-12 下线（判据不可行的三条硬证据见 dedupe.ts 顶部注释）。
       //
@@ -395,6 +432,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
  */
 export const DIMENSION_ITEM_FIELDS = {
   subject: { type: 'string', enum: ['self', 'master'], description: '主体层（v0.13.0）：该条目关于谁；通用条目省略该键。' },
+  project: { type: 'string', description: '执行位置·领域（v0.23.0）：这条记忆是在**哪个项目**里得到的（如 `alice` / `pp`）；通用条目省略该键。与 `scope` 不同——scope 是准入与存储分区（值是路径），本字段是语义标记（只是可选筛子，不改变可见性）。' },
+  taskId: { type: 'string', description: '执行位置·节点（v0.23.0）：这条记忆是在**哪个任务**里得到的（server 侧任务 id）；**只在 `project` 内唯一**——无 project 时不透出该键（否则会被误读成项目名）。' },
   grounding: { type: 'string', enum: ['established', 'proposed', 'scoped', 'rejected'], description: '约定状态（v0.14.0）：该条是否已被共同建立；未标注条目省略该键（⚠ 省略 = 不知道，不等同于「已建立」）。' },
   reviewAfter: { type: 'string', description: '时效维（v0.15.0）：复查死线 `YYYY-MM-DD`；未设死线的条目省略该键。⚠ 档位（已过期 / N 天后复查）由**渲染层按当前时刻现算**，不预存——存了就会与读取时刻脱钩。' },
   watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）：观察条件——这条记忆在等什么新信息会让它失效；未设的条目省略该键。' },
@@ -420,6 +459,8 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       includeArchive: { type: 'boolean', description: '是否包含已归档条目（缺省 false）。' },
       role: { type: 'string', description: '角色视角覆盖（v0.5）：以指定角色检索。缺省 = 按调用者会话身份推导（人类会话→主脑角色；子代理/队员→派生角色）。仅当项目启用 roles 时生效。' },
       subject: { type: 'string', description: '主体层过滤（v0.13.0）：只看「关于谁」的条目——`self` = 只看关于我自己的，`master` = 只看关于主人的。缺省 = 不过滤（通用条目照常返回）。⚠ 与 role 的**准入**不同：这是**可选筛子**，不是可见性边界——它只是不匹配就不返回，不改变任何条目的可见性。想「关于我的 + 关于主人的、排除通用」目前需分两次调用。' },
+      project: { type: 'string', description: '执行位置过滤（v0.23.0）：只看某个**项目**的条目（如 `alice` / `pp`）。缺省 = 不过滤。用途：① 换到别的目录干活时取回「那个项目的经验」② 自查「这个项目的结论都有哪些」。⚠ 可选筛子，不是可见性边界。' },
+      taskId: { type: 'string', description: '执行位置过滤（v0.23.0）：精确到某个**任务**（`dsh-project-state` 的任务 id）。**必须与 project 同时给**（任务 id 只在项目内唯一，单给会报错）。用途：取回「这个任务一路留下的经验」= 按执行路径聚合，而不是按内容相似度捞。' },
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` = **只看我自己提的、主人未回应的事**——自查「我有没有把提议当成定论」时用它；`rejected` = 只看主人否决过的（防我旧事重提）；`established` = 只看主人明确说过的。缺省 = 不过滤。⚠ 同为**可选筛子**，不是可见性边界。' },
       provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源过滤（v0.21.0）：只看某类来源的条目——`master`（主人说的）/ `web`（外部：网页·论文）/ `self`（我推的·我提议的）/ `measured`（我实测的）。缺省 = 不过滤。**典型用法**：`self` = 自查「哪些结论的权威只在我这边」；`web` = 找出「该回原文核对」的条目；`master` = 「主人到底说过哪些」。⚠ 与 grounding 不同：那个筛「主人回应了没有」，这个筛「信息从哪来」。' },
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看**该重看**的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`（还早）。典型用法：`["expired","due-soon"]` = 「**我的哪些结论该重看了**」。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目在任何取值下都不返回（它们的时效状态是「**不知道**」，不是「有效」）。' },
@@ -537,7 +578,11 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // `[已过时]`）；`merged` / `capacity` / 未分类留空——内容还在，换位置而已。
           // 仅在 includeArchive 时才有归档条目进来，但一旦进来这一格就是「能不能引用它」的答案。
           const archiveNote = archiveReasonTag(item.archivedReasonType)
-          return `- ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${relatedNote}`
+          // 执行位置标记（v0.23.0）：**有值才打**（通用条目留空——同 subjectTag 的教训：标记要挑着打，
+          // 库里绝大多数条目不属于任何项目）。放在前缀**末尾**而不是最前：它是**定位信息**
+          // （这条属于哪），不是警示（那几位留给「可能已不成立 / 权威不在我这边」）。
+          const projectNote = executionTag(item.project, item.taskId)
+          return `- ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${relatedNote}`
         })
         return [{
           type: 'text',
@@ -569,10 +614,14 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       // `provenance:'self'` = 「这些结论的权威其实在我这边」（我推的、不是主人定的、也不是实测），
       // `'web'` = 「从外面读来的」（拿它当自己的结论用之前回原文核对）。
       const provenance = parseProvenanceArg(args.provenance, 'recall.provenance')
+      // 执行位置筛（v0.23.0）：同为可选筛子（四级串联，都未给时全部零拷贝透传）。
+      // 用途与 provenance 不同：那是**审查入口**（权威在哪），这是**执行路径入口**
+      // ——「这个项目/这个任务一路留下了什么」。给 taskId 必须配 project（parseExecutionArgs 会报错）。
+      const execPos = parseExecutionArgs({ project: args.project, taskId: args.taskId }, 'recall')
       const now = new Date()
       const entries = filterByStaleness(
         filterByProvenance(
-          filterByGrounding(filterBySubject(gathered.entries, subject), grounding),
+          filterByGrounding(filterByExecution(filterBySubject(gathered.entries, subject), execPos), grounding),
           provenance,
         ),
         staleness,
@@ -746,6 +795,8 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       aliases: { type: 'array', items: { type: 'string' }, description: '替换后的**检索别名**（整体替换，与 tags 同语义）；缺省不动。用途：给已存在的记忆补「它可能被怎么问」的同义表述——实测补后可从 #5 升到 #1。' },
       cue: { type: 'array', items: { type: 'string' }, description: '替换后的**情境形状**（整体替换，v0.16.0；留空数组即清空）；缺省不动。用途：给已存在的经验补「什么形状的处境该用它」——与 aliases 的区别是它防**场景失配**而非词面失配。' },
       subject: { type: 'string', description: '主体层（v0.13.0）——**显式纠正/标注**已存在条目的「关于谁」：给 `self`/`master` = 设置，给空字符串 = 清除回通用，缺省 = 不动。用途：给存量历史记忆补标注（新建时忘标或标错时的唯一入口）；批量标注请先用 recall/memory_browse 定位 id。' },
+      project: { type: 'string', description: '执行位置（v0.23.0）——**显式纠正 / 清除**已存在条目的项目归属：给值 = 设置，给**空字符串** = 清除（⚠ **清除会连带清 taskId**——任务 id 没有项目归属就成了悬空指针），缺省 = 不动。用途：① 自动判定盖错了（通用知识被盖成项目记忆）② 存量条目回填。' },
+      taskId: { type: 'string', description: '执行位置（v0.23.0）——显式纠正 / 清除任务归属：给值 = 设置（必须该条目已有 project 或同批给 project），给**空字符串** = 清除（不动 project），缺省 = 不动。' },
       grounding: { type: 'string', description: '约定状态（v0.14.0）——**显式纠正/回填**已存在条目的「是否已被共同建立」：给 `established`/`proposed`/`scoped`/`rejected` = 设置，给空字符串 = 清除回未标注，缺省 = 不动。**主要用途是回填**：把库里「我自己提的、主人未回应」的条目标成 `proposed`，防止未来的我把它当授权用；批量回填请先用 recall({ grounding: ... }) 定位 id。' },
       reviewAfter: { type: 'string', description: '时效维（v0.15.0）——**显式续期 / 清除**复查死线：给 `YYYY-MM-DD`（或相对写法 `+7d` / `+2w`，按**此刻**折算成绝对日期）= 设置；给**空字符串** = 清除（不再跟踪）；缺省 = 不动。**主要用途是「到期后的动作链」**：核实完 → 改内容 + 续新死线（或清除）。必须允许转移——死线一旦过期就永远卡在过期态，标记天天亮而消不掉。' },
       watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）——**整体替换**观察条件：给 1–8 条（每条 ≤200 字）= 设置；给**空数组** = 清空；缺省 = 不动。' },
@@ -824,6 +875,27 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       // 空串 = 清除回未标注 / 缺省 = 不动。这是**存量回填的唯一入口**。
       if (args.provenance !== undefined) {
         patch.provenance = parseProvenanceArg(args.provenance, 'update.provenance') ?? null
+      }
+      // 执行位置显式纠正 / 清除（v0.23.0）：三态同 subject（给值 = 设置 / 空串 = 清除 / 缺省 = 不动）。
+      // ⚠ 两条与**新建**路径刻意不同的判断（理由见 `execution.ts::parseExecutionId` 注释）：
+      //   ① 单给 taskId 在这里**可能合法**——条目若已有 project，就地补任务 id 是正当操作
+      //      ⇒ 不能复用 `parseExecutionArgs`（那是新建视角，强制两级同批给）；
+      //   ② 合法性按「修改**之后**的状态」判：patch 完若没有 project，就不能有 taskId
+      //      （否则存档里出现悬空任务 id，将来按它查会查到「不知道该属于谁」的条目）。
+      // ⚠ 清 project 的级联（连带清 taskId）住在 `store.ts::update`，这里不重写一遍——
+      //    同一条规则两处实现，迟早一改一漏。
+      const nextProject = args.project !== undefined
+        ? parseExecutionId(args.project, 'update.project')
+        : normalizeProject(entry.project)
+      if (args.project !== undefined) {
+        patch.project = nextProject ?? null
+      }
+      if (args.taskId !== undefined) {
+        const nextTaskId = parseExecutionId(args.taskId, 'update.taskId')
+        if (nextTaskId !== undefined && nextProject === undefined) {
+          throw new Error('update.taskId: 该条目没有项目归属，不能单独设置任务 id（先设 project）')
+        }
+        patch.taskId = nextTaskId ?? null
       }
       await deps.store.update(entry.scope, args.id, patch)
       recordAction(deps, config, { action: 'update', id: args.id, mode })
@@ -1136,6 +1208,8 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       pageSize: { type: 'integer', description: '每页组数（默认 20）。' },
       role: { type: 'string', description: '角色视角覆盖（v0.5）：缺省按调用者会话身份推导。仅当项目启用 roles 时生效。' },
       subject: { type: 'string', description: '主体层过滤（v0.13.0）：只看「关于谁」的条目——`self` / `master`。缺省 = 不过滤。用于翻看某一层的积累（如「我对主人的认识都记了些什么」）。' },
+      project: { type: 'string', description: '执行位置过滤（v0.23.0）：只看某个**项目**的条目（如 `alice` / `pp`）。缺省 = 不过滤。用于翻某个项目的积累（如「这个项目踩过哪些坑」）。' },
+      taskId: { type: 'string', description: '执行位置过滤（v0.23.0）：精确到某个**任务**；**必须与 project 同时给**（任务 id 只在项目内唯一）。' },
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` / `rejected` / `scoped` / `established`。缺省 = 不过滤。用于翻档案自查（如「我提过哪些主人没回应的方案」）。' },
       provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源过滤（v0.21.0）：`master` / `web` / `self` / `measured`。缺省 = 不过滤。用于翻档案自查（如「我读过的东西都记了些什么」「哪些结论是我自己推的」）。' },
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看某档时效状态的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`。用于**按时间线**翻「哪些结论该重看了」（recall 要查询词，这里不要）。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目时效状态是「不知道」，不是「有效」。' },
@@ -1207,9 +1281,11 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               // 来源 / 归档标记（v0.21.0）：与 recall 同一套渲染纪律（同一事实两个界面不能长得不一样）
               const provenanceNote = provenanceTag(item.provenance)
               const archiveNote = archiveReasonTag(item.archivedReasonType)
+              // 执行位置标记（v0.23.0）：与 recall 同一位置、同一纪律（同一事实两个界面不能长得不一样）
+              const projectNote = executionTag(item.project, item.taskId)
               const watchNote = watchForTag(item.watchFor)
               const cueNote = cueTag(item.cue)
-              return `  - ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}[${item.kind}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}`
+              return `  - ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}${projectNote}[${item.kind}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}`
             })
             .join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
@@ -1232,7 +1308,10 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       const entries = filterByStaleness(
         filterByProvenance(
           filterByGrounding(
-            filterBySubject(gathered.entries, parseSubjectArg(args.subject, 'memory_browse.subject')),
+            filterByExecution(
+              filterBySubject(gathered.entries, parseSubjectArg(args.subject, 'memory_browse.subject')),
+              parseExecutionArgs({ project: args.project, taskId: args.taskId }, 'memory_browse'),
+            ),
             parseGroundingArg(args.grounding, 'memory_browse.grounding'),
           ),
           parseProvenanceArg(args.provenance, 'memory_browse.provenance'),

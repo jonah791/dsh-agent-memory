@@ -664,6 +664,12 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     // 共用的唯一投影点，漏一行就会出现「过滤生效了（total 对）但结果项里没有该字段
     // ⇒ 渲染层打不出标记」。本次实测就是这样被 subject.test.mjs 的 A88/A88c 抓住的。
     ...(entry.subject !== undefined ? { subject: entry.subject } : {}),
+    // 执行位置（v0.23.0）——**同一投影点、同一教训**（v0.13/v0.14/v0.15/v0.21 连续四版
+    // 都栽在漏这一行：过滤生效了、total 对，但结果项里没有该字段 ⇒ 渲染层打不出标记）。
+    // ⚠ 两级不拆：taskId 只在 project 存在时透出——无项目的任务 id 透出去会被读成
+    // 「某个叫 ps-4a2b 的项目」，是**错误信息**而非缺信息。
+    ...(entry.project !== undefined ? { project: entry.project } : {}),
+    ...(entry.project !== undefined && entry.taskId !== undefined ? { taskId: entry.taskId } : {}),
     // 约定状态（v0.14.0）——**同一投影点、同一教训**：上一版（v0.13.0 subject）就是漏了
     // 这里，导致「过滤生效（total 对）但结果项没有该字段 ⇒ 渲染打不出标记」。
     // 这次一次补上。⇒ 判据：任何新字段加进 Entry，先来这里看一眼。
