@@ -111,6 +111,17 @@ export interface EntryDraft {
   /** 时效维（v0.15.0）：观察条件（1–8 条短句，在等什么新信息）——只在新建时生效，理由同 `reviewAfter`。 */
   watchFor?: string[]
   /**
+   * 生效时间（v0.24.0）：这条结论**从何时开始成立**（`YYYY-MM-DD`）。
+   *
+   * 与 subject / grounding / reviewAfter 同形：**只在新建时生效**——命中已有条目
+   * （key 覆盖 / 标题合并）时保留原生效时间。理由：合并进来的那段是「同一件事的新说法」，
+   * 它并没有改变「这件事从何开始为真」；静默覆盖会把原有时间线改掉。
+   * 显式纠正走 `update({ validAfter })`。
+   *
+   * ⚠ 无默认值：不给 = **不知道**（不是「等于 createdAt」——理由见 `types.ts::Entry.validAfter`）。
+   */
+  validAfter?: string
+  /**
    * 来源类型（v0.21.0）：这条记忆的**信息从哪来**（`master` / `web` / `self` / `measured`）。
    *
    * 与 `subject` / `grounding` 同形：**只在新建时生效**——命中已有条目（key 覆盖 / 标题
@@ -175,6 +186,26 @@ export interface EntryPatch {
   reviewAfter?: string | null
   /** 时效维（v0.15.0）——观察条件整体替换，三态同 `reviewAfter`（`null` = 清空）。 */
   watchFor?: string[] | null
+  /**
+   * 生效时间（v0.24.0）——显式纠正 / 清除路径，三态同 `reviewAfter`：
+   * `undefined` = 不动 / `null` = 清除（回到「不知道」）/ 值 = 设置（`YYYY-MM-DD`）。
+   *
+   * 为什么必须允许转移：存量条目写入时还没有这个字段，而「这件事从何时开始为真」
+   * 是我**事后仍能判断**的事实（无需当时在场）——禁止转移等于让几百条存量永远补不上。
+   */
+  validAfter?: string | null
+  /**
+   * 替代关系（v0.24.0）——**唯一写入口是 `memory_supersede`**，`update` 工具不暴露。
+   *
+   * 三态同 subject：`undefined` = 不动 / `null` = 清除 / 值 = 设置。
+   * ⚠ 刻意**不在工具面开**：这两个字段是**成对**的（`A.supersededBy=B` ⇔ `B.supersedes∋A`），
+   * 只有同时写两侧才可信。开成单侧可写 ⇒ 库里迟早出现「只标了一侧」的边，
+   * 而单向边在审计时读作「这条已被替代」（真）却查不到「被谁替代」（丢了）。
+   * 存储层保留三态，是为了让 `memory_supersede` 与将来的迁移脚本共用一条写路径。
+   */
+  supersededBy?: string | null
+  /** 替代关系（v0.24.0）——整体替换，三态同 `supersededBy`（`null` 或空数组 = 清空）。 */
+  supersedes?: string[] | null
   /**
    * 来源类型（v0.21.0）——显式纠正 / 回填路径，三态同 `subject`：
    * `undefined` = 不动 / `null` = 清除回**未标注** / 值 = 设置。
@@ -334,6 +365,9 @@ export class MemoryStore {
       // 其实把别人的死线抹了」）。两个字段都只在**有值**时出现（无损 JSON 纪律）。
       ...(draft.reviewAfter !== undefined ? { reviewAfter: draft.reviewAfter } : {}),
       ...(draft.watchFor !== undefined && draft.watchFor.length > 0 ? { watchFor: draft.watchFor } : {}),
+      // 生效时间（v0.24.0）：只在新建时盖章（与 reviewAfter 同形——命中已有条目时保留原值，
+      // 理由见 EntryDraft.validAfter 注释）。只有**有值**时才出现（无损 JSON 纪律）。
+      ...(draft.validAfter !== undefined ? { validAfter: draft.validAfter } : {}),
       // 来源类型（v0.21.0）：只在新建时盖章（与 subject/grounding 同形——合并路径保留原标注，
       // 理由见 EntryDraft.provenance 注释）。
       ...(draft.provenance !== undefined ? { provenance: draft.provenance } : {}),
@@ -402,6 +436,24 @@ export class MemoryStore {
     if (patch.provenance !== undefined) {
       if (patch.provenance === null) delete updated.provenance
       else updated.provenance = patch.provenance
+    }
+    // 生效时间显式纠正 / 清除（v0.24.0）：三态同 reviewAfter。
+    // 存量回填（写的时候还没有这个字段）走的就是这条路径。
+    if (patch.validAfter !== undefined) {
+      if (patch.validAfter === null) delete updated.validAfter
+      else updated.validAfter = patch.validAfter
+    }
+    // 替代关系（v0.24.0）：三态同 subject。**唯一写入口是 memory_supersede**——
+    // 存储层保留三态是为了让那条成对写路径与将来的迁移脚本共用一条路（见 EntryPatch 注释）。
+    // ⚠ 用 delete 而非置 undefined：条目是 JSON 落盘，留 `supersededBy: undefined`
+    // 会让「未被替代」在存储里出现第二种表示（字段存在但值为 undefined）⇒ 两个真源。
+    if (patch.supersededBy !== undefined) {
+      if (patch.supersededBy === null) delete updated.supersededBy
+      else updated.supersededBy = patch.supersededBy
+    }
+    if (patch.supersedes !== undefined) {
+      if (patch.supersedes === null || patch.supersedes.length === 0) delete updated.supersedes
+      else updated.supersedes = patch.supersedes
     }
     await this.kv.put(memoryKey(scope, existing.kind, id), updated)
     return { ...updated }

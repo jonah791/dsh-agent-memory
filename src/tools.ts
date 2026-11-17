@@ -36,6 +36,7 @@ import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, 
 import { countByStaleness, cueTag, filterByStaleness, parseReviewAfterArg, parseStalenessFilterArg, parseWatchForArg, stalenessTag, stalenessVerdict, watchForTag } from './temporal.ts'
 import { transcriptiveTag } from './origin.ts'
 import { archivalOf, archiveReasonTag, countByArchiveReason, countByProvenance, filterByProvenance, parseArchiveReasonTypeArg, parseProvenanceArg, provenanceTag } from './archive.ts'
+import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, parseValidAfterArg, shortId, supersededByTag, supersedesTag, validAfterTag } from './succession.ts'
 import { auditMemory } from './audit.ts'
 
 /** 概要重压的外部结果（工具层回报用；与 timeline.RecompressResult 解耦，界面只认这几个读数） */
@@ -182,7 +183,7 @@ function roleStampOf(
 function recordAction(
   deps: MemoryToolDeps,
   config: MemoryConfig,
-  record: { action: 'forget' | 'update'; id: string; reason?: string; mode?: string },
+  record: { action: 'forget' | 'update' | 'supersede'; id: string; reason?: string; mode?: string },
 ): void {
   if (config.audit?.proposalLog?.enabled !== true || deps.recordProposal === undefined) return
   void deps.recordProposal({ atMs: Date.now(), kind: 'action', ...record })
@@ -258,6 +259,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       watchFor: { type: 'array', items: { type: 'string' }, description: '观察条件（v0.15.0）：**什么样的新信息会让这条失效**（1–8 条短句，每条 ≤200 字）。**为什么值得填**（论文实测）：决策时写下的观察条件能达 92.2% 的关键新信息、只带 20 条无关噪音；而「把全部背景事实都索引上」虽达 100%，却带 89 条噪音——**少而准**才划算。**怎么填**：写「什么事件会让它不成立」，点名具体实体（含它的**别名**与**上游依赖**），**略去用不到的**。例：`["DuckDuckGo 通道可用率重测低于 80%", "busDir 或 web 端口改变", "该插件被卸载或改名"]`。**写入时机只有一次——就是现在**（我记得为什么这样判断）；事后再补，我想不起当时在等什么。它会被印在 recall 结果里，命中的那一刻我就看见「它在等什么」。' },
       provenance: { type: 'string', description: '来源类型（v0.21.0）：这条记忆的信息**从哪来**——`master`（主人说的：原话 / 指令 / 定调 / 纠正）/ `web`（外部：网页 / 论文 / 他人代码 / 第三方工具输出）/ `self`（**我自己推出或提议的**）/ `measured`（我实测 / 运行 / 读数得到的）。**为什么填**：`grounding` 只覆盖「需要授权判断」的条目（约 7%），技术结论、论文笔记、实测读数全落在它之外——于是「这条是我实测的还是我从网上读来的」在库里无法区分，而两者该怎么用完全不同（读数要问样本多大，网上读来的要回原文核对）。**什么时候不填**：真的想不起来源时留空（省略 = 不知道，不是某个默认值）。⚠ 与 `grounding` 不冲突、可同时填：一条「主人否决了 RAG」既是 `master` 又可以是 `established`。' },
       cue: { type: 'array', items: { type: 'string' }, description: '情境形状（v0.16.0）：这条经验**在什么形状的情境下该被取出使用**（1–8 条短句）。与另两维**不可互相替代**：`aliases` 管**入口词**（可能被怎么问）、`watchFor` 管**时效**（什么新信息会让它失效）、`cue` 管**应用场景**（什么处境该用它）。**怎么填**：写情境的**形状**而不是本次任务的事实，才能在**另一件事**上触发。论文给的判据线（Harness² 的 experience cue）：太泛无用（`be thorough`）；太具体永不触发（`某日某费用涨到 250`）；正好是「当仪器执行若干顺序动作、且其中一个会终止行动者自身的权限时，把终止性动作排在最后」。它会被印在 recall 里——命中的那一刻我就看见「什么处境该用它」。' },
+      validAfter: { type: 'string', description: '生效时间（v0.24.0）：这条结论**从何时开始成立**——`YYYY-MM-DD`（如 2026-11-01）或 ISO 时刻（如 2026-11-01T09:00:00Z，取 UTC 日）。**与 createdAt 不是一回事**：createdAt 答「我什么时候记下」，本字段答「这件事什么时候开始为真」——主人的定调可能今天记下、针对的是上周的决定。**什么时候填**：这条结论所描述的事**早于/晚于**我记下它的时刻时（追记历史决定、追认已生效的规则、登记从某日起适用的约定）。**什么时候不填**：写入时刻就是事实起点时（大多数情况）——⚠ **空是常态，填是例外**；省略 = 不知道，**不是**「等于 createdAt」（别拿它凑时间线）。⚠ **不接受相对写法**（`+7d`）——它答既成事实，不是死线（要死线请用 reviewAfter）。' },
       dryRun: { type: 'boolean', description: '预检（v0.19.1 · lh-0f54524a）：**只跑近重复检测、返回候选与强度，不落库**。⚠ 2026-11-12 起这是这条检测器**唯一**的入口（写入路径不再自动跑它，见 `src/dedupe.ts` 顶部证据）。它**宁滥勿缺**：会列出一批字面相关的条目供你自己筛，`强度` 是绝对计数、**不代表语义相似**。仍值得走它而不是先 `recall`，因为两者候选集**不同源**（实测：先 recall 搜「测试期望写错」返回 96 条却不含真正的母条目，而这条检测器报出了它）。' },
     },
     output: {
@@ -329,6 +331,10 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       // 来源类型（v0.21.0）：同纪律——**显式给值才盖章**，非法值 fail-loud
       // （静默当「未标注」正是本维度要防的失败：我以为标了、其实没标）。
       const provenance = parseProvenanceArg(args.provenance, 'remember.provenance')
+      // 生效时间（v0.24.0）：同纪律——**显式给值才设**，非法值 fail-loud
+      // （静默当「不知道」正是本维度要防的失败：我以为记下了生效时间、其实没记，
+      // 未来的我照旧把「写作时刻」当「事实起点」）。⚠ 不收相对写法（理由见 succession.ts）。
+      const validAfter = parseValidAfterArg(args.validAfter, 'remember.validAfter')
       // 执行位置（v0.23.0）：与 `dsh-project-state` 联动的**那一跳**。
       //   - `project` 缺省**自动判定**：cwd 属于哪个已注册项目是**查表**（事实），不是判断；
       //   - `taskId` **不自动**：「这条记忆是否来自这个任务」是判断，不由机制替我断言
@@ -391,6 +397,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         ...(reviewAfter !== undefined ? { reviewAfter } : {}),
         ...(watchFor !== undefined ? { watchFor } : {}),
         ...(provenance !== undefined ? { provenance } : {}),
+        // 生效时间（v0.24.0）：只在新建时盖章（store 层同形处理——命中已有条目时保留原值）。
+        ...(validAfter !== undefined ? { validAfter } : {}),
         // 执行位置（v0.23.0）：两级不可拆——taskId 没有 project 时不落盘（见 execution.ts）。
         ...(project !== undefined ? { project } : {}),
         ...(project !== undefined && taskId !== undefined ? { taskId } : {}),
@@ -441,6 +449,9 @@ export const DIMENSION_ITEM_FIELDS = {
   provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源类型（v0.21.0）：这条的信息**从哪来**——`master`（主人说的）/ `web`（外部：网页·论文·他人代码）/ `self`（我自己推出或提议的）/ `measured`（我实测·运行·读数得到的）。未标注的条目省略该键（⚠ 省略 = 不知道，**不是**某个默认来源）。与 grounding 正交：grounding 答「是否已被共同建立」，本字段答「信息从哪来」。' },
   archivedReasonType: { type: 'string', enum: ['refuted', 'merged', 'superseded', 'stale', 'capacity', 'unspecified'], description: '归档原因类型（v0.21.0）：这条**怎么没了**——仅已归档条目出现。它决定引用它的活跃条目该怎么处置：`refuted`/`superseded`/`stale` ⇒ 结论不能再当依据（引用方必须撤或降置信）；`merged`/`capacity` ⇒ 内容仍在（换了位置 / 只是清位）。`unspecified` = 未判断（v0.20 及以前的存量归档）。' },
   archivedReason: { type: 'string', description: '归档原因详情（v0.21.0）：类型之外的人类可读补充；仅已归档且给了原因时出现。' },
+  validAfter: { type: 'string', description: '生效时间（v0.24.0）：这条结论**从何时开始成立**（`YYYY-MM-DD`）。与 `createdAt`（我何时记下）不同——主人的定调可能今天记下、针对的是上周的决定。未设的条目省略该键（⚠ 省略 = **不知道**，**不是**「等于 createdAt」）。' },
+  supersededBy: { type: 'string', description: '被替代（v0.24.0）：替代这条的记忆 id（**字段存在即已过时**；只记一格，不递归成链）。⚠ 旧条目**不会被删除**，仍会返回——保留原值正是为了对照（「以前是 X，因为…」）。' },
+  supersedes: { type: 'array', items: { type: 'string' }, description: '替代了谁（v0.24.0）：被这条顶掉的记忆 id 列表（只记**直接**替代对象，不递归展开祖先）。' },
 } as const
 
 /** 构建 recall 工具 */
@@ -464,6 +475,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` = **只看我自己提的、主人未回应的事**——自查「我有没有把提议当成定论」时用它；`rejected` = 只看主人否决过的（防我旧事重提）；`established` = 只看主人明确说过的。缺省 = 不过滤。⚠ 同为**可选筛子**，不是可见性边界。' },
       provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源过滤（v0.21.0）：只看某类来源的条目——`master`（主人说的）/ `web`（外部：网页·论文）/ `self`（我推的·我提议的）/ `measured`（我实测的）。缺省 = 不过滤。**典型用法**：`self` = 自查「哪些结论的权威只在我这边」；`web` = 找出「该回原文核对」的条目；`master` = 「主人到底说过哪些」。⚠ 与 grounding 不同：那个筛「主人回应了没有」，这个筛「信息从哪来」。' },
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看**该重看**的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`（还早）。典型用法：`["expired","due-soon"]` = 「**我的哪些结论该重看了**」。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目在任何取值下都不返回（它们的时效状态是「**不知道**」，不是「有效」）。' },
+      superseded: { type: 'string', description: '替代状态筛（v0.24.0）：`current` = 只看**还没被替代**的条目 / `superseded` = 只看**已被替代**的条目。缺省 = 不过滤。⚠ **缺省不隐藏已过时条目是刻意的**——对照是它的全部价值（旧值里往往写着「以前为什么这么定」）。本筛子是**审查入口**：「我有哪些结论已经被顶掉了」。' },
       collapseFamily: { type: 'boolean', description: '家族折叠（v0.16.0 · 论文 Memory Echo 的 Family 组件）：把**候选池内**的「时间桶概要 + 它 archiveRef 的原料」压成**每族一位**（族内得分最高者为代表），其余不占本次服务位。论文依据：「Repeated writes therefore add records, not independent votes」（arXiv 2610.17763v1 §5.1）——同一来源的派生不该当多个独立证据占位。**缺省 false**：论文消融显示 Family 单独上线会把准确率从 0.825 打到 0.651（≈ −33 题），须与「当前事实优先」配对才安全，故先做成可选。⚠ 只在 `includeArchive: true` 时有实际效果（默认视图下原料已冷归档，不会与概要同时命中）；折叠不删数据，只是本次不占位。' },
     },
     output: {
@@ -582,7 +594,13 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // 库里绝大多数条目不属于任何项目）。放在前缀**末尾**而不是最前：它是**定位信息**
           // （这条属于哪），不是警示（那几位留给「可能已不成立 / 权威不在我这边」）。
           const projectNote = executionTag(item.project, item.taskId)
-          return `- ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${relatedNote}`
+          // 事实生命周期标记（v0.24.0）：**已过时放在最前**——它比「已过期」更硬：
+          // 过期只表示该核实，**替代表示已有更新版本顶掉它**，照它做就是用旧值。
+          // validAfter（自何时成立）与 supersedes（替代了谁）都是元数据，放句尾。
+          const supersededNote = supersededByTag(item.supersededBy)
+          const validAfterNote = validAfterTag(item.validAfter)
+          const supersedesNote = supersedesTag(item.supersedes)
+          return `- ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${relatedNote}`
         })
         return [{
           type: 'text',
@@ -618,10 +636,13 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       // 用途与 provenance 不同：那是**审查入口**（权威在哪），这是**执行路径入口**
       // ——「这个项目/这个任务一路留下了什么」。给 taskId 必须配 project（parseExecutionArgs 会报错）。
       const execPos = parseExecutionArgs({ project: args.project, taskId: args.taskId }, 'recall')
+      // 替代状态筛（v0.24.0）：同为可选筛子。**未给参数时零拷贝原样透传**
+      // （`filterBySuccession(entries, undefined) === entries`，判据 A1）⇒ 存量行为逐字节不变。
+      const superseded = parseSupersessionFilterArg(args.superseded, 'recall.superseded')
       const now = new Date()
       const entries = filterByStaleness(
         filterByProvenance(
-          filterByGrounding(filterByExecution(filterBySubject(gathered.entries, subject), execPos), grounding),
+          filterByGrounding(filterByExecution(filterBySubject(filterBySuccession(gathered.entries, superseded), subject), execPos), grounding),
           provenance,
         ),
         staleness,
@@ -801,6 +822,7 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       reviewAfter: { type: 'string', description: '时效维（v0.15.0）——**显式续期 / 清除**复查死线：给 `YYYY-MM-DD`（或相对写法 `+7d` / `+2w`，按**此刻**折算成绝对日期）= 设置；给**空字符串** = 清除（不再跟踪）；缺省 = 不动。**主要用途是「到期后的动作链」**：核实完 → 改内容 + 续新死线（或清除）。必须允许转移——死线一旦过期就永远卡在过期态，标记天天亮而消不掉。' },
       watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）——**整体替换**观察条件：给 1–8 条（每条 ≤200 字）= 设置；给**空数组** = 清空；缺省 = 不动。' },
       provenance: { type: 'string', description: '来源类型（v0.21.0）——**显式纠正 / 回填**已存在条目的「信息从哪来」：给 `master`/`web`/`self`/`measured` = 设置，给空字符串 = 清除回未标注，缺省 = 不动。**主要用途是回填**：存量条目写入时还没有这个字段，而「这条是主人说的还是我从网页读来的」决定它该怎么被用；批量回填请先用 recall 定位 id。' },
+      validAfter: { type: 'string', description: '生效时间（v0.24.0）——**显式纠正 / 回填**「这条结论从何时开始成立」：给 `YYYY-MM-DD`（或 ISO 时刻，取 UTC 日）= 设置；给**空字符串** = 清除（回到「不知道」）；缺省 = 不动。**主要用途是回填**：存量条目写入时还没有这个字段，而「这件事从何时为真」是我事后仍能判断的事实（无需当时在场）。⚠ 不接受相对写法（`+7d`）；要设死线请用 `reviewAfter`。' },
     },
     output: {
       schema: {
@@ -876,6 +898,14 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       if (args.provenance !== undefined) {
         patch.provenance = parseProvenanceArg(args.provenance, 'update.provenance') ?? null
       }
+      // 生效时间显式纠正 / 清除（v0.24.0）：三态同 reviewAfter（给值 = 设置 / 空串 = 清除回
+      // 「不知道」/ 缺省 = 不动）。空值折成 `null` 交给 store 层 `delete`——**不留
+      // `validAfter: ''` 这种「第二表示」**。
+      // ⚠ 替代关系（supersededBy / supersedes）**刻意不在这里开**：它们是成对的边，
+      // 单侧可写会让库里出现只标了一侧的关系 ⇒ 唯一入口是 memory_supersede。
+      if (args.validAfter !== undefined) {
+        patch.validAfter = parseValidAfterArg(args.validAfter, 'update.validAfter') ?? null
+      }
       // 执行位置显式纠正 / 清除（v0.23.0）：三态同 subject（给值 = 设置 / 空串 = 清除 / 缺省 = 不动）。
       // ⚠ 两条与**新建**路径刻意不同的判断（理由见 `execution.ts::parseExecutionId` 注释）：
       //   ① 单给 taskId 在这里**可能合法**——条目若已有 project，就地补任务 id 是正当操作
@@ -900,6 +930,173 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       await deps.store.update(entry.scope, args.id, patch)
       recordAction(deps, config, { action: 'update', id: args.id, mode })
       return { id: args.id }
+    },
+  })
+}
+
+/**
+ * 构建 `memory_supersede` 工具（v0.24.0）——**替代关系的唯一写入口**。
+ *
+ * ## 为什么必须是一个独立工具，而不是 `update` 的两个参数
+ *
+ * 替代关系是**成对**的边：`新.supersedes ∋ 旧` ⇔ `旧.supersededBy = 新`。把它开成
+ * `update({ supersededBy })` 那样的单侧可写参数，库里迟早出现「只标了一侧」的边——
+ * 而单向边在审计时读作「这条已被替代」（真）却**查不到被谁替代**（丢了），
+ * 正是本维度要修的那种「更新关系被抹平」。⇒ **一工具一意图**：一次调用建立一整条边。
+ *
+ * ## 为什么只保留一层（不做版本树）
+ *
+ * A→B→C 时三条各记一格，**不**把 C 递归填成 `[A, B]`。记忆库不是事件溯源库：完整链会让
+ * recall 越跑越慢、命中越排越散、旧值持续挤占注意力。一层足够回答「我手上这条是不是最新的」。
+ *
+ * ## fail-loud 三处（都不许静默降级）
+ *
+ * 1. **id 不存在** —— 保留「静默跳过不存在的 id」就等于给了一个假的成功回执
+ *    （我以为建立了替代关系，其实那条边指向空气）。
+ * 2. **自引用** —— `A.supersededBy = A` 是自环，会让「这条过时了吗」永远答 yes。
+ * 3. **已被别的条目替代过** —— 说明这条已有一条入边；二次替代是**覆盖历史**，
+ *    必须显式 `overwrite: true`（判断归调用方，机制不替他决定，也不许悄悄做）。
+ *    已在本次目标上的（幂等重调）不算冲突，跳过不写。
+ */
+function buildSupersede(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_supersede',
+    deferLoading: true,
+    description: '建立「替代关系」（记忆的事实生命周期维，v0.24.0）：新条目**替代**旧条目。一次调用写**两侧**——新条目记 `supersedes=[旧id…]`，每个旧条目记 `supersededBy=新id`（只写一侧会让审计查不到反向关系，故本工具是唯一写入口，`update` 刻意不暴露这两个字段）。**旧条目不会被删除、不会归档、不会隐藏**：保留原值作对照（「以前用 diff，因为…」那半句的价值就在旧值里），recall 里只打「⚠ 已过时 → 被 xxx 替代」。**只保留一层**：A→B→C 各记一格，不递归成链（记忆库不是版本树）。三处 fail-loud：id 不存在 / 自引用 / 该旧条目已被别的条目替代过（二次替代需显式 `overwrite: true`）。用途：① 结论被推翻并重写（旧的错值仍需可查）② 定调升级（T1→T2）③ 回填历史演替。',
+    parameters: {
+      id: { type: 'string', required: true, description: '**新**条目 id（替代者）。先用 remember / update 写好新结论，再调本工具建立边。' },
+      supersedes: { type: 'array', required: true, items: { type: 'string' }, description: '被替代的**旧**条目 id 列表（至少 1 个；不能含 id 自己）。这些条目会保留原值，只被标上「已过时 → 被 <新id前8位> 替代」。' },
+      validAfter: { type: 'string', description: '（可选）同时设**新条目**的生效时间——这条新结论从何时开始成立（`YYYY-MM-DD` 或 ISO 时刻）。缺省 = 不动（⚠ 不会替你填 createdAt）。典型用法：追认「上周三起就该按这个做了」。' },
+      overwrite: { type: 'boolean', description: '（可选）显式允许**二次替代**：某条旧条目已被别的条目标过 `supersededBy` 时，默认报错（它已有一条入边，覆盖等于改写历史）。确需覆盖才传 `true`。已在本次目标上的幂等重调不需要它。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          id: { type: 'string', required: true, description: '新条目 id' },
+          supersedes: { type: 'array', required: true, items: { type: 'string' }, description: '新条目**当前**的替代列表（全量，不只本次新增——多次建立时只留一层、平铺不递归）' },
+          validAfter: { type: 'string', description: '新条目**当前**的生效时间；未设则省略该键' },
+          superseded: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                title: { type: 'string', required: true },
+                supersededBy: { type: 'string', required: true },
+                changed: { type: 'boolean', required: true, description: 'true = 本次写了这一侧；false = 本来就是该状态（幂等重调），未改写' },
+              },
+            },
+            description: '每个被替代条目**写后的状态**（受影响的条目全列出来，便于立刻核对）',
+          },
+          skipped: { type: 'integer', required: true, description: '其中「本来已是该状态、未改写」的条数' },
+        },
+      },
+      render: (_args, value) => {
+        const lines = [`已建立替代关系：${shortId(value.id)} 替代 ${value.superseded.length} 条`
+          + (value.skipped > 0 ? `（其中 ${value.skipped} 条本已是该状态，未改写）` : '') + '。']
+        for (const item of value.superseded) {
+          lines.push(`  - [旧] ${item.title}(id=${item.id}) → 已过时，被 ${shortId(item.supersededBy)} 替代`)
+        }
+        if (value.validAfter !== undefined) lines.push(`新条目生效时间：自 ${value.validAfter} 起成立。`)
+        lines.push('⚠ 旧条目**未删除、未归档**（保留原值作对照）：recall 仍会返回它们，只是带「⚠ 已过时」标记；'
+          + '想只看当前结论用 `recall({ superseded: "current" })`。')
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const { config, cwd, view } = await resolveRuntime(exec, deps)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
+      // 视野内定位（同 update / forget）：视野外的条目不可建立替代关系（不留越视野后门）。
+      // includeArchive: **含归档**——替代一条已归档的旧条目是正当操作（它的结论被新条目接棒）。
+      const { entries } = gatherReadable(deps, { readScopes, includeArchive: true, view })
+
+      const newId = typeof args.id === 'string' ? args.id.trim() : ''
+      if (newId.length === 0) throw new Error('memory_supersede: id（新条目）不能为空')
+      const oldIds = parseSupersedesArg(args.supersedes, 'memory_supersede.supersedes')
+      if (oldIds.includes(newId)) {
+        throw new Error(
+          `memory_supersede: supersedes 里不能包含 id 自己（自引用 ${newId}）——自环会让「这条过时了吗」永远答 yes。`
+          + '⚠ **常见原因不是笔误**：新条目与旧条目**同标题**时，`remember` 的 L2/L3 同标题合并会把它写进旧条目'
+          + '（回执里 `action` 是 `merged`）⇒ 于是库里只有一条，没有「两条」可建立替代关系。'
+          + '替代场景请让新结论用**不同的标题**（或先 `update` 改旧标题），再调本工具。',
+        )
+      }
+      // 生效时间（可选）：同 remember 的 fail-loud 纪律
+      const validAfter = parseValidAfterArg(args.validAfter, 'memory_supersede.validAfter')
+
+      const target = entries.find((candidate) => candidate.id === newId)
+      if (target === undefined) throw new Error(`memory_supersede: 未找到新条目 id="${newId}"（当前视野内）`)
+
+      const missing: string[] = []
+      const olds: Entry[] = []
+      for (const oldId of oldIds) {
+        const found = entries.find((candidate) => candidate.id === oldId)
+        if (found === undefined) missing.push(oldId)
+        else olds.push(found)
+      }
+      if (missing.length > 0) {
+        // ⚠ 整笔拒绝：先全查再全写。否则「写了一部分、报错停在中途」的半成品边，
+        // 比「一条都没写」难查得多（而半成品同样会让审计读到不一致的关系）。
+        throw new Error(`memory_supersede: 未找到被替代条目 ${missing.map((id) => `"${id}"`).join(', ')}（当前视野内）——**本次未写入任何一侧**`)
+      }
+
+      const overwrite = args.overwrite === true
+      const conflicts = olds.filter((old) => old.supersededBy !== undefined && old.supersededBy !== newId)
+      if (conflicts.length > 0 && !overwrite) {
+        throw new Error(
+          'memory_supersede: 下列条目已被**别的**条目替代过，二次替代会改写历史 ⇒ 默认拒绝：'
+          + conflicts.map((old) => `"${old.id}"（已被 ${old.supersededBy} 替代）`).join(', ')
+          + '。确需覆盖请显式传 overwrite: true。',
+        )
+      }
+
+      // ① 新条目：supersedes 只留一层（平铺 union，不递归展开祖先）+ 可选 validAfter
+      const current = target.supersedes ?? []
+      const nextSupersedes = [...current]
+      for (const oldId of oldIds) if (!nextSupersedes.includes(oldId)) nextSupersedes.push(oldId)
+      const newPatch: EntryPatch = {}
+      if (nextSupersedes.length !== current.length) newPatch.supersedes = nextSupersedes
+      if (validAfter !== undefined) newPatch.validAfter = validAfter
+      const updatedNew = Object.keys(newPatch).length > 0
+        ? await deps.store.update(target.scope, newId, newPatch)
+        : target
+      if (updatedNew === undefined) throw new Error(`memory_supersede: 新条目 "${newId}" 在写入时消失（并发删除？）——本次未建立任何边`)
+
+      // ② 每个旧条目：supersededBy = 新 id（幂等：已是该状态就不写）
+      const superseded: { id: string; title: string; supersededBy: string; changed: boolean }[] = []
+      for (const old of olds) {
+        if (old.supersededBy === newId) {
+          superseded.push({ id: old.id, title: old.title, supersededBy: newId, changed: false })
+          continue
+        }
+        const written = await deps.store.update(old.scope, old.id, { supersededBy: newId })
+        if (written === undefined || written.supersededBy !== newId) {
+          // 半成品边必须响亮报出：此时新条目已经写好了 supersedes 一侧。
+          throw new Error(
+            `memory_supersede: 旧条目 "${old.id}" 写入失败——已写入：新条目 ${newId}.supersedes；`
+            + `未写入：${oldIds.filter((id) => !superseded.some((done) => done.id === id)).join(', ')}。`
+            + '这是**半成品关系**，请先核对再用 overwrite: true 补齐。',
+          )
+        }
+        superseded.push({ id: old.id, title: old.title, supersededBy: newId, changed: true })
+      }
+
+      recordAction(deps, config, {
+        action: 'supersede',
+        id: newId,
+        reason: `supersedes: ${oldIds.join(', ')}`,
+      })
+      return {
+        id: newId,
+        supersedes: updatedNew.supersedes ?? [],
+        ...(updatedNew.validAfter !== undefined ? { validAfter: updatedNew.validAfter } : {}),
+        superseded,
+        skipped: superseded.filter((item) => !item.changed).length,
+      }
     },
   })
 }
@@ -1213,6 +1410,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` / `rejected` / `scoped` / `established`。缺省 = 不过滤。用于翻档案自查（如「我提过哪些主人没回应的方案」）。' },
       provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源过滤（v0.21.0）：`master` / `web` / `self` / `measured`。缺省 = 不过滤。用于翻档案自查（如「我读过的东西都记了些什么」「哪些结论是我自己推的」）。' },
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看某档时效状态的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`。用于**按时间线**翻「哪些结论该重看了」（recall 要查询词，这里不要）。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目时效状态是「不知道」，不是「有效」。' },
+      superseded: { type: 'string', description: '替代状态筛（v0.24.0）：`current`（还没被替代）/ `superseded`（已被替代）。缺省 = 不过滤，**已过时条目默认仍会出现**（对照是它的全部价值）。用途：翻档案时只挑「已经作废的那批」看演替史。' },
     },
     output: {
       schema: {
@@ -1285,7 +1483,12 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               const projectNote = executionTag(item.project, item.taskId)
               const watchNote = watchForTag(item.watchFor)
               const cueNote = cueTag(item.cue)
-              return `  - ${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}${projectNote}[${item.kind}] ${item.title}(id=${item.id})${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}`
+              // 事实生命周期标记（v0.24.0）：与 recall 同一位置、同一纪律
+              // （同一事实两个界面不能长得不一样）。已过时放最前，理由同 recall。
+              const supersededNote = supersededByTag(item.supersededBy)
+              const validAfterNote = validAfterTag(item.validAfter)
+              const supersedesNote = supersedesTag(item.supersedes)
+              return `  - ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}${projectNote}[${item.kind}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}`
             })
             .join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
@@ -1309,7 +1512,11 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
         filterByProvenance(
           filterByGrounding(
             filterByExecution(
-              filterBySubject(gathered.entries, parseSubjectArg(args.subject, 'memory_browse.subject')),
+              filterBySubject(
+                // 替代状态筛（v0.24.0）：可选筛子（未给 = 零拷贝透传），审查入口与 recall 同源
+                filterBySuccession(gathered.entries, parseSupersessionFilterArg(args.superseded, 'memory_browse.superseded')),
+                parseSubjectArg(args.subject, 'memory_browse.subject'),
+              ),
               parseExecutionArgs({ project: args.project, taskId: args.taskId }, 'memory_browse'),
             ),
             parseGroundingArg(args.grounding, 'memory_browse.grounding'),
@@ -1968,7 +2175,7 @@ function buildRecompress(deps: MemoryToolDeps): ToolDefinition {
 /**
  * 构建记忆工具定义（纯函数，单测可直接取 execute 跑行为）。
  * @param deps - 存储 + 配置加载依赖
- * @returns registry-ready 工具定义（十四件）
+ * @returns registry-ready 工具定义（十五件）
  */
 export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
   return [
@@ -1977,6 +2184,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildBrowse(deps),
     buildRelate(deps),
     buildUpdate(deps),
+    buildSupersede(deps),
     buildForget(deps),
     buildMerge(deps),
     buildStats(deps),

@@ -33,6 +33,7 @@ import type { Entry, Grounding, Subject } from './types.ts'
 import { normalizeSubject } from './subject.ts'
 import { normalizeGrounding } from './grounding.ts'
 import { normalizeReviewAfter, normalizeWatchFor } from './temporal.ts'
+import { normalizeValidAfter } from './succession.ts'
 
 // ---------- 持久化域 ----------
 
@@ -143,6 +144,22 @@ export const entrySchema = zod.object({
    * 校验，**未声明的字段会被静默剥掉**——存了等于没存，而写入**仍返回成功**。
    */
   cue: zod.array(zod.string()).optional(),
+  /**
+   * 事实生命周期（v0.24.0）：`validAfter`（从何时开始为真）+ `supersededBy` / `supersedes`
+   * （谁替代了谁，只留一层）。
+   *
+   * ⚠ **必须在此声明**（同一个坑**第九次**：v0.12 `aliases`、v0.13 `subject`、
+   * v0.14 `grounding`、v0.15 `reviewAfter/watchFor`、v0.16 `cue`、v0.21 `provenance` 与
+   * `archivedReasonType`、v0.23 `project/taskId`）：storage-domain 在写入边界用本 schema
+   * 校验，**未声明的字段会被静默剥掉**——存了等于没存，而写入**仍返回成功**，
+   * 是最难查的一类缺陷。
+   *
+   * ⇒ 判据（第四次重申）：**任何新字段加进 `Entry`，必须同时来这里声明一次**
+   * ——类型层不会报错，运行层不会报错，只有「读数不对」会报错。
+   */
+  validAfter: zod.string().optional(),
+  supersededBy: zod.string().optional(),
+  supersedes: zod.array(zod.string()).optional(),
   author: zod.object({
     sessionId: zod.string().optional(),
     delegationDepth: zod.number().optional(),
@@ -196,6 +213,12 @@ export interface MemoryApiService {
      */
     reviewAfter?: string
     watchFor?: string[]
+    /**
+     * 生效时间（v0.24.0）：这条回流记忆的结论**从何时开始成立**（`YYYY-MM-DD` / ISO 时刻）。
+     * 同走**容错归一**（认不出即不设）——服务通道不为标注字段阻塞调用方。
+     * 用途：回流「追认的历史结论」时（如某个定调其实上周就生效了）。
+     */
+    validAfter?: string
   }): Promise<{ id?: string; action?: string; error?: string }>
 }
 
@@ -292,7 +315,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // 记忆回流服务提供（2026-09-06）：供 emotion/taskboard/evolution-core/skill-forge 注入消费。
   // 复用 store.remember（L1 key 覆盖 / L2/L3 指纹合并），容错返回 error 不抛。
   ctx.provide('memoryApi', {
-    async remember(input: { text: string; kind?: 'fact' | 'knowledge' | 'episodic'; tags?: string[]; key?: string; scope?: string; subject?: Subject; grounding?: Grounding; reviewAfter?: string; watchFor?: string[] }) {
+    async remember(input: { text: string; kind?: 'fact' | 'knowledge' | 'episodic'; tags?: string[]; key?: string; scope?: string; subject?: Subject; grounding?: Grounding; reviewAfter?: string; watchFor?: string[]; validAfter?: string }) {
       try {
         const text = (input.text ?? '').trim()
         if (text.length === 0) return { error: 'text 不能为空' }
@@ -311,7 +334,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         // 时效维（v0.15.0）：同走**容错归一**——相对写法（`+7d`）在这里按**此刻**折算成绝对日期。
         const reviewAfter = normalizeReviewAfter(input.reviewAfter, new Date())
         const watchFor = normalizeWatchFor(input.watchFor)
-        const r = await store.remember({ kind, key: input.key, title, body, tags: input.tags ?? [], scope, level: null, bucket: null, ...(subject !== undefined ? { subject } : {}), ...(grounding !== undefined ? { grounding } : {}), ...(reviewAfter !== undefined ? { reviewAfter } : {}), ...(watchFor !== undefined ? { watchFor } : {}) })
+        // 生效时间（v0.24.0）：同走**容错归一**——服务通道不为标注字段阻塞调用方。
+        const validAfter = normalizeValidAfter(input.validAfter)
+        const r = await store.remember({ kind, key: input.key, title, body, tags: input.tags ?? [], scope, level: null, bucket: null, ...(subject !== undefined ? { subject } : {}), ...(grounding !== undefined ? { grounding } : {}), ...(reviewAfter !== undefined ? { reviewAfter } : {}), ...(watchFor !== undefined ? { watchFor } : {}), ...(validAfter !== undefined ? { validAfter } : {}) })
         return { id: r.id, action: r.action }
       } catch (err) {
         return { error: 'memoryApi.remember 失败: ' + String(err) }

@@ -29,6 +29,7 @@ import { normalizeSubject, subjectTag } from './subject.ts'
 import { executionTag } from './execution.ts'
 import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
+import { supersededByTag } from './succession.ts'
 import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
 import { recallEntries } from './search.ts'
@@ -141,6 +142,11 @@ export function buildAutoRecallDigest(
     // 不改过滤、不改条数。放这里的理由与 stalenessNote 同——这是每条主人消息都跑的
     // 路径，而「这条结论来自别的项目」是**此刻最容易误用**的一条信息。
     const projectNote = executionTag(r.project, r.taskId)
+    // 已过时标记（v0.24.0）：**这是最该看见它的位置**——auto-recall 是「我正打算拿这条记忆
+    // 当前提」的那一刻；若它已被新结论顶掉，照旧值行动就是用错的结论。
+    // **纯附加信息**：不改排序、不改过滤、不改条数（与其余标记同一纪律）。
+    // ⚠ 不注入 validAfter / supersedes：注入有字节预算，它们只在少数情形下改变判断。
+    const supersededNote = supersededByTag(r.supersededBy)
     // v0.19（2026-10-27）：snippet 与标题同源时改注入 cue。
     //
     // 旧行为的失效证据（同族第 2 次，2026-10-26 记过「我不读是取用问题」）：
@@ -162,7 +168,7 @@ export function buildAutoRecallDigest(
     const payload = useCue
       ? `◎${cueFirst.length > SNIPPET_MAX ? cueFirst.slice(0, SNIPPET_MAX).trimEnd() + '…' : cueFirst}`
       : snippet
-    lines.push(`- ${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}] ${r.title}（${date}${score}）：${payload}`)
+    lines.push(`- ${supersededNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}] ${r.title}（${date}${score}）：${payload}`)
   }
   let body = `【相关记忆（auto-recall）】\n${lines.join('\n')}`
   if (body.length > opts.maxBytes) {

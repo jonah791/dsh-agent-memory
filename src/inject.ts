@@ -23,6 +23,7 @@ import { normalizeSubject, subjectTag } from './subject.ts'
 import { executionTag } from './execution.ts'
 import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
+import { supersededByTag } from './succession.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -58,7 +59,13 @@ function lineOf(entry: Entry): string {
   // 「这条结论来自哪个项目」决定它适不适用——在期货工程里读到 alice 项目的结论，
   // 我该先想「这还成立吗」，而不是直接照做。
   const projectNote = executionTag(entry.project, entry.taskId)
-  return `- ${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
+  // 已过时标记（v0.24.0）：**放最前**——它比「已过期」更硬。记忆速览是每个会话最先看到的
+  // 文本，一条已被新结论顶掉的条目若无标记地出现在这里，未来的我会把旧值当现状直接用。
+  // ⚠ 刻意**不注入 validAfter**：速览有字节预算，而它只在「写作时刻 ≠ 生效时刻」时才
+  // 改变我的判断（少数情形）；recall / memory_browse 里都能看到（同 auto-inject 不注入
+  // watchFor 的理由：预算要花在会改变动作的信息上）。
+  const supersededNote = supersededByTag(entry.supersededBy)
+  return `- ${supersededNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
 }
 
 /**

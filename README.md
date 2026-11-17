@@ -2,7 +2,7 @@
   DSH 插件生态公约声明（plugin-ecosystem-convention · 组合优先/声明清晰/兼容优先）
   purpose: Agent 驱动的长期记忆：作用域分区（global + per-workspace）+ 分层条目（fact/knowledge/episodic）+ 时间桶压缩（日→周→月→年）+ 关联检索（related 链 / memory_relate 多跳 BFS）+ 主人消息 auto-recall 注入（CJK 2-gram、尾部追加）；内容决策全归 agent
   inject: 'storageDomain','tools','llm','agents'
-  tools: remember,recall,update,forget,memory_browse,memory_relate,memory_stats,memory_health,memory_version,memory_check,memory_merge,memory_audit,memory_recompress,memory_review_mark
+  tools: remember,recall,update,forget,memory_browse,memory_relate,memory_stats,memory_health,memory_version,memory_check,memory_merge,memory_audit,memory_recompress,memory_review_mark,memory_dispose,memory_supersede
   runtime: host-only（无 client 侧）
   envDeps: 无外部服务/无网络依赖（LLM 总结走 ctx.llm；另用 yaml + zod 两个纯 JS 依赖，node:fs 只读工作区 memory.yml）
   boundary: 读写自身存储域（agent_memory.entries）与 <workspace>/.dsh/memory.yml；不隔离、不鉴权、不加密、不做内容判断；工具描述明确「不用来记凭据（密钥/口令）」；压缩只作用于 L3 episodic，fact/knowledge 永不作为原料
@@ -23,7 +23,9 @@
 
 ## 能力
 
-14 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
+16 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
+
+> ⚠ 2026-11-17：本节曾写「14 个」而实测 15 个（`memory_dispose` 上线时未回填，**文档漂移**）；v0.24.0 加 `memory_supersede` ⇒ **16 个**。工具数由 `tests/audit.test.mjs` A42 硬编码锁定（每变一次必须显式确认）。
 
 | 工具 | 用途 |
 |------|------|
@@ -41,6 +43,7 @@
 | `memory_check` | 「待沉淀建议」——**当前恒返回空数组**（通道 B 未接线，工具描述已如实声明） |
 | `memory_recompress` | **概要重压出口（v0.11）**：正文超预算（`summary_max_chars`）的概要条目，用**它自己的正文**再压一次并**整体替换**（旧版进 `revisions` 可回溯）。只对 `kind=summary` 且 `level`/`bucket` 齐全的条目有效；已在预算内则跳过（不白跑一次 LLM）。**与常规时间压缩的分工**：常规压缩「已存在即跳过」，本工具正是那个幂等结果的**显式出口** |
 | `memory_review_mark` | **体检裁决留痕（v0.11）**：给一条体检候选打「已裁决」标记 ⇒ `memory_audit` 不再把它当待办反复报（归 `KEEP`）。**只写侧车、绝不改条目**（不刷新 `accessedAt`/`updatedAt`）；标记只对打标那一刻的版本有效——条目再变动即自动回到常规分档 |
+| `memory_supersede` | **v0.24 替代关系的唯一写入口**：`id`（新）+ `supersedes[]`（旧，必填非空）+ 可选 `validAfter` / `overwrite`。一次调用写**两侧**（新条目 `.supersedes` ⊇ 旧 id；每个旧条目 `.supersededBy = 新 id`）——只写一侧会让审计查不到反向关系，故 `update` 刻意不暴露这两个字段。**旧条目不删不归档**（保留原值作对照），recall 里只打「⚠ 已过时 → 被 `<id前8位>` 替代」；**只留一层**（A→B→C 各记一格，不递归展开祖先）。fail-loud：id 不存在 / 自引用（**常见成因是新旧同标题 ⇒ `remember` 已把它们合并成一条**）/ 旧条目已被别的条目替代过（二次替代需显式 `overwrite: true`；已是本次目标则幂等跳过） |
 
 行为侧（无工具面，自动发生）：
 

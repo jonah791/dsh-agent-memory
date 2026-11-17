@@ -15,7 +15,7 @@
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
 | 状态 | **implemented**（验收 **117 行**；解析器现算 `total=117 / proven=115 / pending=2`——2026-10-14 由 `semantic_get` 现读。⚠ **判据以解析器的实际行数为准，不以本节文字为准**：编号若有重复或不连续，解析器仍按**行数**计数 ⇒ 本行只复述读数，不自算。历史：2026-10-14 早些时候该行停留在「A1–A78 / total=78」，属**文档漂移**（DREAM 那批加了 A79–A84 未回填），本次一并修正；2026-09-22 曾报 77，真因是解析器吞掉续块首行，已修 `dsh-semantic-docs` `7f9def6`，详见 §7 汇总行；`pending=2 > 0` 故**不得**标 verified） |
-| 版本 | v0.7（文档）· **对应插件 v0.15.0**（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；v0.8 压缩流水线证据层；**v0.8.1/v0.8.2 修 U10 真因**（总结调用补会话 id；输出预算与可归因证据）<br>**v0.12 检索别名**（2026-10-13 重做第一步；⚠ **契约节缺**——原引用的「§5.14」编号已被 v0.15 占用，正本暂在 `src/types.ts` 的 `Entry.aliases` 与 `tests/aliases.test.mjs`，已记入 §10）<br>**v0.13 主体层**（2026-10-14：`subject` = 条目「**关于谁**」——`self` / `master` / 缺省通用；与 `role` 正交；语义见 §9 第 19 条、判据见 §7 A85–A94）<br>**v0.14 约定状态**（2026-10-14：`grounding` = 「**是否已被共同建立**」——`established` / `proposed`（我提的、主人未回应）/ `scoped` / `rejected` / 缺省未标注；与 `subject` 正交；语义见 §9 第 20 条、判据见 §7 A95–A104）<br>**v0.15 时效维**（2026-10-14：`reviewAfter` = **复查死线** + `watchFor` = **观察条件**；论文 *Fresh at Decision, Stale at Action* 移植；契约见 **§5.14**、语义见 §9 第 21 条、判据见 §7 A105–A116）<br>**v0.23 执行位置**（2026-11-15：`project` = 哪个项目 + `taskId` = 哪个任务；**两级不可拆**；与 `scope` 正交（后者是准入且值是路径）；`project` 写入时按会话 cwd **自动盖章**（经 `dsh-project-state` **软依赖**，缺该插件则不盖）；依据 = 主人 2026-11-15 架构定调「Project 不属于 Agent 也不属于 Session」 + MAGE/EMNLP 2026（记忆组织轴该是执行路径而非语义相似度）；语义见 `src/execution.ts` 文件头、不变量见 §9 第 16 条 I16、判据见 `tests/execution.test.mjs`） |
+| 版本 | v0.7（文档）· **对应插件 v0.24.0**（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；v0.8 压缩流水线证据层；**v0.8.1/v0.8.2 修 U10 真因**（总结调用补会话 id；输出预算与可归因证据）<br>**v0.12 检索别名**（2026-10-13 重做第一步；⚠ **契约节缺**——原引用的「§5.14」编号已被 v0.15 占用，正本暂在 `src/types.ts` 的 `Entry.aliases` 与 `tests/aliases.test.mjs`，已记入 §10）<br>**v0.13 主体层**（2026-10-14：`subject` = 条目「**关于谁**」——`self` / `master` / 缺省通用；与 `role` 正交；语义见 §9 第 19 条、判据见 §7 A85–A94）<br>**v0.14 约定状态**（2026-10-14：`grounding` = 「**是否已被共同建立**」——`established` / `proposed`（我提的、主人未回应）/ `scoped` / `rejected` / 缺省未标注；与 `subject` 正交；语义见 §9 第 20 条、判据见 §7 A95–A104）<br>**v0.15 时效维**（2026-10-14：`reviewAfter` = **复查死线** + `watchFor` = **观察条件**；论文 *Fresh at Decision, Stale at Action* 移植；契约见 **§5.14**、语义见 §9 第 21 条、判据见 §7 A105–A116）<br>**v0.23 执行位置**（2026-11-15：`project` = 哪个项目 + `taskId` = 哪个任务；**两级不可拆**；与 `scope` 正交（后者是准入且值是路径）；`project` 写入时按会话 cwd **自动盖章**（经 `dsh-project-state` **软依赖**，缺该插件则不盖）；依据 = 主人 2026-11-15 架构定调「Project 不属于 Agent 也不属于 Session」 + MAGE/EMNLP 2026（记忆组织轴该是执行路径而非语义相似度）；语义见 `src/execution.ts` 文件头、不变量见 §9 第 16 条 I16、判据见 `tests/execution.test.mjs`）<br>**v0.24 事实生命周期**（2026-11-17：`validAfter` = 这条结论**从何时开始成立**（≠ `createdAt`）+ `supersededBy` / `supersedes` = **谁替代了谁**（只留一层）；**唯一写入口** `memory_supersede`（两侧同写），`update` 刻意不暴露这两个字段；旧条目**绝不删除**，recall 默认仍返回并打「⚠ 已过时」标记；契约见 **§5.16**、语义见 `src/succession.ts` 文件头、判据见 `tests/succession.test.mjs`） |
 | 实现落点 | `self-plugins/dsh-agent-memory/src/`（19 个模块，见 §8） |
 | 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>侧车：`${DSH_HOME}/memory-access-trace.jsonl`（v0.6 用量）、`${DSH_HOME}/memory-audit-proposals.jsonl`（v0.7 提案）、`${DSH_HOME}/memory-compress-trace.jsonl`（v0.8 压缩流水线）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（**`config.maxTokens: 32000`**——2026-09-15 由 16000 抬高，见 §7 A64–A67 旁注） |
 | 作者 / 日期 | 爱丽丝 · 2026-09-13 |
@@ -143,14 +143,15 @@
 
 优先级：**显式参数 > 配置模式 > 无 cwd 降级**。
 
-### 5.4 工具面（14 个，均 `defineTool` 注册）
+### 5.4 工具面（16 个，均 `defineTool` 注册）
 
 > ⚠ 2026-10-14 对齐：本节标题原写「12 个」，与实现（**14 个**）不符——v0.11 `memory_recompress` 与 v0.13 期 `memory_review_mark` 上线时未同步（**预先存在的文档漂移**，非 v0.15 引入）。凭据：`tests/tools.test.ts`「工具齐备，名称与契约一致」的实测快照。
+> ⚠ 2026-11-17：本节实测曾为 **15 个**（上面那行写 14——`memory_dispose` 于 2026-10-29 上线时未回填，**同型漂移第二次**）。v0.24.0 加 `memory_supersede` ⇒ **16 个**。行数由 `tests/audit.test.mjs` 的 A42（硬编码工具数，每变一次必须显式确认）与本节共同锁定。
 
 | 工具 | 语义要点 |
 |------|---------|
-| `remember` | 写入；L1 key 覆盖 / L2·L3 合并 / 新建；受 `max_entries` 守卫（仅新建）；`kind` 未在 `layers` 启用 → fail loud；**v0.15** 另收 `reviewAfter`（复查死线，接受 `+7d`/`+2w` 并**折算成绝对日期**后落库）与 `watchFor`（观察条件 1–8 条） |
-| `recall` | 检索：关键词/层级/标签/时间过滤 + 相关度（标签3 > 标题2 > 正文1）与新鲜度排序；**每个结果附 `related` 联想链**；**v0.15** 另收 `staleness` 过滤（`expired`/`due-soon`/`fresh`）——这是「**我的哪些结论该重看了**」的**审查入口** |
+| `remember` | 写入；L1 key 覆盖 / L2·L3 合并 / 新建；受 `max_entries` 守卫（仅新建）；`kind` 未在 `layers` 启用 → fail loud；**v0.15** 另收 `reviewAfter`（复查死线，接受 `+7d`/`+2w` 并**折算成绝对日期**后落库）与 `watchFor`（观察条件 1–8 条）；**v0.24** 另收 `validAfter`（这条结论**从何时开始成立**；只收 `YYYY-MM-DD` / ISO 时刻，**不收回溯相对写法**） |
+| `recall` | 检索：关键词/层级/标签/时间过滤 + 相关度（标签3 > 标题2 > 正文1）与新鲜度排序；**每个结果附 `related` 联想链**；**v0.15** 另收 `staleness` 过滤（`expired`/`due-soon`/`fresh`）——这是「**我的哪些结论该重看了**」的**审查入口**；**v0.24** 另收 `superseded` 过滤（`current`/`superseded`，缺省**不过滤**＝不隐藏已过时条目） |
 | `update` | 按 id 修订；**v0.9 三模式**：`replace`（缺省·`text` 首行作标题、全文作正文）/ `append`（追加到正文末尾）/ `patch`（`find`→`replace`，**要求唯一命中**，0 处或多处一律 fail loud）；内容真变即落**修订快照**（`revisions`，保留最近 3 条）；`tags` 整体替换 |
 | `forget` | 软归档（`archived=true`，`reason` 记入 `source`）；**v0.9 三种选择器**：`id`（单条·未命中报错）/ `ids[]`（批量）/ `tier`（按 `memory_audit` 分档批量：`ARCHIVE`/`DEMOTE`/`REVIEW`，**`KEEP` 被拒**）；`max` 护栏（缺省 100 / 硬上限 500）+ `dryRun` 预览；批量自动记 `forget: bulk（N 条）` |
 | `memory_merge` | **v0.9 合并原语**：把 `ids` 的正文并入 `canonical`（带「合并自 <id>（<title>）」来源标注，**信息不丢**），随后软归档之；`strategy=keep-canonical` 只归档不动正文；跳过分支（canonical 自身 / 列表内重复 / 不存在 / 已归档）逐条回报 |
@@ -164,6 +165,7 @@
 | `memory_dispose` | **销账**：把 `memory_check` 列出的欠账标记为已处置，此后不再列为待处置。⚠ 它**只写销账记录，不执行实际处置**——合流用 `memory_merge`、补写用 `update`、判无关则无需动作。`disposition` ∈ `merged`/`updated`/`unrelated`；`reason` 必填（无理由的销账等于把欠账藏起来）；`candidateIds` 必须**真的撞过**（有 hit 历史），否则整批不写（fail-closed，防 id 拼错被静默吞掉）。⚠ 处置是**时间轴上的重置**，不是永久免检：同一候选之后再撞上会重新进榜 |
 | `memory_recompress` | **v0.11**：重压一条**超预算**的概要（用它自己的正文再压一次、整体替换，旧版进 `revisions`）；只对 `kind=summary` 且 level/bucket 齐全的条目有效，已在预算内则跳过（**不白跑一次调用**） |
 | `memory_review_mark` | **v0.13 期**：给体检候选打「已裁决」标记；**只写侧车、绝不改条目**（不刷 `accessedAt`/`updatedAt`）；标记只对「当时那一版」有效——条目若再变动会自动重新纳入常规分档（不是永久免检） |
+| `memory_supersede` | **v0.24 替代关系的唯一写入口**（§5.16）：`id`（新）+ `supersedes[]`（旧，必填非空）+ 可选 `validAfter` / `overwrite`。一次调用写**两侧**（新 `.supersedes` ⊇ 旧 id；每个旧条目 `.supersededBy = 新 id`）；**旧条目不删不归档**（保留原值作对照）；**只留一层**（不递归展开祖先）。fail-loud 三处：id 不存在 / 自引用 / 旧条目已被**别的**条目替代过（二次替代需显式 `overwrite: true`；已是本次目标则幂等跳过） |
 
 模型可见语义另有一条服务面：`ctx.memoryApi.remember({text, kind?, tags?, key?, scope?})` → `{id, action}` 或 `{error}`（默认 `global` + `knowledge`；标题取正文首行，>80 字截断）。
 
@@ -441,7 +443,32 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 - 判据真源在 `src/origin.ts`，与 `scripts/memory-origin-audit.mjs` 的**同一组正则**由 `tests/origin.test.mjs` 逐字比对锁住——这是「一份判据 + 一个机械的对齐检查」，不是两份真源（脚本要在 clone 上直接跑，故不能反向 import 编译产物）。
 - 已知边界（不得读成「已判准」）：判不出「实际是不是转述」（标题写「评估」而结论全自产的会被误标）；只认 arXiv 编号（引网页 / 书 / 口述的转述漏标，不是误标）。⇒ 标记是**提示着去看**，不是判决。
 
-## 6 · 边界与信任
+### 5.16 事实生命周期契约（v0.24 · `validAfter` / `supersededBy` / `supersedes`）
+
+**缺口**（主人 2026-11-17 诊断）：「压缩摘要是散文，T1→T2→T3 的更新关系在压缩时会被抹平」。库里已有五个时效字段（`grounding` / `provenance` / `watchFor` / `reviewAfter` / `staleness`），仍缺两格：**这条结论从何时开始为真**，以及**谁替代了谁**。既有的 `archivedReasonType='superseded'` 只是**归档状态**（这条怎么没了），**不含对象**（被谁顶掉了）。
+
+**三个字段**（语义正本在 `src/succession.ts` 文件头）：
+
+| 字段 | 答什么 | 关键纪律 |
+|------|--------|----------|
+| `validAfter` | 这条结论**从何时开始成立** | **无默认值**——省略 = 不知道，**不是**「等于 `createdAt`」（判断不代填）；与 `reviewAfter` 正交（一个向后看、一个向前看） |
+| `supersededBy` | 这条**被哪一条**替代了（单个 id） | 字段存在即已过时；**旧条目绝不删除**，recall 默认仍返回，只打「⚠ 已过时 → 被 `<前8位>` 替代」 |
+| `supersedes` | 这条**替代了哪些**（id 列表） | 只记**直接**替代对象，**不递归展开祖先** |
+
+**只保留一层**（刻意设计，不是简化）：A→B→C 时 `A.supersededBy=B`、`B.supersededBy=C`、`C.supersedes=[B]`，**不**把 C 填成 `[A, B]`。记忆库不是事件溯源库——完整版本树会让 recall 越跑越慢（每次命中都要展开链）、命中越排越散（同族多代同时占服务位）、旧值持续挤占注意力。**一层足够回答「我手上这条是不是最新的」**。
+
+**两侧同写，单一写入点**：替代关系是**成对**的边 ⇒ `memory_supersede` 是唯一写入口，`update` 工具刻意**不暴露**这两个字段。开成单侧可写，库里迟早出现「只标了一侧」的边——而单向边在审计时读作「这条已被替代」（真）却查不到「被谁替代」（丢了），正是本维度要修的那种抹平。
+
+**可见性落在四处**（同一事实不许在两个界面长得不一样）：`recall` / `memory_browse` 结果行（已过时标记放**最前**——它比「已过期」更硬：过期只表示该核实，替代表示已有更新版本顶掉它）+ 两个注入路径（启动速览 `inject.ts` / auto-recall `auto-inject.ts`，都只打**过时标记**，不注入 `validAfter`——注入有字节预算，只在少数情形改变判断的信息让位给内容）。
+
+**写入边界（同一个坑第九次）**：`index.ts::entrySchema` 必须同步声明这三个字段，否则 storage-domain 在写入边界**静默剥掉**而写入**仍返回成功**（v0.12 `aliases`、v0.13 `subject`、v0.14 `grounding`、v0.15 `reviewAfter/watchFor`、v0.16 `cue`、v0.21 `provenance`/`archivedReasonType`、v0.23 `project/taskId`）。
+
+**已知边界（不得读成「已保证」）**：
+- **单测看不见宿主校验这一跳**：`execute()` 直接调用会绕过 harness 的 output schema 校验 ⇒ 「schema 声明是否齐全」只能靠**结构性判据**（`tests/succession.test.mjs` A4 的消费者清点 + `tests/schema-parity.test.mjs` A117 的逐层比对）与**重启后实调**共同证明。
+- **无事务原语**：`kv` 没有批量事务，两侧是两次 `put`。实现先**全查全验**再顺序写，并在旧条目写入失败时**响亮报错并列出已写/未写**（半成品边不许静默）。代价：极端并发下仍可能残留半成品，需人工核对后 `overwrite: true` 补齐。
+- **同标题陷阱**：新结论若与旧条目**同标题**，`remember` 的 L2/L3 同标题合并会把它写进旧条目（回执 `action=merged`），于是库里只有一条、无从建立替代关系 ⇒ 工具会报「自引用」并说明这条成因。
+
+
 
 - **能力 ≠ 沙箱**：本能力不隔离、不鉴权、不加密；能读到存储文件的人都可改记忆。
 - **角色维度是视野管理，不是安全边界（v0.5 诚实声明）**：工具参数 `role` 可自述、记忆文件可被能读盘的人改写、共享记忆对所有角色可见——它防的是「不小心看见」与「默认继承上下文」，**不防蓄意越权**。要真正的隔离（幽灵隔间 / 多租户）必须配**独立 `DSH_HOME`**（另见 AGENTS.md §5.26 G1/G8）。

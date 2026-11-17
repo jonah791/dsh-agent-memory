@@ -105,6 +105,9 @@ async function seedFull(store) {
     // 按「两级不可拆」剥掉，那样 A117 对 taskId 就恒真了（无分辨力）。
     project: 'alice',
     taskId: 'ps-parity',
+    // v0.24.0：事实生命周期。`validAfter` 走 draft（新建时盖章）；`supersedes` / `supersededBy`
+    // 是**成对**的边，只由 store.update 写（工具面唯一入口是 memory_supersede）⇒ 下面成对补。
+    validAfter: '2026-11-01',
   })
   // v0.21.0：`archival`（返回弧）只在**已归档**条目上出现 ⇒ 另造一条并归档，
   // 否则 A117 对 archival 恒真（「返回里没有该键」不构成证据）。
@@ -119,6 +122,12 @@ async function seedFull(store) {
     level: null,
     bucket: null,
   })
+  // v0.24.0：替代关系的**两侧**都要真的落盘，否则 A117 对 `supersededBy` / `supersedes`
+  // 恒真（「返回里没有该键」不构成证据——§5.9 规则 2）。
+  // 走 store.update 而不是 memory_supersede：本文件测的是 **schema 覆盖**，
+  // 替代关系的工具行为由 tests/succession.test.mjs 负责（判据分工写清楚）。
+  await store.update(WID, created.id, { supersedes: [doomed.id] })
+  await store.update(WID, doomed.id, { supersededBy: created.id })
   await store.forget(WID, doomed.id, { reasonType: 'refuted', reason: 'schema-parity 夹具' })
   return created
 }

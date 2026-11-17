@@ -115,15 +115,18 @@ function seedRaw(kv, entries) {
 
 // ---------- A42 工具面 ----------
 
-test('A42 工具面：memory_audit 已注册（共 15 个工具）', () => {
+test('A42 工具面：memory_audit 已注册（共 16 个工具）', () => {
   const { byName } = setup()
   // 计数是有意硬编码的：工具面每变一次都必须显式确认一次，
-  // 否则「少挂了一个工具」会静默通过（2026-10-29 加 memory_dispose 时它如期变红）。
-  assert.equal(byName.size, 15)
+  // 否则「少挂了一个工具」会静默通过（2026-10-29 加 memory_dispose 时它如期变红；
+  // 2026-11-17 v0.24.0 加 memory_supersede 时它**又一次如期变红** = 判据有分辨力）。
+  assert.equal(byName.size, 16)
   assert.ok(byName.has('memory_audit'))
   assert.ok(byName.get('memory_audit').description.includes('只读'))
   // v0.9：合并原语进工具面（近重复簇从「只标记」到「可执行」）
   assert.ok(byName.has('memory_merge'))
+  // v0.24.0：替代关系的**唯一写入口**（两侧同写；单侧可写会让审计查不到反向关系）
+  assert.ok(byName.has('memory_supersede'))
   // 2026-10-29：销账入口（缺口是实测出来的——欠账此前只进不出，当晚累积 15 条却一条都清不掉）
   assert.ok(byName.has('memory_dispose'))
   assert.ok(byName.has('memory_check'))
