@@ -10,7 +10,8 @@
  * ISO 字符串字典序即时间序；纯日期输入按日界归一化。
  */
 
-import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RecallTuning, RelatedItem, TimelineLevel, WeightedTerm } from './types.ts'
+import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallEntityMatch, RecallQuery, RecallResult, RecallResultItem, RecallTuning, RelatedItem, TimelineLevel, WeightedTerm } from './types.ts'
+import { matchesName } from './entities.ts'
 import { lifecycleOf } from './lifecycle.ts'
 import { collapseFamilies, renderFamilyNote } from './family.ts'
 import { transcriptiveFlagOf } from './origin.ts'
@@ -23,6 +24,48 @@ export const DEFAULT_RECALL_LIMIT = 20
 const SCORE_TAG = 3
 const SCORE_TITLE = 2
 const SCORE_BODY = 1
+
+/**
+ * 实体匹配加成（v0.31.0 · 方案 §8.3「实体匹配」）：查询点到了某个实体，**提到该实体的条目**加分。
+ *
+ * **为什么不是「把别名塞进查询词」**（那是 `expandThesaurus` 的做法）：塞词只让**字面相同**的条目
+ * 得分，而实体匹配要的恰是「同一个东西的另一种写法」——查「AML 的进度」要能找到写
+ * 「智能体记忆图书馆」的条目，两串没有任何共同 token。
+ *
+ * **权重 2.5 的定位**：低于标签/别名命中（3 —— 人工给的检索入口，意图明确），
+ * 高于正文命中（1 —— 内容里偶然的用词）。它是「同一指称」级别的强信号，但不是人工标注。
+ */
+const SCORE_ENTITY = 2.5
+
+/**
+ * 实体匹配用小写正文视图的缓存（与 `lowerCache` 同一模式、同一失效理由）。
+ * 只在真开了实体匹配（`entityMatches` 非空）时才构造 —— 关着的时候零成本。
+ */
+const entityHayCache = new WeakMap<Entry, string>()
+
+function entityHayOf(entry: Entry, view: LowerView): string {
+  const cached = entityHayCache.get(entry)
+  if (cached !== undefined) return cached
+  const hay = [view.title, ...view.tags, ...view.aliases, view.body].join('\n')
+  entityHayCache.set(entry, hay)
+  return hay
+}
+
+/**
+ * 实体检出加成：命中几个实体就加几份（乘该实体的查询强度）。
+ * @param entry - 候选条目
+ * @param view - 该条目的小写视图
+ * @param matches - 查询解析出的实体（缺省 = 不做实体匹配）
+ */
+function entityBonus(entry: Entry, view: LowerView, matches: readonly RecallEntityMatch[] | undefined): number {
+  if (matches === undefined || matches.length === 0) return 0
+  const hay = entityHayOf(entry, view)
+  let bonus = 0
+  for (const match of matches) {
+    if (match.names.some((name) => matchesName(hay, name))) bonus += SCORE_ENTITY * match.weight
+  }
+  return bonus
+}
 
 /**
  * 相对分数门槛（v0.17，2026-10-27）：排序后只保留 `score ≥ topScore × 本值` 的条目。
@@ -378,8 +421,8 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   let scored = filtered.map((entry) => ({
     entry,
     score: weighted !== undefined
-      ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen, tuning)
-      : scoreEntry(entry, tokens, idf, avgBodyLen, tuning),
+      ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen, tuning, query.entityMatches)
+      : scoreEntry(entry, tokens, idf, avgBodyLen, tuning, query.entityMatches),
   }))
   // 带查询时剔除零分条目（无关内容不进结果）；无查询词时全量按新鲜度排序
   if (hasQuery) scored = scored.filter(({ score }) => score > 0)
@@ -627,7 +670,7 @@ function bodyLengthNorm(bodyLen: number, avgBodyLen: number, tuning: ResolvedTun
  * @param idf - token → IDF；缺项回退 1（等权，与原行为一致，避免静默变差）
  * @param avgBodyLen - 候选集正文平均长度（用于 BM25 归一化）
  */
-function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning): number {
+function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning, entityMatches?: readonly RecallEntityMatch[]): number {
   if (tokens.length === 0) return 0
   const view = lowerOf(entry)
   const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen, tuning)
@@ -641,7 +684,7 @@ function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, num
     if (view.title.includes(token)) score += SCORE_TITLE * w
     if (view.body.includes(token)) score += SCORE_BODY * w * lenNorm
   }
-  return score
+  return score + entityBonus(entry, view, entityMatches)
 }
 
 /**
@@ -649,7 +692,7 @@ function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, num
  * `IDF × 重心权重 × (标签 3 / 标题 2 / 正文 1×lenNorm)`。
  * 与 `scoreEntry` 同构，只是词项带重心权重——这样「话题重心」比「最后一个词」更有话语权。
  */
-function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning): number {
+function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning, entityMatches?: readonly RecallEntityMatch[]): number {
   if (terms.length === 0) return 0
   const view = lowerOf(entry)
   const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen, tuning)
@@ -662,7 +705,7 @@ function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: R
     if (view.title.includes(token)) score += SCORE_TITLE * w
     if (view.body.includes(token)) score += SCORE_BODY * w * lenNorm
   }
-  return Math.round(score * 1000) / 1000
+  return Math.round((score + entityBonus(entry, view, entityMatches)) * 1000) / 1000
 }
 
 /** 结果项组装：概要字段 + score + 层级标注（level 原样透出，标注文案由工具层给模型） */

@@ -17,7 +17,7 @@ import { readFileSync, statSync } from 'node:fs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { Entry, EntryKind, EvidenceRef, MemoryConfig, RememberResult, Revision } from './types.ts'
+import type { Entry, EntryKind, EvidenceRef, MemoryConfig, RecallEntityMatch, RememberResult, Revision } from './types.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import { resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
@@ -62,6 +62,7 @@ import {
 } from './thesaurus.ts'
 import {
   isEntityActive,
+  matchesName,
   namesOf,
   normalizeEntityName,
   type EntityDraft,
@@ -603,6 +604,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       superseded: { type: 'string', description: '替代状态筛（v0.24.0）：`current` = 只看**还没被替代**的条目 / `superseded` = 只看**已被替代**的条目。缺省 = 不过滤。⚠ **缺省不隐藏已过时条目是刻意的**——对照是它的全部价值（旧值里往往写着「以前为什么这么定」）。本筛子是**审查入口**：「我有哪些结论已经被顶掉了」。' },
       collapseFamily: { type: 'boolean', description: '家族折叠（v0.16.0 · 论文 Memory Echo 的 Family 组件）：把**候选池内**的「时间桶概要 + 它 archiveRef 的原料」压成**每族一位**（族内得分最高者为代表），其余不占本次服务位。论文依据：「Repeated writes therefore add records, not independent votes」（arXiv 2610.17763v1 §5.1）——同一来源的派生不该当多个独立证据占位。**缺省 false**：论文消融显示 Family 单独上线会把准确率从 0.825 打到 0.651（≈ −33 题），须与「当前事实优先」配对才安全，故先做成可选。⚠ 只在 `includeArchive: true` 时有实际效果（默认视图下原料已冷归档，不会与概要同时命中）；折叠不删数据，只是本次不占位。' },
       expandThesaurus: { type: 'boolean', description: '按主题词表扩展查询（v0.29.0 · 方案 §4.2）：把查询里出现的概念换成它的**全部同义词**再检索（查「记忆库」也能命中写成「智能体记忆」的条目）。**缺省 false**（存量检索行为逐字不变）；展开的词会出现在返回的 `expandedTerms` 里，**看得见才可复核**。词表为空时静默不扩展（不是错误）。前提：该概念已在词表中且适用中（`memory_concept` 建立、`memory_thesaurus` 查看）。' },
+      expandEntities: { type: 'boolean', description: '实体匹配（v0.31.0 · 方案 §8.3）：查询里出现某个实体（含别名）时，**提到该实体的条目**加一份分（权重 2.5：低于标签/别名命中的 3、高于正文命中的 1）。与 `expandThesaurus` 的区别：那个是「把同义词塞进查询词」（只让字面相同的条目得分），这个是「同一个东西的另一种写法也算」——查「AML 的进度」能找到写「智能体记忆图书馆」的条目。**缺省 false**（存量排序逐字不变）；命中的实体会出现在返回的 `matchedEntities` 里。' },
     },
     output: {
       schema: {
@@ -626,6 +628,20 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
             items: { type: 'string' },
             description:
               'v0.29.0：主题词表扩展出的词（**仅当真发生扩展时出现**）——「这次检索多用了哪些同义词」，让扩展**看得见才可复核**；未开 `expandThesaurus` 时不含本键。',
+          },
+          matchedEntities: {
+            type: 'array',
+            description: 'v0.31.0：这次查询匹配到的实体（**仅当真匹配到时出现**）——哪个实体参与加分成，让实体匹配看得见才可复核。',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true, description: '实体 id（`ENTITY-0001` 形态）' },
+                canonicalName: { type: 'string', required: true },
+                entityType: { type: 'string', required: true },
+                matchedNames: { type: 'array', items: { type: 'string' }, description: '查询里点到的该实体的写法（原样）' },
+              },
+            },
           },
           results: {
             type: 'array',
@@ -750,6 +766,9 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
             (value.expandedTerms !== undefined && value.expandedTerms.length > 0
               ? `词表扩展 +${value.expandedTerms.length} 词：${value.expandedTerms.join(' / ')}`
               : ''),
+            (value.matchedEntities !== undefined && value.matchedEntities.length > 0
+              ? `实体匹配 ${value.matchedEntities.length} 个：${value.matchedEntities.map((hit) => `${hit.canonicalName}(${hit.id})←${(hit.matchedNames ?? []).join('/')}`).join('；')}`
+              : ''),
             `命中 ${value.total} 条，返回 ${value.results.length} 条：`,
             ...lines,
           ].filter((line) => line !== '').join('\n'),
@@ -819,6 +838,28 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         }
       }
       const effectiveQuery = [queryBase, ...expandedTerms].filter((term) => term.trim().length > 0).join(' ')
+      // 实体匹配（v0.31.0 · 方案 §8.3）：**开了才做**（缺省 false ⇒ 存量排序逐字不变）。
+      // 为什么不是把别名塞进查询词（那是上面 expandThesaurus 的做法）：塞词只让字面相同的条目得分，
+      // 而实体匹配要的恰是「同一个东西的另一种写法」——查「AML 的进度」要能找到写「智能体记忆图书馆」的条目。
+      // 命中结果随返回透出 `matchedEntities`——**改了排序就必须看得见才可复核**。
+      const entityMatches: RecallEntityMatch[] = []
+      const matchedEntities: Array<{ id: string; canonicalName: string; entityType: string; matchedNames: string[] }> = []
+      if (args.expandEntities === true && deps.entities !== undefined && queryBase.trim().length > 0) {
+        const lowerQuery = queryBase.toLowerCase()
+        for (const scope of readScopes) {
+          for (const entity of deps.entities.byScope(scope)) {
+            if (!isEntityActive(entity)) continue
+            if (matchedEntities.some((hit) => hit.id === entity.id)) continue
+            const pairs = namesOf(entity)
+              .map((raw) => ({ raw, key: normalizeEntityName(raw) }))
+              .filter((pair) => pair.key.length >= 2)
+            const hitNames = pairs.filter((pair) => matchesName(lowerQuery, pair.key)).map((pair) => pair.raw)
+            if (hitNames.length === 0) continue
+            entityMatches.push({ names: pairs.map((pair) => pair.key), weight: 1 })
+            matchedEntities.push({ id: entity.id, canonicalName: entity.canonicalName, entityType: entity.entityType, matchedNames: hitNames })
+          }
+        }
+      }
       const result = recallEntries(filterByLifecycle(filterBySpace(filterByMemType(entries, memTypes), spaces), statuses), {
         query: effectiveQuery.length > 0 ? effectiveQuery : undefined,
         kind: args.kind,
@@ -828,6 +869,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         limit: args.limit,
         includeArchive,
         collapseFamily: args.collapseFamily ?? false,
+        ...(entityMatches.length > 0 ? { entityMatches } : {}),
       })
       // 侧车用量轨迹（v0.6）：只交出命中 id，**绝不改条目**；失败静默（吞错在实现方）
       if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined && result.results.length > 0) {
@@ -839,7 +881,9 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         })
       }
       // 扩展词只在真发生时出现（省略 ≠ 空数组：没开就是没开，不是「扩展了 0 个词」）
-      return expandedTerms.length > 0 ? { ...result, expandedTerms } : result
+      const withExpanded = expandedTerms.length > 0 ? { ...result, expandedTerms } : result
+      // 实体命中同理：没命中就不出现（省略 ≠ 空数组）
+      return matchedEntities.length > 0 ? { ...withExpanded, matchedEntities } : withExpanded
     },
   })
 }
@@ -2581,24 +2625,6 @@ function entitySignature(entity: {
   ])
 }
 
-/**
- * 名称匹配器（反查「提到它的条目」用）：**CJK 走子串，含 ASCII 的名字走词边界**。
- *
- * 为什么必须分开（2026-11-19 线上验收当场抓到的缺陷）：别名 `AML` 用纯子串匹配会把
- * `yaml` / `example` 里的 `aml` 当成命中——首版实测反查 5 条**全是 yaml 噪声（5/5 假阳）**，
- * 而这个工具的全部价值就在这 5 条上。中文没有词边界，只能子串；拉丁名有空格与标点，
- * 用边界既准又稳。
- * @param key - 已归一的名称（`normalizeEntityName` 的输出）
- */
-function nameMatcher(key: string): (haystack: string) => boolean {
-  if (/^[\x20-\x7e]+$/.test(key)) {
-    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-    const pattern = new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`)
-    return (haystack) => pattern.test(haystack)
-  }
-  return (haystack) => haystack.includes(key)
-}
-
 /** 实体档取用：未接线时**响亮报错**（绝不静默降级成「库里没有这个实体」） */
 function entityStoreOf(deps: MemoryToolDeps): EntityStore {
   if (deps.entities === undefined) {
@@ -2922,11 +2948,10 @@ function buildEntities(deps: MemoryToolDeps): ToolDefinition {
         if (!withEntries) return []
         const keys = namesOf(entity).map(normalizeEntityName).filter((key) => key.length >= 2)
         if (keys.length === 0) return []
-        const matchers = keys.map(nameMatcher)
         const hits: Array<{ id: string; title: string; kind: string }> = []
         for (const entry of readable) {
           const hay = (entry.title + '\n' + entry.body + '\n' + entry.tags.join('\n') + '\n' + (entry.aliases ?? []).join('\n')).toLowerCase()
-          if (!matchers.some((match) => match(hay))) continue
+          if (!keys.some((key) => matchesName(hay, key))) continue
           hits.push({ id: entry.id, title: entry.title, kind: entry.kind })
           if (hits.length >= 5) break
         }

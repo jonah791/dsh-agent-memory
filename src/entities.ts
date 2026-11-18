@@ -122,6 +122,26 @@ export function namesOf(entity: Pick<Entity, 'canonicalName' | 'aliases'>): stri
   return [entity.canonicalName, ...(entity.aliases ?? [])]
 }
 
+/**
+ * 名称是否出现在一段文本里——**检索与反查共用的唯一口径**（别在两处各写一份）。
+ *
+ * - **CJK 名字走子串**：中文没有词边界可依。
+ * - **含 ASCII 的名字走词边界**：纯子串会让 `AML` 命中 `yaml` / `example`——
+ *   2026-11-19 线上实测反查 5 条**全是 yaml 噪声**（见 `docs/semantic.md §5.23`）。
+ *
+ * ⚠ 已知边界：词边界分不开**同形异义**（「损害 AML 体系」= 反洗钱），那需要语义，不在本层。
+ * @param haystackLower - 已被调用方小写化的文本（含标题正文标签别名拼接）
+ * @param normalizedKey - 已归一的名称（`normalizeEntityName` 的输出）
+ */
+export function matchesName(haystackLower: string, normalizedKey: string): boolean {
+  if (normalizedKey.length === 0) return false
+  if (/^[\x20-\x7e]+$/.test(normalizedKey)) {
+    const escaped = normalizedKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(haystackLower)
+  }
+  return haystackLower.includes(normalizedKey)
+}
+
 /** 实体是否适用中（未合并、未停用）——**合并态不算「当前节点」**：它指向存续档 */
 export function isEntityActive(entity: Pick<Entity, 'status'>): boolean {
   return entity.status === undefined

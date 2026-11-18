@@ -967,6 +967,24 @@ export interface RecallQuery {
    * 不传时逐项回退 `BM25_K1=1.2` / `BM25_B=0.75` / `RECALL_RELATIVE_FLOOR=0.05`。
    */
   tuning?: RecallTuning
+  /**
+   * 实体匹配（v0.31.0 · 方案 §8.3「实体匹配」）：调用方**已解析好**的实体候选——
+   * 每条 = 该实体的全部称呼（已归一）+ 本次查询点到它的强度。
+   *
+   * 为什么由调用方解析、不在这里查表：`search.ts` 是纯函数层（输入条目 → 排序），
+   * 拿不到实体表；把「查询 → 实体」放在工具层只用一处实现，两层各自可离线测。
+   *
+   * 缺省 `undefined` = 不做实体匹配（存量排序逐字不变）。
+   */
+  entityMatches?: readonly RecallEntityMatch[]
+}
+
+/** 一条实体匹配信号（`RecallQuery.entityMatches` 的元素） */
+export interface RecallEntityMatch {
+  /** 该实体的全部称呼，**已归一**（`normalizeEntityName`：小写 + 折叠空白） */
+  names: readonly string[]
+  /** 本次查询点到它的强度（精确命中规范名/别名 = 1；缺省按 1 计，不做默认值猜测） */
+  weight: number
 }
 
 /** 检索结果项 */
