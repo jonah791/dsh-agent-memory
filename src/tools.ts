@@ -2018,8 +2018,15 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
           // 把「看不见 ≠ 没有」这类读数注脚带出来（默认视图下承重为 0 时尤其重要）。
           // v0.12：`用量信号` 注脚也放行 —— 它承载用量项的**计分口径**（按排序加权归因 /
           // 回退 hits）。口径只写在结构化返回里等于没写：渲染层是唯一到人眼前的通道。
+          //
+          // v0.24.3（2026-11-18 实测抓到）：原来是**白名单**（只放行 `另有` / `用量信号`），
+          // 于是 v0.24.1 新加的「已跳过 N 条冷存档」注脚写进了结构化返回、却**印不出来**——
+          // 白名单的失效方向是「新信息默认不可见」，而每加一条注脚都得记得回来改渲染层。
+          // 改成**黑名单**：只挡与表头重复的两类（`读数：` / `提案 ≠ 裁决`），其余默认可见。
+          // 判据：新增注脚应当**默认被看见**，被隐藏才需要理由。
           for (const note of value.notes) {
-            if (note.startsWith('另有') || note.startsWith('用量信号')) lines.push(note)
+            if (note.startsWith('读数：') || note.startsWith('提案 ≠ 裁决')) continue
+            lines.push(note)
           }
         }
         return [{ type: 'text', text: lines.join('\n') }]

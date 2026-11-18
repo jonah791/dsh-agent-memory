@@ -106,3 +106,26 @@ test('② memory_audit 渲染把**全量 id** 印出来（提案可直接执行�
   assert.match(text, /abcdef01-2345-6789-abcd-ef0123456789/, '渲染必须含全量 id（findEntry 精确匹配）')
   assert.match(text, /某条待裁决条目/, '标题仍要在（id 是补充不是替换）')
 })
+
+test('③ 注脚默认可见（黑名单）：新增注脚不必改渲染层就能到人眼前', () => {
+  const tools = createMemoryTools({ store: undefined, loadConfig: async () => DEFAULT_CONFIG })
+  const auditTool = tools.find((t) => t.name === 'memory_audit')
+  const value = {
+    summary: {
+      total: 1,
+      chars: 10,
+      byBucket: { KEEP: 1, DEMOTE: 0, ARCHIVE: 0, REVIEW: 0 },
+      charsByBucket: { KEEP: 10, DEMOTE: 0, ARCHIVE: 0, REVIEW: 0 },
+      usageSource: 'none',
+      referenced: 0,
+    },
+    groups: [],
+    candidates: [],
+    // 第一条与表头重复（应被挡），第二条是「后来才加的」注脚（必须默认可见）——
+    // v0.24.3 之前渲染层是白名单，这条会被静默吞掉（2026-11-18 实测现场）。
+    notes: ['读数：条目 1 条 / 10 字符', '已跳过 2 条冷存档（checkpoint-archive）——要看请用 memory_browse'],
+  }
+  const text = auditTool.output.render({}, value).map((c) => c.text).join('\n')
+  assert.match(text, /已跳过 2 条冷存档/, '新增注脚必须默认可见（黑名单形态）')
+  assert.doesNotMatch(text, /读数：条目 1 条/, '与表头重复的读数码应被挡，避免同屏两遍')
+})
