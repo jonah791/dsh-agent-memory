@@ -66,6 +66,13 @@ export const DEFAULT_AUDIT_CONFIG: AuditConfig = Object.freeze({
    * 才被 REVIEW 抓到；6000～11999 之间的超预算概要则一路滑到 KEEP/DEMOTE，无人知会。
    */
   summaryMaxChars: 6000,
+  /**
+   * 分层概要预算（v0.24.2 · lh-ac92de7e）：压缩是**链式**的（日→周→月→年），
+   * 让每层共用 6000 字上限等于给上层一个结构上不可能达到的门槛 —— 实测 11-18：
+   * 周概要 16,945 字（2.8 倍）、月概要 39,842 字（6.6 倍）每次都落 REVIEW，
+   * 把「交人裁决」的位置占满，重压也救不回来。这里按「每层大一档」给先验值（非拟合）。
+   */
+  summaryMaxCharsByLevel: Object.freeze({ day: 6000, week: 15000, month: 30000, year: 60000 }),
   accessTrace: Object.freeze({ enabled: true, maxBytes: 2_000_000 }),
   /** 提案日志（v0.7）：让提案有历史——audit 候选 + forget/update 动作同文件可 join */
   proposalLog: Object.freeze({ enabled: true, maxBytes: 1_000_000 }),
@@ -305,6 +312,19 @@ export function scoreEntry(
  *  4. DEMOTE   未引用 且 体量 ≥ demoteMinChars
  *  5. KEEP     兜底（未被引用但体量小且不新——留着不心疼）
  */
+/**
+ * 概要用哪把尺子（v0.24.2 · lh-ac92de7e）：按**层**取，取不到回退单层预算。
+ *
+ * 抽成导出函数是为了让「哪一层用哪把尺」能被测试直接钉住，而不必构造整个 audit 上下文——
+ * 这条判据历史上错得很安静：尺子错不会报错，只会让一条超预算的周概要显示「预算内」，
+ * 或者让一条正常的周概要长期占着 REVIEW 位。
+ */
+export function summaryBudgetChars(level: string | null | undefined, config: AuditConfig): number {
+  if (level === undefined || level === null) return config.summaryMaxChars
+  const exact = config.summaryMaxCharsByLevel?.[level as 'day' | 'week' | 'month' | 'year']
+  return exact ?? config.summaryMaxChars
+}
+
 export function classify(
   entry: Entry,
   breakdown: ScoreBreakdown,
@@ -320,12 +340,19 @@ export function classify(
   // 概要超预算（v0.11.0）：summary 是压缩流水线**自动生成**的，预算 = summaryMaxChars（缺省 6000）。
   // 必须放在通用体量门槛**之前**判——否则 6000～11999 区间的超预算概要一路滑到 KEEP/DEMOTE，
   // 没有任何告警（2026-09-26 实测：月概要 39,842 字 = 预算 6.6 倍，翻过 12000 才被看见）。
-  if (entry.kind === 'summary' && e.chars > config.summaryMaxChars) {
-    const times = Math.round((e.chars / config.summaryMaxChars) * 10) / 10
-    reasons.push(
-      `概要超预算：${e.chars} 字符 > summary_max_chars(${config.summaryMaxChars})，达 ${times} 倍——需重压`,
-    )
-    return { bucket: 'REVIEW', reasons }
+  if (entry.kind === 'summary') {
+    // 尺子按层取（v0.24.2 · lh-ac92de7e）：周/月概要的合理体量与日概要不同量级，
+    // 共用一把尺子会让上层「永远超预算」——那不是告警，是噪音。
+    const budget = summaryBudgetChars(entry.level, config)
+    if (e.chars > budget) {
+      const times = Math.round((e.chars / budget) * 10) / 10
+      const level = entry.level ?? undefined
+      const ruler = level === undefined ? 'summary_max_chars' : `summary_max_chars_by_level.${level}`
+      reasons.push(
+        `概要超预算：${e.chars} 字符 > ${ruler}(${budget})，达 ${times} 倍——需重压`,
+      )
+      return { bucket: 'REVIEW', reasons }
+    }
   }
   if (e.chars >= config.reviewMinChars) {
     reasons.push(`体量 ${e.chars} 字符 ≥ review_min_chars(${config.reviewMinChars})——先看清再动`)

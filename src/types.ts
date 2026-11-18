@@ -528,6 +528,18 @@ export interface AuditConfig {
    * 决定（缺省 6000）——审计必须用**它自己的尺子**量它，不能借用通用体量门槛。
    */
   summaryMaxChars: number
+  /**
+   * 分层概要预算（v0.24.2 · lh-ac92de7e）。
+   *
+   * 上面那把尺子是**单层**的，而压缩是**链式**的：周概要由 7 份日概要压来，月概要由 4 份周概要压来。
+   * 让周/月共用日概要的 6000 字上限，等于给它们一个**结构上不可能达到**的门槛——
+   * 实测（2026-11-18）：周概要 16,945 字 = 2.8 倍、月概要 39,842 字 = 6.6 倍，
+   * 于是它们**每次都**落 REVIEW，把「交人裁决」的位置占满，而重压也救不回来（压完仍超，见记忆 2524eda5）。
+   *
+   * 缺省是**先验**（每层比下一层大一档），不是拟合值；要改就按实测改。
+   * 缺省的缺省：某层没配 ⇒ 回退 `summaryMaxChars`（零回归）。
+   */
+  summaryMaxCharsByLevel?: Partial<Record<'day' | 'week' | 'month' | 'year', number>>
   /** 侧车用量轨迹（只追加、吞错、按体积轮转；绝不改条目） */
   accessTrace: { enabled: boolean; maxBytes: number }
   /** 提案日志（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join） */

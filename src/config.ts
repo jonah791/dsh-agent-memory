@@ -54,6 +54,7 @@ const AUDIT_KEYS: ReadonlySet<string> = new Set([
   'review_min_chars',
   'demote_min_chars',
   'summary_max_chars',
+  'summary_max_chars_by_level',
   'access_trace',
   'proposal_log',
   'compress_trace',
@@ -450,10 +451,35 @@ function auditOrDefault(value: unknown): AuditConfig {
     reviewMinChars: nonNegativeIntOrDefault(value.review_min_chars, DEFAULT_AUDIT_CONFIG.reviewMinChars, 'audit.review_min_chars'),
     demoteMinChars: nonNegativeIntOrDefault(value.demote_min_chars, DEFAULT_AUDIT_CONFIG.demoteMinChars, 'audit.demote_min_chars'),
     summaryMaxChars: nonNegativeIntOrDefault(value.summary_max_chars, DEFAULT_AUDIT_CONFIG.summaryMaxChars, 'audit.summary_max_chars'),
+    summaryMaxCharsByLevel: summaryMaxCharsByLevelOrDefault(value.summary_max_chars_by_level),
     accessTrace: accessTraceOrDefault(value.access_trace),
     proposalLog: proposalLogOrDefault(value.proposal_log),
     compressTrace: compressTraceOrDefault(value.compress_trace),
   })
+}
+
+/**
+ * audit.summary_max_chars_by_level（v0.24.2 · lh-ac92de7e）：分层概要预算。
+ *
+ * 只认 day/week/month/year 四个层名；**未知层名报错**而不是静默忽略——
+ * 写错层名（如 `weekly`）会让配置看起来生效、实际没生效，那是最坏的一种安静。
+ */
+function summaryMaxCharsByLevelOrDefault(
+  value: unknown,
+): Partial<Record<'day' | 'week' | 'month' | 'year', number>> {
+  const base = DEFAULT_AUDIT_CONFIG.summaryMaxCharsByLevel ?? {}
+  if (value === undefined || value === null) return { ...base }
+  if (!isPlainObject(value)) {
+    throw new MemoryConfigError('memory.yml: audit.summary_max_chars_by_level 必须是映射（day/week/month/year）')
+  }
+  assertNoUnknownKeys(value, new Set(['day', 'week', 'month', 'year']), 'memory.yml.audit.summary_max_chars_by_level')
+  const out: Partial<Record<'day' | 'week' | 'month' | 'year', number>> = { ...base }
+  for (const level of ['day', 'week', 'month', 'year'] as const) {
+    const raw = value[level]
+    if (raw === undefined) continue
+    out[level] = nonNegativeIntOrDefault(raw, base[level] ?? DEFAULT_AUDIT_CONFIG.summaryMaxChars, `audit.summary_max_chars_by_level.${level}`)
+  }
+  return out
 }
 
 /** audit.compress_trace：压缩流水线轨迹开关与轮转阈值（v0.8 证据层） */
