@@ -41,7 +41,8 @@
  *
  * ## 已知边界（不得读成「已有知识图谱」）
  *
- * - 节点只开放 `entry`（实体 / 主题是 §4.3 / §4.2 的活，届时扩 `RelationNodeKind`）。
+ * - 节点只开放 `entry`（实体档 §4.3 已有 ID 与解析器，但「实体节点如何过角色准入」
+ *   尚未定下来 ⇒ 开放的判据不满足，见 `types.ts::RelationNodeKind` 注释）。
  * - 不做图数据库、不做查询语言（主人 2026-10-13 定调排除）。
  * - 关系**不参与检索排序**（§8.3 的「实体匹配 / 主题关联度」仍在缺项清单里）——
  *   本层只提供「沿边行走」的读路径，不改变 `recall` 的排序。
@@ -161,7 +162,7 @@ export const RELATION_TYPE_SPECS: Record<RelationType, RelationTypeSpec> = {
   },
 }
 
-/** 节点类别（v0.28.0 只开放 `entry`；实体 / 主题待 §4.3 / §4.2） */
+/** 节点类别（v0.28.0 只开放 `entry`；实体档的开放判据见 `types.ts::RelationNodeKind`） */
 export const RELATION_NODE_KINDS: readonly RelationNodeKind[] = ['entry']
 
 /** 节点类别中文标签（渲染与报错用） */

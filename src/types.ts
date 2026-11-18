@@ -67,8 +67,10 @@ export type RelationType =
 /**
  * 关系节点类别（v0.28.0）：本版只开放 `entry`。
  *
- * 实体（§4.3 规范控制）与主题（§4.2 主题词表）还没有 ID 空间与解析器 ⇒ 先不开放，
- * 否则写进去的边永远解析不出标题，等于存了一堆悬空指针。届时扩这个联合即可。
+ * 实体（§4.3 规范控制）已有 ID 空间与解析器，但开放的判据不止「解析得出标题」：
+ * `memory_relations` 的读路径要按**准入视野**过滤两端，而实体档不吃角色可见性
+ * ⇒ 在把「实体节点如何过准入」定下来之前不开放，否则写进去的边读不回来（半件能力比没有更坏）。
+ * 本期实体与条目的关联走「按名字解析 + 文本反查」（`memory_entities`），不落边。
  */
 export type RelationNodeKind = 'entry'
 
@@ -168,6 +170,58 @@ export interface ConceptRevision {
   /** 动作：create / update / deprecate */
   action: string
   /** 变更内容的人类可读说明（如「prefLabel：旧 → 新」「altLabels +记忆库」） */
+  detail: string
+  /** 为什么改（可选；不填就是「没记原因」，不假装有） */
+  reason?: string
+}
+
+/**
+ * 实体权威档（v0.30.0 · 方案 §4.3 规范控制）——**现实对象**的档案：人 / 项目 / 机构 / 作品 / 地点。
+ *
+ * 与 `Concept`（主题）的分工：概念是「这个词指什么」，实体是「这个东西叫什么」。
+ * 结构上最硬的差异是**别名可多指**：两个不同的人可以同名（方案 §4.3 明确不许因同名就合并）
+ * ⇒ 本表**没有**唯一标签空间，`resolveName` 返回候选列表，撞名时要求 `disambiguation`。
+ * 契约正文在 `src/entities.ts` 文件头与 `docs/semantic.md §5.23`。
+ *
+ * 平级标量 + 数组；`revisions` 是唯一的嵌套（与条目 / 概念同形，仅存储侧用）。
+ */
+export interface Entity {
+  /** 实体 ID：`ENTITY-0001` 形态（每 scope 递增；方案 §4.3 的示例形态，人能口头引用） */
+  id: string
+  /** 存储分区（与条目 / 概念同源：global 或 workspaceId） */
+  scope: string
+  /** 规范名（**首选**称呼：档案对外用它） */
+  canonicalName: string
+  /** 别名（同一对象的其他称呼：简称 / 英文名 / 历史名称） */
+  aliases?: string[]
+  /** 实体类型（人 / 项目 / 机构 / 作品 / 地点……）：必填、不枚举——枚举会挡掉新类型，而消歧第一依据正是它 */
+  entityType: string
+  /** 首次出现（自由文本：会话 id / 记忆 id / 一句描述）——与 `createdAt`（建档时刻）不是一回事 */
+  firstSeen?: string
+  /** 相关主题：主题词表里的概念 id 列表（同 scope） */
+  topics?: string[]
+  /** 关联实体：实体 id 列表（同 scope；存续档才可被指向） */
+  relatedEntities?: string[]
+  /** 消歧说明：与别的实体同名时凭什么区分（撞名时必填） */
+  disambiguation?: string
+  /** 合并 / 停用标记；**无默认值**（未给 = 适用中） */
+  status?: 'merged' | 'deprecated'
+  /** 已合并到哪个存续档（仅 `status: 'merged'`；只保留一层，不链式） */
+  mergedInto?: string
+  /** 停用理由（仅 `status: 'deprecated'`） */
+  deprecatedNote?: string
+  createdAt: string
+  updatedAt: string
+  /** 变更记录：最近 MAX_ENTITY_REVISIONS 条（创建 / 修改 / 合并 / 停用），带原因 */
+  revisions?: EntityRevision[]
+}
+
+/** 实体的变更记录（与概念 / 条目的 `revisions` 同形） */
+export interface EntityRevision {
+  at: string
+  /** 动作：create / update / merge / deprecate */
+  action: string
+  /** 变更内容的人类可读说明 */
   detail: string
   /** 为什么改（可选；不填就是「没记原因」，不假装有） */
   reason?: string

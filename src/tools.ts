@@ -60,6 +60,13 @@ import {
   type ConceptDraft,
   type ConceptStore,
 } from './thesaurus.ts'
+import {
+  isEntityActive,
+  namesOf,
+  normalizeEntityName,
+  type EntityDraft,
+  type EntityStore,
+} from './entities.ts'
 
 /** 概要重压的外部结果（工具层回报用；与 timeline.RecompressResult 解耦，界面只认这几个读数） */
 export interface RecompressOutcome {
@@ -168,6 +175,13 @@ export interface MemoryToolDeps {
    * 未接线时概念工具与 `memory_stats.concepts` **响亮报错/明确标注**，不假装成功。
    */
   concepts?: ConceptStore
+  /**
+   * 实体权威档（v0.30.0 · 方案 §4.3）：实体档案存储。
+   *
+   * 与 `relations` / `concepts` 同形的可选依赖（既有测试文件构造 deps 时不带它）；
+   * 未接线时两个实体工具与 `memory_stats.entities` **响亮报错 / 明确标注**，不假装成功。
+   */
+  entities?: EntityStore
 }
 
 /** 缺省配置加载器：读取 .dsh/memory.yml，缺失走默认，非法 fail loud */
@@ -1547,6 +1561,23 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
               withBroader: { type: 'integer', required: true, description: '有上位概念的概念数（层级从这长出来）' },
             },
           },
+          entities: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            description: '实体权威档（v0.30.0 · 方案 §4.3）：规范控制的读数。⚠ 未接线时 `wired=false`（**「没接线」与「库里没有实体」必须可区分**）。',
+            properties: {
+              wired: { type: 'boolean', required: true, description: 'false = 实体档未接线 ⇒ 下面的 0 不代表「没有实体」' },
+              total: { type: 'integer', required: true },
+              active: { type: 'integer', required: true, description: '适用中的实体数（已合并 / 已停用的不算）' },
+              merged: { type: 'integer', required: true, description: '已合并的旧档（记录保留，指向存续档）' },
+              deprecated: { type: 'integer', required: true, description: '已停用的实体（记录保留，旧记忆里提到的仍可解释）' },
+              withAliases: { type: 'integer', required: true, description: '带别名的实体数（没有别名的档案只能按规范名认出）' },
+              withTopics: { type: 'integer', required: true, description: '标了相关主题的实体数' },
+              withRelatedEntities: { type: 'integer', required: true, description: '有关联实体的实体数（关系网从这长出来）' },
+              withDisambiguation: { type: 'integer', required: true, description: '写了消歧说明的实体数——撞名并存时它必须 > 0，否则消歧是空的' },
+            },
+          },
         },
       },
       render: (args, value) => [{
@@ -1571,7 +1602,11 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           // 主题词表（v0.29.0）：同 relations——wired=false 必须看得见
           + `\n主题词表：${value.concepts.wired
             ? `${value.concepts.total} 个概念（适用 ${value.concepts.active} / 停用 ${value.concepts.deprecated}；带同义词 ${value.concepts.withAltLabels} / 带定义 ${value.concepts.withDefinition} / 有上位 ${value.concepts.withBroader}）`
-            : '未接线（concepts 表未装配）——此处的 0 不代表词表为空'}`,
+            : '未接线（concepts 表未装配）——此处的 0 不代表词表为空'}`
+          // 实体权威档（v0.30.0）：同 relations / concepts——wired=false 必须看得见
+          + `\n实体权威档：${value.entities.wired
+            ? `${value.entities.total} 个实体（适用 ${value.entities.active} / 已合并 ${value.entities.merged} / 停用 ${value.entities.deprecated}；带别名 ${value.entities.withAliases} / 带主题 ${value.entities.withTopics} / 有关联实体 ${value.entities.withRelatedEntities} / 有消歧说明 ${value.entities.withDisambiguation}）`
+            : '未接线（entities 表未装配）——此处的 0 不代表库里没有实体'}`,
       }],
     },
     async execute(args, exec) {
@@ -1651,6 +1686,24 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
             withAltLabels: stats.withAltLabels,
             withDefinition: stats.withDefinition,
             withBroader: stats.withBroader,
+          }
+        })(),
+        // 实体权威档（v0.30.0）：同 concepts——`wired=false` 与「没有实体」必须可区分
+        entities: (() => {
+          if (deps.entities === undefined) {
+            return { wired: false, total: 0, active: 0, merged: 0, deprecated: 0, withAliases: 0, withTopics: 0, withRelatedEntities: 0, withDisambiguation: 0 }
+          }
+          const stats = deps.entities.stats()
+          return {
+            wired: true,
+            total: stats.total,
+            active: stats.active,
+            merged: stats.merged,
+            deprecated: stats.deprecated,
+            withAliases: stats.withAliases,
+            withTopics: stats.withTopics,
+            withRelatedEntities: stats.withRelatedEntities,
+            withDisambiguation: stats.withDisambiguation,
           }
         })(),
       }
@@ -2182,6 +2235,25 @@ function buildRelations(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
+/** 概念内容签名：同 `entitySignature`——**不能用 `updatedAt` 判「改没改」**（同一毫秒内会相等） */
+function conceptSignature(concept: {
+  prefLabel: string
+  altLabels?: string[]
+  definition?: string
+  scopeNote?: string
+  broader?: string[]
+  related?: string[]
+}): string {
+  return JSON.stringify([
+    concept.prefLabel,
+    concept.altLabels ?? [],
+    concept.definition ?? '',
+    concept.scopeNote ?? '',
+    concept.broader ?? [],
+    concept.related ?? [],
+  ])
+}
+
 /** 词表取用：未接线时**响亮报错**（绝不静默降级成「没有这个概念」） */
 function conceptStoreOf(deps: MemoryToolDeps): ConceptStore {
   if (deps.concepts === undefined) {
@@ -2325,7 +2397,7 @@ function buildConcept(deps: MemoryToolDeps): ToolDefinition {
         const before = concepts.find(id)
         if (before === undefined) throw new Error(`memory_concept: 未找到概念 id="${id}"`)
         const updated = await concepts.update(id, patch, reason)
-        const changed = updated.updatedAt !== before.updatedAt
+        const changed = conceptSignature(updated) !== conceptSignature(before)
         return {
           action: changed ? 'updated' : 'unchanged',
           id: updated.id,
@@ -2479,6 +2551,419 @@ function buildThesaurus(deps: MemoryToolDeps): ToolDefinition {
         .sort((a, b) => a.prefLabel.localeCompare(b.prefLabel))
         .slice(0, limit)
       return { ok: true, mode: 'list', total: out.length, concepts: out.map((concept) => view(concept, false)) }
+    },
+  })
+}
+
+/**
+ * 实体内容签名：判定一次 update **是否真的改了东西**。
+ *
+ * ⚠ **不能用 `updatedAt` 比**：同一毫秒内 create + update 得到相同时间戳（2026-11-19 单测 E8 实测撞到）
+ * ⇒ 真改了却被报成「无变化」，而那正是要回报给调用方的那一格。比内容本身才可靠。
+ */
+function entitySignature(entity: {
+  canonicalName: string
+  entityType: string
+  aliases?: string[]
+  firstSeen?: string
+  topics?: string[]
+  relatedEntities?: string[]
+  disambiguation?: string
+}): string {
+  return JSON.stringify([
+    entity.canonicalName,
+    entity.entityType,
+    entity.aliases ?? [],
+    entity.firstSeen ?? '',
+    entity.topics ?? [],
+    entity.relatedEntities ?? [],
+    entity.disambiguation ?? '',
+  ])
+}
+
+/** 实体档取用：未接线时**响亮报错**（绝不静默降级成「库里没有这个实体」） */
+function entityStoreOf(deps: MemoryToolDeps): EntityStore {
+  if (deps.entities === undefined) {
+    throw new Error(
+      '实体权威档未接线（deps.entities 缺失）——实体档（v0.30.0 · 方案 §4.3）需要 index.ts 装配 '
+      + '`new EntityStore(domain.table("entities"))`。这是装配缺陷，不是「实体库里没有它」。',
+    )
+  }
+  return deps.entities
+}
+
+/** 实体档的标识符数组参数（fail-loud：非字符串数组不猜） */
+function parseStringArrayArg(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new Error(`${field}: 期望字符串数组`)
+  }
+  return value as string[]
+}
+
+/**
+ * `topics` 的存在性校验（实体档不持有概念表 ⇒ 这一跳只能由工具层做）。
+ *
+ * 为什么必须校验：悬空的 topic id 会让「相关主题」永远渲染成一串裸 uuid，
+ * 而那时的我已不知道它是「没建」还是「建了但删了」。
+ */
+function assertTopicsExist(deps: MemoryToolDeps, topics: string[] | undefined, scope: string): void {
+  if (topics === undefined || topics.length === 0) return
+  if (deps.concepts === undefined) {
+    throw new Error('memory_entity.topics: 概念表未接线，无法校验 topics 指向的概念——宁可不写，也不写悬空引用')
+  }
+  for (const topicId of topics) {
+    const concept = deps.concepts.find(topicId)
+    if (concept === undefined) {
+      throw new Error(`memory_entity.topics: 概念 id="${topicId}" 不存在（先用 memory_concept 建立，或 memory_thesaurus 查 id）`)
+    }
+    if (concept.scope !== scope) {
+      throw new Error(`memory_entity.topics: 概念 "${topicId}" 在 ${concept.scope}，实体在 ${scope}——引用不能跨 scope`)
+    }
+  }
+}
+
+/** 构建 memory_entity 工具（v0.30.0 · 方案 §4.3）：维护实体权威档 */
+function buildEntity(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_entity',
+    deferLoading: true,
+    description: '维护**实体权威档**（v0.30.0 · 方案 §4.3 规范控制）：新建 / 修改 / 合并 / 停用。'
+      + '一个实体 = 唯一 ID（`ENTITY-0001`）+ 规范名 + 别名 + 实体类型 + 首次出现 + 相关主题（概念 id）+ 关联实体 + 消歧说明 + 状态。'
+      + '**与词表的分工**：概念是主题（一个词只指一个概念），实体是**现实对象**（人 / 项目 / 机构 / 作品 / 地点）——同一个对象的多种称呼收在一处（规范名 + 别名）。'
+      + '**别名可多指**：两个不同实体可以同名（方案 §4.3 明确不许因同名就合并）⇒ 撞名时必须给 `disambiguation` 写清凭什么区分，否则整笔拒绝。'
+      + '**合并必须显式**：`mergeInto` 把旧档的全部称呼并入存续档，旧档标 merged 指向存续档（不删除；只保留一层，不链式）。',
+    parameters: {
+      id: { type: 'string', description: '实体 id（`ENTITY-0001`）：**给了就是修改**（或 mergeInto / deprecate 的对象）；不给 = 新建。' },
+      canonicalName: { type: 'string', description: '规范名（新建必填）：档案对外用的首选称呼。' },
+      entityType: { type: 'string', description: '实体类型（新建必填、不枚举）：人 / 项目 / 机构 / 作品 / 地点……它是消歧的第一依据。' },
+      aliases: { type: 'array', items: { type: 'string' }, description: '别名（整体替换；空数组 = 清空）：简称 / 英文名 / 历史名称。' },
+      firstSeen: { type: 'string', description: '首次出现（自由文本：会话 id / 记忆 id / 一句描述）——与建档时刻不是一回事。' },
+      topics: { type: 'array', items: { type: 'string' }, description: '相关主题：主题词表里的**概念 id** 列表（整体替换）。' },
+      relatedEntities: { type: 'array', items: { type: 'string' }, description: '关联实体：实体 id 列表（整体替换）。只能指向同 scope 的**存续档**。' },
+      disambiguation: { type: 'string', description: '消歧说明：与别的实体同名时凭什么区分（撞名时必填）。' },
+      mergeInto: { type: 'string', description: '合并：把 `id` 这个旧档并入本字段指定的存续档 id。**显式动作**——不做同名自动合并。' },
+      deprecate: { type: 'boolean', description: '`true` = 停用该实体（需同时给 `id` 与 `reason`）。停用不删除：旧记忆里提到的它仍能解释。' },
+      reason: { type: 'string', description: '为什么改 / 为什么合并 / 为什么停用（可选，但记下来才有复核价值）。' },
+      scope: { type: 'string', description: '作用域（缺省当前 workspace；实体与条目同一套存储分区）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', required: true, description: 'created / updated / merged / deprecated / unchanged' },
+          id: { type: 'string', required: true },
+          canonicalName: { type: 'string', required: true },
+          entityType: { type: 'string', required: true },
+          scope: { type: 'string', required: true },
+          status: { type: 'string', description: 'merged / deprecated 时出现（未给 = 适用中）' },
+          aliases: { type: 'array', items: { type: 'string' } },
+          mergedInto: { type: 'string', description: 'merged 态指向的存续档 id' },
+          absorbedId: { type: 'string', description: '合并动作里被并入的旧档 id' },
+          revisionCount: { type: 'integer', required: true, description: '该实体保留的变更记录条数' },
+        },
+      },
+      render: (_a, v) => [{
+        type: 'text',
+        text: v.action === 'created'
+          ? `已建实体档「${v.canonicalName}」(id=${v.id}，类型 ${v.entityType})${v.aliases !== undefined && v.aliases.length > 0 ? `，别名：${v.aliases.join(' / ')}` : ''}。`
+          : v.action === 'merged'
+            ? `已合并：${v.absorbedId ?? '（旧档）'} → 「${v.canonicalName}」(id=${v.id})——旧档保留并指向存续档，称呼已并入。`
+            : v.action === 'deprecated'
+              ? `已停用实体档「${v.canonicalName}」(id=${v.id})——记录保留，旧记忆里提到的它仍可解释。`
+              : v.action === 'updated'
+                ? `已更新实体档「${v.canonicalName}」(id=${v.id})，变更记录 ${v.revisionCount} 条。`
+                : `实体档「${v.canonicalName}」(id=${v.id}) 无变化（给的字段与现值相同）。`,
+      }],
+    },
+    async execute(args, exec) {
+      const entities = entityStoreOf(deps)
+      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { writeScope } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      const reason = typeof args.reason === 'string' ? args.reason : undefined
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      const mergeInto = typeof args.mergeInto === 'string' ? args.mergeInto.trim() : ''
+
+      if (mergeInto.length > 0) {
+        if (id.length === 0) throw new Error('memory_entity: mergeInto 需要同时给 id（被并入的旧档）与 mergeInto（存续档 id）')
+        const result = await entities.mergeInto(id, mergeInto, reason)
+        const survivor = result.survivor
+        return {
+          action: result.changed ? 'merged' : 'unchanged',
+          id: survivor.id,
+          canonicalName: survivor.canonicalName,
+          entityType: survivor.entityType,
+          scope: survivor.scope,
+          ...(survivor.status !== undefined ? { status: survivor.status } : {}),
+          ...(survivor.aliases !== undefined ? { aliases: survivor.aliases } : {}),
+          ...(survivor.mergedInto !== undefined ? { mergedInto: survivor.mergedInto } : {}),
+          ...(result.changed ? { absorbedId: result.absorbed.id } : {}),
+          revisionCount: (survivor.revisions ?? []).length,
+        }
+      }
+
+      if (args.deprecate === true) {
+        if (id.length === 0) throw new Error('memory_entity: deprecate 需要 id')
+        if (reason === undefined || reason.trim().length === 0) throw new Error('memory_entity: deprecate 需要 reason（为什么不再用）')
+        const result = await entities.deprecate(id, reason)
+        return {
+          action: result.changed ? 'deprecated' : 'unchanged',
+          id: result.entity.id,
+          canonicalName: result.entity.canonicalName,
+          entityType: result.entity.entityType,
+          scope: result.entity.scope,
+          status: 'deprecated',
+          revisionCount: (result.entity.revisions ?? []).length,
+        }
+      }
+
+      if (id.length > 0) {
+        const before = entities.find(id)
+        if (before === undefined) throw new Error(`memory_entity: 未找到实体 id="${id}"`)
+        const topics = parseStringArrayArg(args.topics, 'memory_entity.topics')
+        const relatedEntities = parseStringArrayArg(args.relatedEntities, 'memory_entity.relatedEntities')
+        assertTopicsExist(deps, topics, before.scope)
+        const patch = {
+          ...(typeof args.canonicalName === 'string' ? { canonicalName: args.canonicalName } : {}),
+          ...(typeof args.entityType === 'string' ? { entityType: args.entityType } : {}),
+          ...(Array.isArray(args.aliases) ? { aliases: args.aliases as string[] } : {}),
+          ...(typeof args.firstSeen === 'string' ? { firstSeen: args.firstSeen } : {}),
+          ...(topics !== undefined ? { topics } : {}),
+          ...(relatedEntities !== undefined ? { relatedEntities } : {}),
+          ...(typeof args.disambiguation === 'string' ? { disambiguation: args.disambiguation } : {}),
+        }
+        const updated = await entities.update(id, patch, reason)
+        const changed = entitySignature(updated) !== entitySignature(before)
+        return {
+          action: changed ? 'updated' : 'unchanged',
+          id: updated.id,
+          canonicalName: updated.canonicalName,
+          entityType: updated.entityType,
+          scope: updated.scope,
+          ...(updated.status !== undefined ? { status: updated.status } : {}),
+          ...(updated.aliases !== undefined ? { aliases: updated.aliases } : {}),
+          revisionCount: (updated.revisions ?? []).length,
+        }
+      }
+
+      const canonicalName = typeof args.canonicalName === 'string' ? args.canonicalName : ''
+      if (canonicalName.trim().length === 0) throw new Error('memory_entity: 新建需要 canonicalName（规范名）；修改请给 id')
+      const entityType = typeof args.entityType === 'string' ? args.entityType : ''
+      const topics = parseStringArrayArg(args.topics, 'memory_entity.topics')
+      const relatedEntities = parseStringArrayArg(args.relatedEntities, 'memory_entity.relatedEntities')
+      assertTopicsExist(deps, topics, writeScope)
+      const draft: EntityDraft = {
+        scope: writeScope,
+        canonicalName,
+        entityType,
+        ...(Array.isArray(args.aliases) ? { aliases: args.aliases as string[] } : {}),
+        ...(typeof args.firstSeen === 'string' ? { firstSeen: args.firstSeen } : {}),
+        ...(topics !== undefined ? { topics } : {}),
+        ...(relatedEntities !== undefined ? { relatedEntities } : {}),
+        ...(typeof args.disambiguation === 'string' ? { disambiguation: args.disambiguation } : {}),
+      }
+      const created = await entities.create(draft)
+      return {
+        action: 'created',
+        id: created.id,
+        canonicalName: created.canonicalName,
+        entityType: created.entityType,
+        scope: created.scope,
+        ...(created.aliases !== undefined ? { aliases: created.aliases } : {}),
+        revisionCount: (created.revisions ?? []).length,
+      }
+    },
+  })
+}
+
+/** `memory_entities` 的实体投影形状（与 output schema 逐键对应；schema 是契约面） */
+interface EntityView {
+  id: string
+  canonicalName: string
+  entityType: string
+  scope: string
+  aliases?: string[]
+  firstSeen?: string
+  disambiguation?: string
+  status?: string
+  mergedInto?: string
+  topics?: string[]
+  relatedEntities?: string[]
+  revisions?: number
+  mentions?: Array<{ id: string; title: string; kind: string }>
+}
+
+/** 构建 memory_entities 工具（v0.30.0 · 方案 §4.3）：按称呼解析 / 看详情 / 列表 */
+function buildEntities(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_entities',
+    deferLoading: true,
+    description: '查**实体权威档**（v0.30.0 · 方案 §4.3）：按称呼解析（规范名或别名都认）→ 实体档 + 提到它的条目；按 id 看详情；或列出实体。'
+      + '**多命中不猜**：同名不同实体会全部返回并标 `ambiguous=true`——判断型字段禁默认值，程序不替你挑。'
+      + '「提到它的条目」按名称在标题 / 正文 / 标签 / 别名里做**包含匹配**（本期不落边：`entry → entity` 的类型化边要等「实体节点如何过角色准入」定下来）。'
+      + '与 `memory_thesaurus` 的分工：那个查**主题**（概念），这个查**现实对象**（人 / 项目 / 机构）。',
+    parameters: {
+      name: { type: 'string', description: '任意写法（规范名 / 别名），归一后**精确**匹配；多命中会全部返回。' },
+      id: { type: 'string', description: '实体 id（`ENTITY-0001`）：给了就看详情（含变更记录条数与被引用情况）。' },
+      entityType: { type: 'string', description: '只看该实体类型（列表模式过滤）。' },
+      includeDeprecated: { type: 'boolean', description: '是否包含已停用的实体（缺省否）。' },
+      includeMerged: { type: 'boolean', description: '是否包含已合并的旧档（缺省否；打开后它们指向存续档）。' },
+      withEntries: { type: 'boolean', description: '是否反查提到该实体的条目（缺省**是**；按名称包含匹配，最多 5 条）。' },
+      limit: { type: 'integer', description: '实体数上限（缺省 20）。' },
+      scope: { type: 'string', description: '作用域覆盖（global 或 workspaceId）；缺省当前 workspace + global。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          mode: { type: 'string', required: true, description: 'lookup / detail / list' },
+          total: { type: 'integer', required: true },
+          ambiguous: { type: 'boolean', description: '有多个适用中的候选（同名不同实体）——必须靠 disambiguation / entityType 判断' },
+          entities: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                canonicalName: { type: 'string', required: true },
+                entityType: { type: 'string', required: true },
+                scope: { type: 'string', required: true },
+                aliases: { type: 'array', items: { type: 'string' } },
+                firstSeen: { type: 'string' },
+                disambiguation: { type: 'string' },
+                status: { type: 'string' },
+                mergedInto: { type: 'string' },
+                topics: { type: 'array', items: { type: 'string' }, description: '相关主题的**概念标题**（不是 id，便于直接读）' },
+                relatedEntities: { type: 'array', items: { type: 'string' }, description: '关联实体的**规范名**' },
+                revisions: { type: 'integer', description: '变更记录条数（详情模式下出现）' },
+                mentions: {
+                  type: 'array',
+                  description: '提到它的条目（按名称包含匹配；不是类型化边）',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', required: true },
+                      title: { type: 'string', required: true },
+                      kind: { type: 'string', required: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      render: (_a, v) => {
+        const list = v.entities ?? []
+        if (list.length === 0) {
+          return [{ type: 'text', text: '实体档：没有匹配的实体。\n用 memory_entity 建档（canonicalName + entityType + aliases）；`aliases` 条目字段是**检索别名**，不是实体档。' }]
+        }
+        const lines: string[] = []
+        if (v.ambiguous === true) {
+          lines.push(`⚠ 有 ${list.length} 个适用中的候选（同名不同实体）——**别默认取第一个**：看 \`disambiguation\` / \`entityType\` / 提到的条目再判断。`)
+        }
+        for (const entity of list) {
+          const parts: string[] = [`- 「${entity.canonicalName}」(id=${entity.id}；${entity.entityType})`]
+          if (entity.aliases !== undefined && entity.aliases.length > 0) parts.push(`别名：${entity.aliases.join(' / ')}`)
+          if (entity.status !== undefined) parts.push(entity.status === 'merged' ? `**已合并 → ${entity.mergedInto ?? '（缺存续档）'}**` : '**已停用**')
+          if (entity.disambiguation !== undefined) parts.push(`消歧：${entity.disambiguation}`)
+          if (entity.firstSeen !== undefined) parts.push(`首次出现：${entity.firstSeen}`)
+          if (entity.topics !== undefined && entity.topics.length > 0) parts.push(`相关主题：${entity.topics.join(' / ')}`)
+          if (entity.relatedEntities !== undefined && entity.relatedEntities.length > 0) parts.push(`关联实体：${entity.relatedEntities.join(' / ')}`)
+          lines.push(parts.join('；'))
+          const mentions = entity.mentions ?? []
+          if (mentions.length > 0) {
+            lines.push(`    · 提到它的条目 ${mentions.length} 条：${mentions.map((mention) => `${mention.title}(id=${mention.id})`).join('；')}`)
+          }
+        }
+        return [{ type: 'text', text: `实体档（${v.mode}）：${list.length} 条\n` + lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const entities = entityStoreOf(deps)
+      const { config, cwd, view } = await resolveRuntime(exec, deps)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      const includeDeprecated = args.includeDeprecated === true
+      const includeMerged = args.includeMerged === true
+      const withEntries = args.withEntries !== false
+      const limit = typeof args.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 20
+      const typeFilter = typeof args.entityType === 'string' && args.entityType.trim() !== '' ? args.entityType.trim() : undefined
+
+      const topicTitleOf = (id: string): string => deps.concepts?.find(id)?.prefLabel ?? id
+      const entityNameOf = (id: string): string => entities.find(id)?.canonicalName ?? id
+      // 提到它的条目：只在**可见集合**里找（视野外的条目不得因为「提到了某个实体」而泄露存在性）
+      const readable = withEntries
+        ? gatherReadable(deps, { readScopes, includeArchive: false, view, explicitScope: args.scope }).entries
+        : []
+      const mentionsOf = (entity: ReturnType<EntityStore['all']>[number]): Array<{ id: string; title: string; kind: string }> => {
+        if (!withEntries) return []
+        const keys = namesOf(entity).map(normalizeEntityName).filter((key) => key.length >= 2)
+        if (keys.length === 0) return []
+        const hits: Array<{ id: string; title: string; kind: string }> = []
+        for (const entry of readable) {
+          const hay = (entry.title + '\n' + entry.body + '\n' + entry.tags.join('\n') + '\n' + (entry.aliases ?? []).join('\n')).toLowerCase()
+          if (!keys.some((key) => hay.includes(key))) continue
+          hits.push({ id: entry.id, title: entry.title, kind: entry.kind })
+          if (hits.length >= 5) break
+        }
+        return hits
+      }
+      const viewOf = (entity: ReturnType<EntityStore['all']>[number], detail: boolean): EntityView => ({
+        id: entity.id,
+        canonicalName: entity.canonicalName,
+        entityType: entity.entityType,
+        scope: entity.scope,
+        ...(entity.aliases !== undefined ? { aliases: entity.aliases } : {}),
+        ...(entity.firstSeen !== undefined ? { firstSeen: entity.firstSeen } : {}),
+        ...(entity.disambiguation !== undefined ? { disambiguation: entity.disambiguation } : {}),
+        ...(entity.status !== undefined ? { status: entity.status } : {}),
+        ...(entity.mergedInto !== undefined ? { mergedInto: entity.mergedInto } : {}),
+        ...((entity.topics ?? []).length > 0 ? { topics: (entity.topics ?? []).map(topicTitleOf) } : {}),
+        ...((entity.relatedEntities ?? []).length > 0 ? { relatedEntities: (entity.relatedEntities ?? []).map(entityNameOf) } : {}),
+        ...(detail ? { revisions: (entity.revisions ?? []).length } : {}),
+        ...(withEntries ? { mentions: mentionsOf(entity) } : {}),
+      })
+
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      if (id.length > 0) {
+        const entity = entities.find(id)
+        if (entity === undefined) return { ok: false, mode: 'detail', total: 0, entities: [] }
+        return { ok: true, mode: 'detail', total: 1, ambiguous: false, entities: [viewOf(entity, true)] }
+      }
+
+      const name = typeof args.name === 'string' ? args.name.trim() : ''
+      if (name.length > 0) {
+        const seen = new Map<string, ReturnType<EntityStore['all']>[number]>()
+        for (const scope of readScopes) {
+          const resolution = entities.resolveName(scope, name)
+          for (const entity of resolution.active) seen.set(entity.id, entity)
+          // 已合并 / 已停用只在该开关打开时出现——它们的默认缺席不是「查不到」
+          if (includeMerged) for (const hit of resolution.merged) seen.set(hit.entity.id, hit.entity)
+          if (includeDeprecated) for (const entity of resolution.deprecated) seen.set(entity.id, entity)
+        }
+        const hits = [...seen.values()].filter((entity) => typeFilter === undefined || entity.entityType === typeFilter)
+        const activeHits = hits.filter((entity) => isEntityActive(entity))
+        return {
+          ok: true,
+          mode: 'lookup',
+          total: hits.length,
+          ambiguous: activeHits.length > 1,
+          entities: hits.slice(0, limit).map((entity) => viewOf(entity, false)),
+        }
+      }
+
+      const out = readScopes
+        .flatMap((scope) => entities.byScope(scope))
+        .filter((entity) => (includeMerged || entity.status !== 'merged') && (includeDeprecated || entity.status !== 'deprecated'))
+        .filter((entity) => typeFilter === undefined || entity.entityType === typeFilter)
+        .sort((a, b) => a.canonicalName.localeCompare(b.canonicalName))
+        .slice(0, limit)
+      return { ok: true, mode: 'list', total: out.length, ambiguous: false, entities: out.map((entity) => viewOf(entity, false)) }
     },
   })
 }
@@ -3236,6 +3721,8 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildRelations(deps),
     buildConcept(deps),
     buildThesaurus(deps),
+    buildEntity(deps),
+    buildEntities(deps),
     buildUpdate(deps),
     buildSupersede(deps),
     buildForget(deps),

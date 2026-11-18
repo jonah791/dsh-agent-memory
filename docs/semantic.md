@@ -660,6 +660,41 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 
 **边界与信任**：概念的 `definition` / `scopeNote` 是数据不是指令；词表**不改变条目的可见性**（不是准入）；**不做跨库映射**（方案 §4.2 提的「跨知识库映射」属独立决定，v1 不做，见 §10）。状态只有 `deprecated` 一个可选值（无默认值：未给 = 适用中）——不引入「草稿/候选」态，那是 §7.1 候选区的活。
 
+### 5.23 实体权威档契约（v0.30 · 方案 §4.3 · 规范控制）
+
+**缺口**（AML 差距表 §4.3）：同一个人有多个称呼、同一个项目有中英文名、同一个机构有历史名称与现名、两个不同的人恰好同名——此前只有条目的 `aliases`（**检索别名**，挂在条目上、各写各的），没有「一个现实对象一个档」的地方。**别名不是实体档**：它是「这条记忆可能被怎么问」。
+
+**实体是独立资源**：新表 `entities`（key = `<scope>:entity:<id>`），不往条目加字段。一个实体 = 唯一 ID + 规范名 `canonicalName` + 别名 `aliases` + 实体类型 `entityType`（**必填、不枚举**——它是消歧第一依据，枚举会挡掉新类型）+ 首次出现 `firstSeen`（自由文本，与建档时刻 `createdAt` 不是一回事）+ 相关主题 `topics`（概念 id）+ 关联实体 `relatedEntities`（实体 id）+ 消歧说明 `disambiguation` + 状态 + 变更记录。
+
+**ID 形态**：`ENTITY-0001`，每 scope 各自递增（方案 §4.3 的示例形态）。为什么不用 uuid：人要能口头引用「改 ENTITY-0007 那条」。并发安全靠进程内水位单调 + 落盘前查重；跨进程不并发写同一 domain（存储单写者）。
+
+**与词表的三处刻意差异**（照抄词表判据会错）：
+
+| 维度 | 主题词表（§4.2） | 实体权威档（本节） | 为什么不同 |
+|------|----------------|------------------|-----------|
+| 标签空间 | **唯一**：一个词只指一个概念 | **可多指**：两个实体可以同名 | 概念是主题（抽象），实体是现实对象——两个不同的人同名是现实 |
+| 撞名 | 整笔拒绝 | 允许，但**必须给 `disambiguation`** | 拒绝会挡住真实的同名；无条件放行等于把消歧责任推给未来的自己 |
+| 解析返回 | 唯一命中（`findByLabel`） | **候选列表 + `ambiguous`**（`resolveName`） | 判断型字段禁默认值：程序不替调用方挑 |
+
+**归一函数与词表逐字同源**（`normalizeLabel`：去首尾空白 + 折叠连续空白 + 小写）。**不做**词形还原、繁简转换、标点归一——多走一步就是猜，猜错即把两个实体合成一个（消歧的反面就是猜）。
+
+**合并是显式动作**：`mergeInto(旧档 → 存续档)` 把旧档的全部称呼并入存续档（旧规范名降为别名），旧档标 `status:'merged'` + `mergedInto` 指向存续档，**不删除**。旧写法解析归到存续档（这正是合并的目的），旧档同时作为 `merged` 命中出现（历史可解释）。三条 fail-loud：不能自合并；**合并目标不得是已合并体**（只保留一层，链式会让解析跟随多跳且中间态永远留坑）；不能跨 scope 合并。已合并档不可改、不可停用——要求操作存续档。
+
+**引用完整性**：`relatedEntities` 只能指向同 scope 的**存续档**（指向已合并档 ⇒ 拒绝并给出存续档 id；指向停用档 ⇒ 拒绝）、不得自引用；`topics` 指向同 scope 的概念（实体档不持有概念表 ⇒ 存在性与 scope 校验在工具层做，未接线时**拒绝写入**而不是放过）。
+
+**本期不做 `entry → entity` 的类型化边**（方案 §4.4 里没有，且开放判据不满足）：`memory_relations` 的读路径按**角色准入视野**过滤两端，而实体档不吃角色可见性 ⇒ 在「实体节点如何过准入」定下来之前不开放（半件能力比没有更坏：写进去的边读不回来）。实体的用处本期由**名称解析 + 文本反查**承担：`memory_entities({name})` 返回实体 + 提到它的条目（在可见集合里按名称做包含匹配）。
+
+**调用点清单**：
+
+| 位置 | 行为 |
+|------|------|
+| `memory_entity` | 新建 / 修改 / 合并（`mergeInto`）/ 停用（写入口） |
+| `memory_entities` | 按称呼解析（含 `ambiguous`）/ 看详情 / 列表（含「提到它的条目」） |
+| `memory_stats.entities` | `wired` 标志 + total / active / merged / deprecated / 带别名 / 带主题 / 有关联实体 / 有消歧说明 |
+| `src/index.ts` | `entitySchema` + `entities` 表装配（未声明字段会被静默剥掉——同一个坑第十五次） |
+
+**边界与信任**：`firstSeen` / `disambiguation` 是数据不是指令；实体档**不改变条目的可见性**（不是准入）；**不做跨库实体映射**（§4.3 的「跨知识库映射」属独立决定，同 §5.22 的处置）；状态只有 `merged` / `deprecated` 两个可选值（无默认值：未给 = 适用中）；**不做同名自动合并**、**不做实体匹配进检索排序**（§8.3 的活，本期改检索面会污染存量排序的对照）。
+
 ---
 
 ## 7 · 可证伪验收
@@ -669,6 +704,11 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 | A119 | 空间授权 fail-closed：策略给了 `spaces` 后，**未标注 `space` 的条目不被放行**；未给 `spaces` 的策略零变化 | `tests/space.test.mjs`「S7 授权」 | ✔ 已实测（单测） |
 | A120 | 六态唯一读法：同一批条目经 `lifecycleOf()` 恰好落入六态之一，且 `countByLifecycle` 之和 == 总数 | `tests/lifecycle.test.mjs`「L1 优先级」「L3 计数」 | ✔ 已实测（单测） |
 | A121 | `pending` **不进注入**：`isInjectable({status:'pending'}) === false`，而 `disputed` / `superseded` 为 true | `tests/lifecycle.test.mjs`「L4 注入判据」 | ✔ 已实测（单测） |
+| A123 | 实体 ID 与解析：同 scope 内 id 递增（`ENTITY-0001`/`ENTITY-0002`）；规范名 / 别名 / 大小写与多余空白变体**都解析到同一实体**；`entitySchema.parse` 后 `canonicalName`/`entityType`/`aliases`/`firstSeen` 四字段仍在（写入边界不得剥字段） | `tests/entities.test.mjs`「E1 建立与读取」 | ✔ 已实测（单测） |
+| A124 | 撞名消歧：同名新建/加别名而**未写 `disambiguation`** ⇒ 整笔拒绝并点名占用者 id；写了 ⇒ 两候选并存且 `resolveName().ambiguous === true`（**程序不替调用方挑**）；规范名与别名内部重复 ⇒ 拒绝 | `tests/entities.test.mjs`「E2 撞名」「E3 输入 fail-loud」 | ✔ 已实测（单测） |
+| A125 | 合并：旧档全部称呼并入存续档（旧规范名降为别名）、旧档 `status:'merged'` + `mergedInto`、旧写法解析归存续档；**合并目标不得是已合并体**（报错点名最终存续档）、不得自合并、不得跨 scope | `tests/entities.test.mjs`「E4 合并」「E5 写入边界」 | ✔ 已实测（单测） |
+| A126 | 引用 fail-loud：`relatedEntities` 自引用 / 不存在 / 跨 scope / 指向已合并档 ⇒ 拒绝；`topics` 在概念表未接线时**拒绝写入**（宁可不写不写悬空引用）、概念不存在或跨 scope ⇒ 拒绝 | `tests/entities.test.mjs`「E6」「E7」 | ✔ 已实测（单测） |
+| A127 | 未接线可区分 + 端到端：`deps.entities` 缺失时两个工具**响亮报错**且 `memory_stats.entities.wired === false`；接线后 `memory_entity` 建/改 → `memory_entities({name})` 按别名解析并反查提到它的条目（渲染含 id） | `tests/entities.test.mjs`「E8 端到端」「E9 未接线」「E10 统计」 | ✔ 已实测（单测） |
 | A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
 | A2 | 同标题 `knowledge` 再写 → `merged`（标签并集 + 正文追加，不新增条目） | `tests/tools.test.ts`「remember：同标题 knowledge → merged（标签并集）」；`tests/store.test.mjs` describe「去重合并（规格 §2.2）」 | ✔ 已实测 |

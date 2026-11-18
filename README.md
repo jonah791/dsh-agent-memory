@@ -23,14 +23,14 @@
 
 ## 能力
 
-16 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
+23 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
 
-> ⚠ 2026-11-17：本节曾写「14 个」而实测 15 个（`memory_dispose` 上线时未回填，**文档漂移**）；v0.24.0 加 `memory_supersede` ⇒ **16 个**。工具数由 `tests/audit.test.mjs` A42 硬编码锁定（每变一次必须显式确认）。
+> ⚠ 2026-11-17：本节曾写「14 个」而实测 15 个（`memory_dispose` 上线时未回填，**文档漂移**）；v0.24.0 加 `memory_supersede` ⇒ **16 个**；v0.28.0 加 `memory_link` / `memory_unlink` / `memory_relations` ⇒ 19；v0.29.0 加 `memory_concept` / `memory_thesaurus` ⇒ 21；v0.30.0 加 `memory_entity` / `memory_entities` ⇒ **23 个**。工具数由 `tests/audit.test.mjs` A42 硬编码锁定（每变一次必须显式确认）。
 
 | 工具 | 用途 |
 |------|------|
 | `remember` | 写入/覆盖/合并。L1 `fact` 带 `key`（同 scope+key 精确覆盖）；L2 `knowledge` / L3 `episodic` 同标题自动合并（标签并集 + 正文追加）；未命中则新建。受 `max_entries` 守卫（**仅拦新建**）。**v0.19.1 `dryRun`**：只跑近重复检测、返回候选与强度、**不落库**——「先搜再写」的可执行形态（必须走它而不是先 `recall`：两者候选集不同源，措辞不同而主题相同的那一条只有 `remember` 的检测器认得出） |
-| `recall` | 检索：关键词/层级/标签/时间过滤，相关度（标签 3 > 标题 2 > 正文 1，**v0.17 起每项再乘 BM25 文档长度归一** `k1=1.2 / b=0.75`）+ 新鲜度排序；**v0.17 相对门槛**：分数低于本轮最高分 5% 的一律截掉 ⇒ `total` 报的是「够相关」的条数，不再是「沾到任一词」的条数。每个结果附 `related` 关联链；结果标注来源 scope 与压缩层级。**v0.5：受角色视野约束**（见「角色视野」），可用 `role` 参数切换视角。**v0.19.1**：标题像转述（精读/调研/评估/review…）而全文找不到 arXiv 编号的条目，行首打 `〔转述型·无出处〕`——它的权威不是我实测来的 |
+| `recall` | 检索：关键词/层级/标签/时间过滤，相关度（标签 3 > 标题 2 > 正文 1，**v0.17 起每项再乘 BM25 文档长度归一** `k1=1.2 / b=0.75`）+ 新鲜度排序；**v0.17 相对门槛**：分数低于本轮最高分 5% 的一律截掉 ⇒ `total` 报的是「够相关」的条数，不再是「沾到任一词」的条数。每个结果附 `related` 关联链；结果标注来源 scope 与压缩层级。**v0.5：受角色视野约束**（见「角色视野」），可用 `role` 参数切换视角。**v0.19.1**：标题像转述（精读/调研/评估/review…）而全文找不到 arXiv 编号的条目，行首打 `〔转述型·无出处〕`——它的权威不是我实测来的。**v0.29 `expandThesaurus`**：按主题词表把查询里出现的概念换成**全部其他写法**再检索（缺省关闭 ⇒ 存量行为逐字不变；展开词随结果回传 `expandedTerms`——改了排序就必须看得见才可复核） |
 | `memory_relate` | 联想导航：按 id 展开关联网络；`depth>1` 走 BFS 多跳记忆社区（`hop` 标注层级、visited 防环、每跳 `limit` 扇出） |
 | `memory_browse` | 时间金字塔浏览（年/月/周/日分桶 + 层级/标签/时间过滤 + 分页）。与 `recall` 互补——「不知道有什么」时的发现路径。**v0.19.1**：与 `recall` 同一份 `〔转述型·无出处〕` 标记（同一事实在两个界面不能长得不一样） |
 | `update` | 按 id 修订。**v0.9 三模式**：`replace`（缺省·`text` 首行作标题、全文作正文）/ `append`（追加到正文末尾）/ `patch`（`find`→`replace`，**要求唯一命中**，0 处或多处一律拒绝）——内容真变即落**修订快照**（`revisions`，保留最近 3 条，改错可回溯）；`tags` 整体替换 |
@@ -44,6 +44,13 @@
 | `memory_recompress` | **概要重压出口（v0.11）**：正文超预算（`summary_max_chars`）的概要条目，用**它自己的正文**再压一次并**整体替换**（旧版进 `revisions` 可回溯）。只对 `kind=summary` 且 `level`/`bucket` 齐全的条目有效；已在预算内则跳过（不白跑一次 LLM）。**与常规时间压缩的分工**：常规压缩「已存在即跳过」，本工具正是那个幂等结果的**显式出口** |
 | `memory_review_mark` | **体检裁决留痕（v0.11）**：给一条体检候选打「已裁决」标记 ⇒ `memory_audit` 不再把它当待办反复报（归 `KEEP`）。**只写侧车、绝不改条目**（不刷新 `accessedAt`/`updatedAt`）；标记只对打标那一刻的版本有效——条目再变动即自动回到常规分档 |
 | `memory_supersede` | **v0.24 替代关系的唯一写入口**：`id`（新）+ `supersedes[]`（旧，必填非空）+ 可选 `validAfter` / `overwrite`。一次调用写**两侧**（新条目 `.supersedes` ⊇ 旧 id；每个旧条目 `.supersededBy = 新 id`）——只写一侧会让审计查不到反向关系，故 `update` 刻意不暴露这两个字段。**旧条目不删不归档**（保留原值作对照），recall 里只打「⚠ 已过时 → 被 `<id前8位>` 替代」；**只留一层**（A→B→C 各记一格，不递归展开祖先）。fail-loud：id 不存在 / 自引用（**常见成因是新旧同标题 ⇒ `remember` 已把它们合并成一条**）/ 旧条目已被别的条目替代过（二次替代需显式 `overwrite: true`；已是本次目标则幂等跳过） |
+| `memory_link` | **v0.28 写一条类型化关系**（边是独立资源，新表 `relations`；方案 §4.4）：十种类型（属于/关联/支持/反驳/来源于/派生自/取代/参与/使用/依赖）× 四件元数据（`provenance` 必填 / `validFrom`·`validTo` / `confidence` 无默认值 / 方向由类型定义）。幂等按 `(type, from, to)` 的**有效**边判重——已退役的同类边不算重复（再一次成立是新的历史段，不抹旧边的 `validTo`）。`supersedes` 不由本工具写（唯一入口 `memory_supersede`） |
+| `memory_unlink` | **v0.28 软退役**一条边（`validTo` = 退役时刻）：**不删除记录**，`includeExpired` 仍可查——「曾经成立、现在不成立」与「从来没存在过」是两件事 |
+| `memory_relations` | **v0.28 读边的入口**：出边 / 入边 / 双向 + 过期与未生效标记；另附**派生结构边**（`supersededBy` / `supersedes` / `archiveRef`——字段是真源，不落盘）。两端都过**角色准入**（看不见一端就整条不返回，不泄露对端存在性） |
+| `memory_concept` | **v0.29 维护受控词表**（方案 §4.2 · SKOS 思想）：新建 / 修改 / 停用 / 批量导入（**验完全部再写全部**，半套词表比没有更坏）。一个概念 = 首选名 + 同义词 + 定义 + 使用范围 + 上位 `broader` + 关联 `related`；**只存 `broader`**（下位反查派生）、**`related` 只存一侧**（读时双向）、**停用不删除**；**唯一标签空间**（同 scope 内归一后不得相交，冲突整笔拒绝并点名占用者） |
+| `memory_thesaurus` | **v0.29 查词表**：按标签查（首选名或同义词都认）、看详情（含派生下位、上位链、变更记录）、列表、导出 SKOS-lite JSON（可再导入） |
+| `memory_entity` | **v0.30 维护实体权威档**（方案 §4.3 规范控制）：新建 / 修改 / 合并（`mergeInto`）/ 停用。**一个现实对象一个档**：`ENTITY-0001`（每 scope 递增、可口头引用）+ 规范名 + 别名 + 实体类型（必填、不枚举——它是消歧第一依据）+ 首次出现 + 相关主题（概念 id）+ 关联实体 + 消歧说明。**别名可多指**：两个不同实体可以同名（方案明确不许因同名就合并）⇒ 撞名必须写 `disambiguation`，否则整笔拒绝；**合并是显式动作、只保留一层、不删除旧档** |
+| `memory_entities` | **v0.30 查实体档**：按称呼解析（规范名或别名，多命中标 `ambiguous`——**程序不替调用方挑**）、看详情、列表；并按名称**反查提到它的条目**（在可见集合里做包含匹配；本期不落 `entry → entity` 边，理由见 `docs/semantic.md §5.23`） |
 
 行为侧（无工具面，自动发生）：
 
@@ -220,14 +227,14 @@ node scripts/audit-retrieval.mjs [gate|ablation|inject|all|timing]
 
 1. **语义级（最直接）**：调 `memory_version` → `version` 应等于 `package.json` 的 `0.11.6`，`buildAt` 应等于 `lib/index.js` 的产物 mtime（该工具是**动态**读这两处的——2026-09-01 之前它硬编码版本、`buildAt` 实为调用时刻，即「判据本身说谎」，已修）。
 2. **进程级**：`lib/index.js` 的 mtime ≤ web 进程启动时间，且 `src/*.ts` 不新于 `lib/index.js`（源码改了没构建 = 跑的还是旧产物）。
-3. **行为级**：工具面出现 14 个 `memory_*`；把一条记忆写进库后，`${DSH_HOME}/storages/agent_memory.json` 的 `tables.entries` 条数 +1 且文件 mtime 前进。
+3. **行为级**：工具面出现 19 个 `memory_*`；把一条记忆写进库后，`${DSH_HOME}/storages/agent_memory.json` 的 `tables.entries` 条数 +1 且文件 mtime 前进。
 
 > **「重新构建 ≠ 生效」**：产物 mtime 新只证明「构建过」，**不证明进程在跑它**（AGENTS.md §5.11 §6 实测教训）。判据必须是「进程启动时间晚于产物 mtime」。另：HMR 默认可能未启用（web-app 自带行常为 `disabled`），改完源码务必 `npm run build`，必要时让宿主重载/重启后再复验同一判据。
 
 **回退三档**：
 
 - **源码级**：`git revert <commit>`（或 `git checkout <上一提交> -- src/`）→ `npm run build` → 预检 → 重启。适用于构建后行为异常。
-- **组合级**：profile patch 给 `agent-memory` 行加 `disabled: true`（或 `plugin_stop dsh-agent-memory`）→ 停用后 14 个工具消失、两条注入与周期补压停止；**数据仍在**（存储文件不受影响，重新启用即恢复）。
+- **组合级**：profile patch 给 `agent-memory` 行加 `disabled: true`（或 `plugin_stop dsh-agent-memory`）→ 停用后 23 个工具消失、两条注入与周期补压停止；**数据仍在**（存储文件不受影响，重新启用即恢复）。
 - **运行期**：无需回滚代码即可降级——`<workspace>/.dsh/memory.yml` 里把 `inject.enabled` / `auto_inject.enabled` 置 `false`（停注入）、`compressIntervalMinutes: 0`（停周期补压）、`timeline.{day,week,month,year}: false`（停时间压缩）。回退后用同一套判据复验（工具消失 / 注入帧不再出现 / 文件 mtime 不再前进）。
 
 ## 测试
