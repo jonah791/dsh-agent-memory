@@ -532,10 +532,66 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 
 ---
 
+### 5.19 空间归属契约（v0.27 · `space` 四空间 · 方案 §3.2）
+
+**缺口**（AML 差距表 §3.2）：`scope` 是**存储分区**（数据放哪个库、谁看得见），答不了「这条知识属于谁的疆域」。方案要求四空间（个人 / 项目 / 领域 / 系统）**且各自独立授权**——没有独立授权维，四空间就只是四个标签。
+
+**一个字段**：`space`（单值，四选一，**无默认值**）。四空间定义：
+
+| 空间 | 装什么 | 判据（拿不准时问） |
+|------|--------|------------------|
+| `personal` 个人 | 关于我与主人的持久偏好、画像、关系 | 「这是关于**谁**的」——人或关系 |
+| `project` 项目 | 某个工程的目标 / 进度 / 决策 | 「换一个项目还用得上吗」——用不上 |
+| `domain` 领域 | 跨项目可复用的领域知识（期货口径、插件方法、论文方法） | 用得上 ⇒ 领域 |
+| `system` 系统 | 运行环境锚点、工具失败原因、通道与凭据纪律 | 「这是关于**这台机器怎么跑**的」 |
+
+**与 `scope` 的分工（防第二真源）**：`scope` 是存储与准入（键空间、路径、跨会话可见性），`space` 是知识归属（授权与检索的语义维）。**两者不互相推导**：项目 A 的技术决策可以存在 `global` 库而 `space=domain`（值得全局复用）；也可以存在项目路径下而 `space=personal`（关于我自己的偏好，只是当时在那个目录里写）。⚠ 不做「从 scope 推 space」的默认值——那是判断，代填等于让机制替我断言。
+
+**独立授权（本维度的存在理由）**：`role` 策略新增可选 `spaces?: Space[]`；给了就只放行这些空间的条目。**fail-closed**：设了 `spaces` 的策略下，**未标注 `space` 的条目不放行**——「不知道属于哪个空间」不能当「所有空间都可读」。未设 `spaces` 的角色行为完全不变（既有角色配置零迁移）。
+
+**可见性**：`recall` / `memory_browse` 结果行的元数据方括号里印 `〔个人〕` 这类短标（**有值才打**，未标注留空——同 `subjectTag` 纪律）；结构化结果带 `space` 键；`memory_stats` 出 `bySpace`（四空间 + `unclassified`，**之和 == total**）；`recall`/`browse` 支持按空间过滤（未给 = 零拷贝透传；**未标注条目在任何取值下都不返回**）。
+
+**已知边界**：空间只做**视野管理**，不加密、不隔离存储——能读盘的人仍可读到全部条目（同 §5.8 角色维度的诚实声明）。真隔离要配独立 `DSH_HOME`。
+
+**写入边界（同一个坑第十二次）**：`index.ts::entrySchema` 必须同步声明该字段，否则 storage-domain 静默剥掉。
+
+### 5.20 生命周期契约（v0.27 · 六态 · 方案 §3.3）
+
+**缺口**（AML 差距表 §3.3）：六态里 `archived`（`archived:true`）与 `superseded`（`supersededBy`）已有载体，**`pending` 与 `disputed` 无载体**，`deleted` 与「已归档」的**意图差别**也没记。
+
+**存储只补没有载体的两态**：`status?: 'pending' | 'disputed'`（无默认值；未给 = 常态）。`deleted` 走**既有** `archivedReasonType: 'deleted'`（`forget` 的可选原因类型扩一值）——已归档条目本来就被检索默认剔除，再开一个「已删除」布尔位等于给同一件事两个真源，两者不同步时无人能判谁对。
+
+**六态的唯一读取入口**：`lifecycleOf(entry)`（`src/lifecycle.ts`），优先级 `deleted > archived > superseded > disputed > pending > active`。派生而不存六值：`archived` / `supersededBy` 已被压缩链、检索、统计、渲染共同使用（§5.16 契约），再存一份会漂。⇒ **一个判断入口、一个来源**。
+
+**各态行为（不写清就等于字段是死的）**：
+
+| 态 | 默认检索 | 注入 | 渲染标记 | 进入方式 |
+|----|---------|------|---------|---------|
+| `active` 有效 | 可见 | 可注入 | 无 | 默认 |
+| `pending` 待审核 | 可见（显式召回） | **不注入** | `⏳待审` | `remember({status:'pending'})` |
+| `disputed` 存疑 | 可见 | 可注入 | `❓存疑` | `update({status:'disputed'})` |
+| `superseded` 已被取代 | 可见 | 可注入（带过时标记） | `⚠ 已过时 → 被…替代` | 既有 `memory_supersede` |
+| `archived` 已归档 | 默认剔除（`includeArchive` 可查） | 不注入 | `[已过时]` 等既有标记 | 既有 `forget` / 压缩链 |
+| `deleted` 已删除 | 默认剔除（`includeArchive` 可查） | 不注入 | `🗑已删` | `forget({reasonType:'deleted'})` |
+
+**为什么 `pending` 不进注入**：注入是**未经请求**到达我上下文的内容（auto-recall / 启动速览）。候选区的东西还没过审核，让它自己挤进上下文等于跳过了候选区这个设计本身。**显式召回是请求**，那时该看见它（带标记）。
+
+**`disputed` 不算「已失效」**：它是**设计内的存疑**，不是过时。R7 的误用口径（A 档 = 返回时结论已不能用）不把它计入——否则「我特意标了存疑」会被自己的仪器罚一次。
+
+**可见性**：`recall` / `memory_browse` 增 `status` 过滤（取值 = 六态名）；结果行前缀印上表标记；`memory_stats` 出 `byLifecycle`（六态之和 == total）。
+
+**写入边界（同一个坑第十三次）**：`index.ts::entrySchema` 必须同步声明 `status`；`archivedReasonType` 的白名单要同步扩 `deleted`（否则 `forget` 传它会报未知取值）。
+
+---
+
 ## 7 · 可证伪验收
 
 | # | 可证伪命题（一次测量判真假） | 证据出处 | 状态 |
 |---|---------------------------|---------|------|
+| A119 | 空间授权 fail-closed：策略给了 `spaces` 后，**未标注 `space` 的条目不被放行**；未给 `spaces` 的策略零变化 | `tests/space.test.mjs`「S7 授权」 | ✔ 已实测（单测） |
+| A120 | 六态唯一读法：同一批条目经 `lifecycleOf()` 恰好落入六态之一，且 `countByLifecycle` 之和 == 总数 | `tests/lifecycle.test.mjs`「L1 优先级」「L3 计数」 | ✔ 已实测（单测） |
+| A121 | `pending` **不进注入**：`isInjectable({status:'pending'}) === false`，而 `disputed` / `superseded` 为 true | `tests/lifecycle.test.mjs`「L4 注入判据」 | ✔ 已实测（单测） |
+| A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
 | A2 | 同标题 `knowledge` 再写 → `merged`（标签并集 + 正文追加，不新增条目） | `tests/tools.test.ts`「remember：同标题 knowledge → merged（标签并集）」；`tests/store.test.mjs` describe「去重合并（规格 §2.2）」 | ✔ 已实测 |
 | A3 | 无命中 → `created`，首行作标题、写入当前 workspace | `tests/tools.test.ts`「remember：新建（created），写入当前 workspace，首行作标题」 | ✔ 已实测 |
@@ -856,6 +912,15 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
     - **截断必须保留尾部**（首版在这里翻车）：初版「只取前 max 条」在重启后首次实调就复现了原缺陷——10 条小节只列到「六、实测性能」，相机与 URP 正好被截掉。改为「前 N + `…（共 M 节）` + 最后 2 节」：小节末尾常是后来追加的内容，也最容易与新条目重叠。
     - **落地判据**：`tests/dedupe.test.mjs` 29 条（其中新增 11 条，含两条尸体样本：「一级标题不进大纲」「截断必须保留尾部」）；全量 **422 项 / 0 失败**；两次真实重启（11:27:32 / 11:30:29）；**线上取证**：同一 `dryRun` 查询修前只到「六、实测性能」，修后含「…（共 10 节）/ 八、VMD 相机轨道 / 九、URP 后处理在 cam.Render() 下完全不生效」。
     - **边界（不得读成「问题已解决」）**：大纲只让覆盖范围**可见**，不保证我据此改判——它把「读不读得到」变成「读到了照不照做」，后者仍归主体（与前五种形态同一条尾巴）。
+
+25. **2026-11-19 · 四空间 + 生命周期六态（v0.27 · 方案 §3.2 / §3.3 · AML 差距表 §3.2 / §3.3）**
+    - **缺口**：`scope` 是存储分区（放哪、谁看得见），答不了「这条知识属于谁的疆域」；六态里 `archived` / `superseded` 有载体，`pending` / `disputed` 无载体，`deleted` 与「退役」的意图差别没记。
+    - **两条设计决定（都为了「不制造第二真源」）**：① **`space` 与 `scope` 正交、互不推导**——项目 A 的技术决策可以存 `global` 库而 `space='domain'`，关于我的偏好可以存项目路径而 `space='personal'`；任何「从 scope 推 space」的默认值都是让机制替我断言。② **六态只存两态**（`status` 只接受 `pending` / `disputed`），`deleted` 走既有 `archivedReasonType='deleted'`、`superseded` 走 `supersededBy`、`archived` 走 `archived:true`；六态的唯一读法是 `lifecycleOf()`（优先级 deleted > archived > superseded > disputed > pending > active），**一个判断入口、一个来源**。
+    - **授权是本维度存在的理由**：`role.spaces` 白名单 **fail-closed**——未标注 `space` 的条目在设了白名单的策略下**不放行**（「不知道属于哪个空间」≠「所有空间都可读」）。`roles.enabled=false` 时整段不生效 ⇒ 既有角色配置零迁移。
+    - **行为分离（不写清等于字段是死的）**：`pending` **不进注入**（注入是未经请求到达上下文的内容，候选区没过审核就自己挤进去，等于跳过候选区这个设计本身；显式 recall 仍可见）；`disputed` 可注入但打 `❓存疑`；`deleted` 默认剔除但可查回；按 `status:['archived'|'deleted']` 过滤时**自动包含归档**（否则「查已删除的条目」要先记得传 includeArchive）。
+    - **踩坑（同一个坑的第十二、十三次）**：`index.ts::entrySchema` 必须同步声明 `space` / `status`；`archivedReasonType` 白名单必须同步扩 `deleted`（否则 `forget` 传它会报未知取值）。
+    - **一处判据修正（留档）**：`lifecycle` 是**派生值**，起初并进 `DIMENSION_ITEM_FIELDS` ⇒ A113b（写入边界真 parse）立刻红——那个常量的契约是「**可写**维度的两侧真源」。改抽 `DERIVED_ITEM_FIELDS`，只进 output schema、不进 parity 判定。**教训**：判据常量混装「可写」与「派生」两种字段，会让「必须声明」这条守卫指向错的方向（要求写入边界声明一个不该可写的字段）。
+    - **落地判据**：`tests/space.test.mjs` 7 条 · `tests/lifecycle.test.mjs` 7 条 + A119–A122；全量 `npm test` **505/505**、`npm run test:ts` **88 pass / 1 skip**。
 
 ## 10 · 未决问题
 

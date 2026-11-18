@@ -24,6 +24,7 @@ import { executionTag } from './execution.ts'
 import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
 import { supersededByTag } from './succession.ts'
+import { isInjectable } from './lifecycle.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -87,15 +88,17 @@ export function buildMemoryDigest(
   let omitted = 0
 
   // 常驻层：global fact 全量（数量少，预算内优先）
-  const facts = globalFacts.filter((e) => e.kind === 'fact')
+  // v0.27.0：注入只给 `isInjectable()` 的条目——`pending` 待审核**不进上下文**（候选区未过审核
+  // 就自己挤进注入，等于跳过了候选区这个设计本身）；`archived` / `deleted` 同理。
+  const facts = globalFacts.filter((e) => e.kind === 'fact' && isInjectable(e))
   for (const entry of facts) lines.push(lineOf(entry))
 
   // 概要层：summary 条目按 bucket 降序（高密度索引优先）
-  const summaries = scopeEntries.filter((e) => e.kind === 'summary' && !e.archived)
+  const summaries = scopeEntries.filter((e) => e.kind === 'summary' && isInjectable(e))
   summaries.sort((a, b) => (a.bucket ?? a.createdAt) < (b.bucket ?? b.createdAt) ? 1 : -1)
 
   // 近期明细：非 summary 按 updatedAt 降序
-  const recents = scopeEntries.filter((e) => e.kind !== 'summary' && !e.archived)
+  const recents = scopeEntries.filter((e) => e.kind !== 'summary' && isInjectable(e))
   recents.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
 
   const budgeted = [...summaries, ...recents]
@@ -149,7 +152,7 @@ export function installMemoryInject(ctx: Context, deps: MemoryInjectDeps): void 
     const scopes = narrowReadScopes([GLOBAL_SCOPE, scope], view, undefined)
     const globalFacts = scopes.includes(GLOBAL_SCOPE)
       ? applyRoleView(
-        deps.store.list(GLOBAL_SCOPE).filter((entry) => entry.kind === 'fact' && !entry.archived),
+        deps.store.list(GLOBAL_SCOPE).filter((entry) => entry.kind === 'fact' && isInjectable(entry)),
         view,
       )
       : []

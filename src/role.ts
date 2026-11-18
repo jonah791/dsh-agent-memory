@@ -197,10 +197,16 @@ export function roleViewOf(
 export function admitsEntry(
   policy: RolePolicy,
   callerRole: string,
-  entry: Pick<Entry, 'kind' | 'role'>,
+  entry: Pick<Entry, 'kind' | 'role' | 'space'>,
 ): boolean {
   const kinds = policy.kinds
   if (kinds !== undefined && kinds.length > 0 && !kinds.includes(entry.kind)) return false
+  // 空间授权（v0.27.0 · 方案 §3.2）：设了白名单就 **fail-closed**——未标注空间的条目不放行。
+  // 这是四空间「各自独立授权」的唯一执行点（`roles.enabled=false` 时整段不生效，零行为变化）。
+  const spaces = policy.spaces
+  if (spaces !== undefined && spaces.length > 0) {
+    if (entry.space === undefined || !spaces.includes(entry.space)) return false
+  }
   const entryRole = entry.role
   if (entryRole === undefined || entryRole.length === 0) return policy.includeShared !== false
   if (entryRole === callerRole) return true

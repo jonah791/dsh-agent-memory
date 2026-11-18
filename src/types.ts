@@ -19,6 +19,29 @@ export type EntryKind = 'fact' | 'knowledge' | 'episodic' | 'summary'
  */
 export type MemType = 'episodic' | 'semantic' | 'procedural' | 'profile' | 'project' | 'relational' | 'operational'
 
+/**
+ * 空间归属（v0.27.0 · 方案 §3.2 四空间）——这条知识属于**谁的疆域**。
+ *
+ * 与 `scope` 正交（见 `Entry.space` 注释）：`scope` 是存储与准入（键空间 / 路径 /
+ * 跨会话可见性），本类型是知识归属（授权与检索的**语义**维）。两者不互相推导。
+ *
+ * 四空间的判据与「拿不准时问什么」全部在 `src/space.ts` 文件头。
+ */
+export type Space = 'personal' | 'project' | 'domain' | 'system'
+
+/**
+ * 条目自带的生命周期状态（v0.27.0 · 方案 §3.3）——**只收没有载体的两态**。
+ *
+ * `superseded` 由 `supersededBy` 表达、`archived` 由 `archived:true` 表达、
+ * `deleted` 由 `archivedReasonType='deleted'` 表达（既有载体，不另开一位）。
+ * 六态的统一读法是纯函数 `lifecycleOf(entry)`（`src/lifecycle.ts`）——
+ * **一个判断入口、一个来源**，避免同一件事存两份而漂。
+ */
+export type EntryStatus = 'pending' | 'disputed'
+
+/** 六态（派生读法的取值域；`active` 是未标注时的常态） */
+export type LifecycleState = 'active' | 'pending' | 'disputed' | 'superseded' | 'archived' | 'deleted'
+
 /** 时间压缩层级（仅 episodic/summary 使用） */
 export type TimelineLevel = 'day' | 'week' | 'month' | 'year'
 
@@ -125,7 +148,7 @@ export const COLD_CHECKPOINT_TAG = 'checkpoint-archive'
  * `unspecified` 是**「未判断」的显式表示**，不是替我做断言的默认值——与 `grounding`
  * 缺省 = 未标注同一立场（AGENTS.md §1.3 判断型字段禁默认值）。
  */
-export type ArchiveReasonType = 'refuted' | 'merged' | 'superseded' | 'stale' | 'capacity' | 'unspecified'
+export type ArchiveReasonType = 'refuted' | 'merged' | 'superseded' | 'stale' | 'capacity' | 'deleted' | 'unspecified'
 
 /**
  * 归档记录（v0.21.0）：`forget` 的因果留痕，**从 `source` 分离出来**。
@@ -159,6 +182,14 @@ export interface RolePolicy {
   includeShared?: boolean
   /** 是否附加 global 作用域（缺省 true；false = 不附加，显式 scope 参数仍优先） */
   includeGlobal?: boolean
+  /**
+   * 允许的**空间归属**白名单（v0.27.0 · 方案 §3.2 四空间）；缺省 = 不限制。
+   *
+   * ⚠ 设了就 **fail-closed**：未标注 `space` 的条目**不放行**——「不知道属于哪个空间」
+   * 不能当「所有空间都可读」。这是四空间「各自独立授权」的唯一执行点；没有它，
+   * 四空间只是四个标签。
+   */
+  spaces?: Space[]
 }
 
 /** 角色维度配置（memory.yml `roles` 段） */
@@ -321,6 +352,21 @@ export interface Entry {
    * 新建时盖章；显式纠正走 `update({ memType })`。
    */
   memType?: MemType
+  /**
+   * 空间归属（v0.27.0 · 方案 §3.2 四空间）：这条知识属于**谁的疆域**——个人 / 项目 / 领域 / 系统。
+   *
+   * **与 `scope` 正交且不可互换**：`scope` 是存储与准入（存哪个分区、谁看得见，值是路径）；
+   * 本字段是知识归属（授权与检索的语义维）。不互相推导：项目 A 的技术决策可以存进
+   * `global` 库而 `space='domain'`；也可以存进项目路径而 `space='personal'`。
+   * **无默认值**——未标注 = 不知道属于哪个空间（判断型字段禁默认值）。授权侧
+   * `role.spaces` 对未标注条目 **fail-closed**（不放行）。
+   */
+  space?: Space
+  /**
+   * 生命周期状态（v0.27.0 · 方案 §3.3）：只存**没有载体**的两态——`pending` 待审核 /
+   * `disputed` 存疑；未给 = 常态（`active`）。六态的完整读法见 `lifecycleOf()`。
+   */
+  status?: EntryStatus
   /**
    * 执行位置·领域（v0.23.0）：这条记忆是在**哪个项目**里得到的——`alice` / `pp` / 不设（通用）。
    *
@@ -664,7 +710,16 @@ export interface RecallQuery {
    * 内容分类过滤（v0.26.0）：只看某几类馆藏（七类可多选）。缺省 = 不过滤。
    * ⚠ 可选筛子，不是可见性边界；**未分类条目在任何取值下都不返回**（它的类型是
    * 「不知道」，不是某一类——同 `staleness` 的「未设死线」纪律）。
+   *
+   * 空间过滤（v0.27.0）：只看某几个空间。缺省 = 不过滤；**未标注空间的条目在任何取值下
+   * 都不返回**（它的空间是「不知道」，同 memType 纪律）。
    */
+  space?: Space[]
+  /**
+   * 生命周期过滤（v0.27.0）：只看处于某几态的条目（六态可多选）。缺省 = 不过滤。
+   * 取值是**派生读法** `lifecycleOf()` 的结果，不是存储字段的直接值。
+   */
+  status?: LifecycleState[]
   memType?: MemType[]
   /**
    * 执行位置过滤（v0.23.0）：只看某个项目 / 某个任务的条目。
@@ -750,6 +805,10 @@ export interface RecallResultItem {
   subject?: Subject
   /** 内容分类（v0.26.0；仅当条目已分类时出现在结果里）——情景 / 语义 / 程序 / 画像 / 项目 / 关系 / 运行 */
   memType?: MemType
+  /** 空间归属（v0.27.0；仅当条目已标注时出现在结果里）——个人 / 项目 / 领域 / 系统 */
+  space?: Space
+  /** 生命周期（v0.27.0；始终出现）——六态的派生读法，见 `lifecycleOf()` */
+  lifecycle?: LifecycleState
   /** 执行位置（v0.23.0；仅当条目已标注时出现在结果里）——这条记忆是在哪个项目得到的 */
   project?: string
   /** 执行位置（v0.23.0；仅当条目已标注时出现）——哪个任务节点（只在 project 内唯一） */
@@ -842,6 +901,10 @@ export interface BrowseQuery {
   subject?: Subject
   /** 内容分类过滤（v0.26.0）：只看某几类馆藏。缺省 = 不过滤；未分类条目在任何取值下都不返回。 */
   memType?: MemType[]
+  /** 空间过滤（v0.27.0）：只看某几个空间。缺省 = 不过滤；未标注条目在任何取值下都不返回。 */
+  space?: Space[]
+  /** 生命周期过滤（v0.27.0）：只看某几态（六态名）。缺省 = 不过滤。 */
+  status?: LifecycleState[]
   /** 执行位置过滤（v0.23.0）：只看某个项目的条目。缺省 = 不过滤。 */
   project?: string
   /** 执行位置过滤（v0.23.0）：任务节点 id；必须与 `project` 同时给 */

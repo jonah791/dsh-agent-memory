@@ -11,6 +11,7 @@
  */
 
 import type { BrowseGroup, BrowseQuery, BrowseResult, Entry, RecallQuery, RecallResult, RecallResultItem, RecallTuning, RelatedItem, TimelineLevel, WeightedTerm } from './types.ts'
+import { lifecycleOf } from './lifecycle.ts'
 import { collapseFamilies, renderFamilyNote } from './family.ts'
 import { transcriptiveFlagOf } from './origin.ts'
 import { archivalOf } from './archive.ts'
@@ -471,6 +472,10 @@ function filterEntries(entries: Entry[], query: RecallQuery): Entry[] {
   const kinds = query.kind
   const tags = query.tags
   const memTypes = query.memType
+  const spaces = query.space
+  const statuses = query.status
+  const wantsArchived = statuses !== undefined
+    && statuses.some((state) => state === 'archived' || state === 'deleted')
   return entries.filter((entry) => {
     if (kinds !== undefined && kinds.length > 0 && !kinds.includes(entry.kind)) return false
     if (tags !== undefined && tags.length > 0 && !tags.every((tag) => entry.tags.some((et) => tagMatches(et, tag)))) return false
@@ -479,7 +484,17 @@ function filterEntries(entries: Entry[], query: RecallQuery): Entry[] {
       const type = entry.memType
       if (type === undefined || !(memTypes as readonly string[]).includes(type)) return false
     }
-    if (!query.includeArchive && entry.archived) return false
+    // 空间归属（v0.27.0）：未标注条目在任何取值下都不返回（同 memType 纪律）
+    if (spaces !== undefined && spaces.length > 0) {
+      const space = entry.space
+      if (space === undefined || !(spaces as readonly string[]).includes(space)) return false
+    }
+    // 生命周期（v0.27.0）：取值是派生读法（lifecycleOf），不是存储字段直读。
+    // ⚠ 位置在 includeArchive 判断之前：否则要查 archived / deleted 时永远被下面那行先剔掉。
+    if (statuses !== undefined && statuses.length > 0 && !statuses.includes(lifecycleOf(entry))) return false
+    // 归档剔除（v0.27.0 起带一个例外）：显式按 `archived` / `deleted` 过滤时**自动放行**，
+    // 否则「查已删除的条目」这条最基本的用法要先记得传 includeArchive —— 猜不到就查不到。
+    if (!query.includeArchive && !wantsArchived && entry.archived) return false
     if (query.scope !== undefined && entry.scope !== query.scope) return false
     if (since !== undefined && entry.createdAt < since) return false
     if (until !== undefined && entry.createdAt > until) return false
@@ -672,6 +687,11 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     ...(entry.subject !== undefined ? { subject: entry.subject } : {}),
     // 内容分类（v0.26.0）——**同一投影点、同一教训**（第六次在同一位置补字段）。
     ...(entry.memType !== undefined ? { memType: entry.memType } : {}),
+    // 空间归属（v0.27.0）——**同一投影点、同一教训**（第七次）。
+    ...(entry.space !== undefined ? { space: entry.space } : {}),
+    // 生命周期（v0.27.0）——**派生值**而非原始字段：六态由 lifecycleOf 统一判定，
+    // 结果项透出判定结果（渲染层直接打标记，不再各自重算一遍）。
+    lifecycle: lifecycleOf(entry),
     // 执行位置（v0.23.0）——**同一投影点、同一教训**（v0.13/v0.14/v0.15/v0.21 连续四版
     // 都栽在漏这一行：过滤生效了、total 对，但结果项里没有该字段 ⇒ 渲染层打不出标记）。
     // ⚠ 两级不拆：taskId 只在 project 存在时透出——无项目的任务 id 透出去会被读成
@@ -771,10 +791,18 @@ function browseBucketOf(entry: Entry): string {
  * @returns { groups, total }；total 为分页前命中条目数
  */
 export function browseEntries(entries: Entry[], query: BrowseQuery = {}): BrowseResult {
+  const wantsArchived = query.status !== undefined
+    && query.status.some((state) => state === 'archived' || state === 'deleted')
   const filtered = entries.filter((entry) => {
     if (query.kind !== undefined && query.kind.length > 0 && !query.kind.includes(entry.kind)) return false
     if (query.tags !== undefined && query.tags.length > 0 && !query.tags.every((tag) => entry.tags.some((et) => tagMatches(et, tag)))) return false
-    if (query.includeArchive !== true && entry.archived) return false
+    // 空间 / 生命周期（v0.27.0）：未标注空间不匹配任何取值；六态走派生读法。
+    if (query.space !== undefined && query.space.length > 0) {
+      const space = entry.space
+      if (space === undefined || !query.space.includes(space)) return false
+    }
+    if (query.status !== undefined && query.status.length > 0 && !query.status.includes(lifecycleOf(entry))) return false
+    if (query.includeArchive !== true && !wantsArchived && entry.archived) return false
     if (query.scope !== undefined && entry.scope !== query.scope) return false
     if (query.since !== undefined && entry.createdAt < query.since) return false
     if (query.until !== undefined && entry.createdAt > query.until) return false

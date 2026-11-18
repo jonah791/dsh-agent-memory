@@ -112,6 +112,11 @@ async function seedFull(store) {
     evidenceRefs: ['session|session-parity-fixture|12'],
     // v0.26.0：内容分类（七类）。同上——不带它 ⇒ A117 对 memType 恒真。
     memType: 'semantic',
+    // v0.27.0：空间归属（四空间）。同上——不带它 ⇒ A117 对 space 恒真。
+    space: 'domain',
+    // v0.27.0：生命周期状态（两态写入）。带 `disputed` 让派生读法 `lifecycle` 取到非默认值，
+    // 否则 A117 对 lifecycle 只验到 'active' 这一个取值（分辨力减半）。
+    status: 'disputed',
   })
   // v0.21.0：`archival`（返回弧）只在**已归档**条目上出现 ⇒ 另造一条并归档，
   // 否则 A117 对 archival 恒真（「返回里没有该键」不构成证据）。

@@ -30,6 +30,7 @@ import { executionTag } from './execution.ts'
 import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
 import { supersededByTag } from './succession.ts'
+import { isInjectable } from './lifecycle.ts'
 import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
 import { recallEntries } from './search.ts'
@@ -281,6 +282,8 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
     const view = roleViewOf(config, { agent } as unknown as RoleCarrier)
     const scopes = narrowReadScopes([scope, GLOBAL_SCOPE], view, undefined)
     const merged = applyRoleView(scopes.flatMap((s) => deps.store.list(s)), view)
+      // v0.27.0：注入只给 `isInjectable()` 的条目——`pending` 待审核不进上下文（同 inject.ts）
+      .filter(isInjectable)
     // v0.8 会话级去重：先剔除本会话已注入过的条目——只有新信息才值得占上下文。
     // 全部命中都是旧的 ⇒ 静默跳过（不注入任何东西，零 token 浪费）。
     let injected = injectedIds.get(sessionId)

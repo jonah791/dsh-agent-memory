@@ -81,7 +81,7 @@ export const entrySchema = zod.object({
    * storage-domain 在写入边界用本 schema 校验，**未声明的字段会被静默剥掉**——
    * 存了等于没存，而写入**仍返回成功**，是最难查的一类缺陷。
    */
-  archivedReasonType: zod.enum(['refuted', 'merged', 'superseded', 'stale', 'capacity', 'unspecified']).optional(),
+  archivedReasonType: zod.enum(['refuted', 'merged', 'superseded', 'stale', 'capacity', 'deleted', 'unspecified']).optional(),
   archivedReason: zod.string().optional(),
   /**
    * 来源类型（v0.21.0）：`master` / `web` / `self` / `measured`。缺省 = 未标注。
@@ -182,6 +182,14 @@ export const entrySchema = zod.object({
    * 未声明的字段会被静默剥掉而写入**仍返回成功**。
    */
   memType: zod.enum(['episodic', 'semantic', 'procedural', 'profile', 'project', 'relational', 'operational']).optional(),
+  /**
+   * 空间归属与生命周期（v0.27.0 · 方案 §3.2 / §3.3）。
+   *
+   * ⚠ **必须在此声明**（同一个坑**第十二、十三次**）：storage-domain 在写入边界用本
+   * schema 校验，未声明的字段会被静默剥掉而写入**仍返回成功**。
+   */
+  space: zod.enum(['personal', 'project', 'domain', 'system']).optional(),
+  status: zod.enum(['pending', 'disputed']).optional(),
 })
 
 /** 记忆域声明：单表 entries，key = <scope>:<kind>:<id>（domain 即命名空间，规格 §2.2） */

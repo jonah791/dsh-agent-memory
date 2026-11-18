@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ArchiveReasonType, ArchiveRecord, Entry, EntryKind, Grounding, MemType, Provenance, RememberResult, Subject, TimelineLevel } from './types.ts'
+import type { ArchiveReasonType, ArchiveRecord, Entry, EntryKind, EntryStatus, Grounding, MemType, Provenance, RememberResult, Space, Subject, TimelineLevel } from './types.ts'
 import { COLD_CHECKPOINT_TAG } from './types.ts'
 
 /** 转出冷存档标签（v0.22.1）：读取侧（list 的跳过判据）与写入侧（compaction-sink 盖章）共用同一真源 */
@@ -88,6 +88,18 @@ export interface EntryDraft {
    * `update({ memType })`。
    */
   memType?: MemType
+  /**
+   * 空间归属（v0.27.0 · 方案 §3.2 四空间）：**只在新建时生效**（与 `subject` / `memType`
+   * 同形——合并路径保留先到者，写入不得静默改归属）。显式纠正走 `update({ space })`。
+   */
+  space?: Space
+  /**
+   * 生命周期状态（v0.27.0）：**只在新建时生效**——候选区的典型用法就是
+   * `remember({ status: 'pending' })` 先落库、审核后 `update({ status: '' })` 转常态。
+   * ⚠ 合并路径**必须**保留先到者的状态：一条待审核的草稿撞上同名正式条目时，
+   * 不能因为「又写了一次」就把草稿标成正式。
+   */
+  status?: EntryStatus
   /**
    * 执行位置·领域（v0.23.0）：这条记忆是在**哪个项目**里得到的（`alice` / `pp`；不设 = 通用）。
    *
@@ -181,6 +193,18 @@ export interface EntryPatch {
    * 不允许事后改判，等于让几千条历史记忆永远停在未分类。
    */
   memType?: MemType | null
+  /**
+   * 空间归属（v0.27.0）——显式改归属 / 清除路径，三态同 `subject`：
+   * `undefined` = 不动 / `null` = 清除回未标注 / 值 = 设置。
+   */
+  space?: Space | null
+  /**
+   * 生命周期状态（v0.27.0）——三态：`undefined` = 不动 / `null` = 清除回常态
+   * （= 审核通过）/ 值 = 设为 `pending` 或 `disputed`。
+   * ⚠ 它**不能**把条目设成 archived / deleted：那两态走 `forget`（会写归档时间与原因），
+   * 绕过它会造出「archived 但没有归档理由」的半成品。
+   */
+  status?: EntryStatus | null
   /**
    * 执行位置（v0.23.0）——显式转移 / 清除路径，三态同 `subject`：
    * `undefined` = 不动 / `null` = 清除 / 值 = 设置。
@@ -397,6 +421,9 @@ export class MemoryStore {
       ...(draft.author !== undefined ? { author: draft.author } : {}),
       // 内容分类（v0.26.0）：只在新建时盖章（与 subject/grounding 同形——合并路径保留原归类）
       ...(draft.memType !== undefined ? { memType: draft.memType } : {}),
+      // 空间归属与生命周期（v0.27.0）：同 memType——只在新建时盖章
+      ...(draft.space !== undefined ? { space: draft.space } : {}),
+      ...(draft.status !== undefined ? { status: draft.status } : {}),
       // 证据引用（v0.25.0）：新建路径原样写入（去重与上限在 mergeEvidence 一处实现）
       ...(mergeEvidence(undefined, draft.evidenceRefs) ?? {}),
     }
@@ -453,6 +480,16 @@ export class MemoryStore {
     if (patch.memType !== undefined) {
       if (patch.memType === null) delete updated.memType
       else updated.memType = patch.memType
+    }
+    // 空间归属 / 生命周期显式改判（v0.27.0）：三态同 subject。
+    // `status: null` = 审核通过（回常态），这是候选区的唯一出口。
+    if (patch.space !== undefined) {
+      if (patch.space === null) delete updated.space
+      else updated.space = patch.space
+    }
+    if (patch.status !== undefined) {
+      if (patch.status === null) delete updated.status
+      else updated.status = patch.status
     }
     // 时效维显式续期 / 清除（v0.15.0）：三态同 subject（见 EntryPatch.reviewAfter）。
     // 这条路径承载「到期后的动作链」——核实完再 update 续死线或清除，否则标记永远消不掉。

@@ -58,6 +58,7 @@ export const ARCHIVE_REASON_TYPES = [
   'superseded',
   'stale',
   'capacity',
+  'deleted',
   'unspecified',
 ] as const satisfies readonly ArchiveReasonType[]
 
@@ -77,6 +78,7 @@ const ARCHIVE_REASON_LABELS: Record<ArchiveReasonType, string> = {
   superseded: '被取代',
   stale: '已过时',
   capacity: '容量清理',
+  deleted: '已删除',
   unspecified: '未分类',
 }
 
@@ -248,6 +250,7 @@ export function countByArchiveReason(
     superseded: 0,
     stale: 0,
     capacity: 0,
+    deleted: 0,
     unspecified: 0,
   }
   for (const entry of entries) {

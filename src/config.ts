@@ -15,7 +15,8 @@ import { join } from 'node:path'
 import { parse as parseYaml } from 'yaml'
 import { DEFAULT_ROLES_CONFIG } from './role.ts'
 import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
-import type { AuditConfig, AuditWeights, EntryKind, MemoryConfig, RolePolicy, RolesConfig } from './types.ts'
+import type { AuditConfig, AuditWeights, EntryKind, MemoryConfig, RolePolicy, RolesConfig, Space } from './types.ts'
+import { normalizeSpace } from './space.ts'
 
 /** 合法条目层级（memory.yml layers 字段取值域） */
 const VALID_KINDS: readonly string[] = ['fact', 'knowledge', 'episodic', 'summary']
@@ -77,7 +78,7 @@ const ROLES_KEYS: ReadonlySet<string> = new Set([
 ])
 
 /** 单条角色策略块内合法键 */
-const POLICY_KEYS: ReadonlySet<string> = new Set(['read', 'kinds', 'include_shared', 'include_global'])
+const POLICY_KEYS: ReadonlySet<string> = new Set(['read', 'kinds', 'include_shared', 'include_global', 'spaces'])
 
 /** 缺省配置（§2.3 默认值表），冻结防改 */
 export const DEFAULT_CONFIG: MemoryConfig = deepFreeze({
@@ -411,6 +412,39 @@ function policyOrDefault(value: unknown, fallback: RolePolicy, name: string): Ro
     out.kinds = layersOrDefault(value.kinds)
   } else if (fallback.kinds !== undefined) {
     out.kinds = [...fallback.kinds]
+  }
+  // 空间白名单（v0.27.0 · 方案 §3.2）：给就校验（fail-loud），未给则继承 fallback。
+  // 语义是 **fail-closed**：设了它，未标注 space 的条目对被授权者不可见（见 role.ts::admitsEntry）。
+  if (value.spaces !== undefined && value.spaces !== null) {
+    out.spaces = spaceList(value.spaces, `${name}.spaces`)
+  } else if (fallback.spaces !== undefined) {
+    out.spaces = [...fallback.spaces]
+  }
+  return out
+}
+
+/**
+ * 空间白名单数组（v0.27.0）：每项必须能归一为四空间之一，否则**报错**。
+ *
+ * 刻意接受中文别名（`个人` / `项目` / `领域` / `系统`）：配置是人写的，容错只影响读取；
+ * 认不出的值一律拒绝——静默丢弃会让「我限制了空间」变成「我什么都没限制」。
+ */
+function spaceList(value: unknown, name: string): Space[] {
+  if (!Array.isArray(value)) {
+    throw new MemoryConfigError(`memory.yml: ${name} 必须是数组（如 ["personal", "project"]）`)
+  }
+  const out: Space[] = []
+  for (const item of value) {
+    if (typeof item !== 'string' || item.trim().length === 0) {
+      throw new MemoryConfigError(`memory.yml: ${name} 元素必须是非空字符串（实际：${JSON.stringify(item)}）`)
+    }
+    const normalized = normalizeSpace(item)
+    if (normalized === undefined) {
+      throw new MemoryConfigError(
+        `memory.yml: ${name} 未知空间 ${JSON.stringify(item)}——合法值只有 personal / project / domain / system`,
+      )
+    }
+    if (!out.includes(normalized)) out.push(normalized)
   }
   return out
 }
