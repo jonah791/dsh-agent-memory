@@ -766,6 +766,7 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 | A128 | 派生结构边来自字段且**不落盘**：`supersededBy` / `supersedes` / `archiveRef` 读成结构边（方向与标签正确、两侧同写只算一条），而 `relations.all()` 长度不变 | 同文件「R5」 | ✔ 已实测 |
 | A129 | ★**写入边界真 parse**：`relationSchema.parse()` 后 13 个字段全部存活（未声明字段会被静默剥掉——同一个坑第十四次的机制承载） | 同文件「R6」 | ✔ 已实测 |
 | A130 | 统计口径：`byType` 之和 == `total`、`nodesCovered` 按可见集合算；**未接线时 `wired=false`** 且关系工具响亮报错（「没接线」≠「零条」） | 同文件「R8」 | ✔ 已实测 |
+| A131 | ★**反例（线上抓到的缺陷）**：`memory_relate` 的 `typed` 段在**对端已归档**时仍必须返回该边——首版复用 `includeArchive=false` 的集合解析端点 ⇒ 指向冷存档的边整条消失（线上实测 0 vs `memory_relations` 的 1） | 同文件「R10」 | ✔ 已实测 |
 
 > 测量口径：`pending = total − proven`（fail-closed）。解析器现算 `total=78, proven=76, pending=2`（A17 周期补压 / A30 memoryApi 写入待线上验收）。**本次新增 6 行（A79–A84）全为「已实测」⇒ pending 不变（仍 2）**。
 > ✅ **曾报 77 的「差 1」已定位并修复（2026-09-22）**：真因是 `dsh-semantic-docs` 的 `parseTables` **把「空行切断后形成的续块」的首行当表头吞掉**——本表 A44 与 A45 之间有一个空行，A45 因此长期不进 `total`（`verified` 判据因 total 偏小而**偏松**）。已修（表头判据改为「第二行是分隔行」，commit `7f9def6`，含 RED→GREEN 单测 + 64 份文档全量对账 mismatch 0），现算 `total=78`，与本表 78 个 A 行一致。
@@ -975,8 +976,9 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
     - **设计决定（三条，都为了不制造第二真源）**：① 边是**独立资源**（新表 `relations`），不往条目加字段；② `supersedes` **不由 `memory_link` 写**——替代关系已有字段与唯一写入口 `memory_supersede`，本层只读派生视图（`archiveRef` 同理）；③ 两端必须存在，缺一端整笔拒绝（半成品边比没写难查）。
     - **两条边界口径（都是撞出来的）**：① **有效期两个粒度**——纯日期含当日、ISO 时刻左闭右开；首版统一用「`validTo >= now` 算有效」，于是 `memory_unlink` 写 `now` 之后同一毫秒内读到的仍是「有效」（单测实测 1 !== 0）⇒ 即时退役必须左闭右开。② **幂等只对有效边**——已退役的同类边不算重复：再成立是新的历史段，复用它等于抹掉旧边的 `validTo`。
     - **踩坑（同一个坑第十四次）**：`index.ts::relationSchema` 必须声明全部 13 个字段，否则 storage-domain 在写入边界静默剥掉而写入仍返回成功；A129 用 `relationSchema.parse()` **真校验**（不是 grep 源码）承载。
-    - **判据分层**：纯函数（有效期 / 结构边派生 / 参数 fail-loud）→ 存储（幂等 / 软退役）→ 工具（双向读 / 视野过滤 / 统计 wired 标志）→ 写入边界（schema 真 parse）。`tests/relations.test.mjs` 9 条。
-    - **落地判据**：`npm test` **514/514**、`npm run test:ts` **88 pass / 1 skip**；工具面 16 → 19（`memory_link` / `memory_unlink` / `memory_relations`）。
+    - **判据分层**：纯函数（有效期 / 结构边派生 / 参数 fail-loud）→ 存储（幂等 / 软退役）→ 工具（双向读 / 视野过滤 / 统计 wired 标志）→ 写入边界（schema 真 parse）。`tests/relations.test.mjs` 10 条。
+    - **线上验收抓到的缺陷（同日修，A131）**：`memory_relate` 的 `typed` 段首版复用 `includeArchive=false` 的条目集合解析边的两端 ⇒ 指向压缩检查点 / 归档原料的边**整条消失**（00:31 实测：同一刻 `memory_relations` 报 1 条、`memory_relate` 报 0 条）。修法是**边的端点用含归档的视野解析**——边存在性不该依赖对端是否活跃；邻居检索仍按 `includeArchive` 走（那是有意降噪）。教训：**把「邻居检索的降噪口径」复用到「边存在性」上，是两种语义混用**；判据要分别写（R10 反例）。
+    - **落地判据**：`npm test` **515/515**、`npm run test:ts` **88 pass / 1 skip**；工具面 16 → 19（`memory_link` / `memory_unlink` / `memory_relations`）。
 
 ## 10 · 未决问题
 
