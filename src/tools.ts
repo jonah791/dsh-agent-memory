@@ -2241,7 +2241,17 @@ function buildRelate(deps: MemoryToolDeps): ToolDefinition {
         : relatedOf(entries, target, limitPerHop, includeArchive).map((r) => ({ ...r, hop: 1 }))
       // 类型化关系（v0.28.0 · 方案 §4.4）：与统计相似**并列**返回，不互相替代。
       // 未接线时静默为空（关系层可选依赖）；`memory_relations` 才是它的主读口。
-      const titleById = new Map(entries.map((entry) => [entry.id, entry.title]))
+      //
+      // ⚠ **边的端点用「含归档」的视野解析**（线上实测 2026-11-19 00:31 抓到的缺陷）：
+      // 首版复用上面的 `entries`（受 `includeArchive` 控制、且 `store.list` 还会跳过冷存档），
+      // 于是「指向一条压缩检查点 / 归档原料」的边因为对端不在集合里而**整条消失**——
+      // 实测：交付记忆有一条 `sourced-from` 指向 00:27 的压缩检查点，`memory_relate` 报 0 条而
+      // `memory_relations` 报 1 条。**边存在性不该依赖对端是否活跃**：那正是「这条结论来自哪份
+      // 已经归档的观察」最需要被看见的场景。邻居检索仍按 `includeArchive` 走（那个是有意的降噪）。
+      const edgeEntries = includeArchive
+        ? entries
+        : gatherReadable(deps, { readScopes, includeArchive: true, view, explicitScope: args.scope }).entries
+      const titleById = new Map(edgeEntries.map((entry) => [entry.id, entry.title]))
       const typed = deps.relations === undefined
         ? []
         : edgesOf(
@@ -2259,7 +2269,7 @@ function buildRelate(deps: MemoryToolDeps): ToolDefinition {
             provenance: hit.relation.provenance,
             live: hit.live,
           }))
-      const structural = structuralHitsOf(entries.filter((entry) => includeArchive || !entry.archived), target.id)
+      const structural = structuralHitsOf(edgeEntries, target.id)
         .filter((edge) => titleById.has(edge.peer))
         .slice(0, 10)
         .map((edge) => ({

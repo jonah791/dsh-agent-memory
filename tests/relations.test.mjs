@@ -284,6 +284,24 @@ test('R8 统计：byType 之和 == total；未接线时 wired=false', async () =
   await assert.rejects(() => unwiredRead.execute({ id: a }, exec), /关系层未接线/)
 })
 
+test('R10 memory_relate 的 typed 段不因对端归档而消失（线上 00:31 缺陷的反例）', async () => {
+  const { store, byName, exec } = setup()
+  const conclusion = await seed(store, '结论条目')
+  const source = await seed(store, '原料条目')
+  await byName.get('memory_link').execute({ type: 'derived-from', from: conclusion, to: source, provenance: 'measured' }, exec)
+  // 把对端归档（模拟压缩链把原料归档成冷存档）
+  await store.forget(WID, source, { reasonType: 'capacity', reason: 'R10 夹具' })
+
+  const relate = await byName.get('memory_relate').execute({ id: conclusion }, exec)
+  assert.equal(
+    relate.typed.length,
+    1,
+    '对端已归档时边仍必须出现——「这条结论派生自已归档的观察」正是最需要被看见的边；'
+    + '首版复用 includeArchive=false 的集合，线上实测报 0 条（同一刻 memory_relations 报 1 条）',
+  )
+  assert.equal(relate.typed[0].peer, source)
+})
+
 test('R9 纯函数：有效期判据与证据坐标解析的 fail-loud', () => {
   const now = new Date('2026-11-19T00:00:00Z')
   assert.equal(isRelationLive({}, now), true, '未设 validTo = 仍有效')
