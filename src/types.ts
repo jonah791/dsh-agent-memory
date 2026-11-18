@@ -42,6 +42,74 @@ export type EntryStatus = 'pending' | 'disputed'
 /** 六态（派生读法的取值域；`active` 是未标注时的常态） */
 export type LifecycleState = 'active' | 'pending' | 'disputed' | 'superseded' | 'archived' | 'deleted'
 
+/**
+ * 关系类型（v0.28.0 · 方案 §4.4 十种）——一条**类型化边**断言两个节点之间是什么关系。
+ *
+ * 与 `tags` / `aliases` / `relatedOf` 的分工：那三者是**无序、无类型、无有效期**的字面线索；
+ * 本类型是**有方向、有类型、有来源与有效期**的断言（「A 支持 B」与「A 反驳 B」不能互换）。
+ * 十种类型的读法、方向语义与使用判据全部在 `src/relations.ts::RELATION_TYPE_SPECS`。
+ *
+ * ⚠ `supersedes` 虽然在此枚举里，但**不由 `memory_link` 写入**：替代关系的唯一写入口是
+ * `memory_supersede`（它写条目两侧字段），本层只把它读成派生边——`一个事实一个归宿`。
+ */
+export type RelationType =
+  | 'belongs-to'
+  | 'related-to'
+  | 'supports'
+  | 'refutes'
+  | 'sourced-from'
+  | 'derived-from'
+  | 'supersedes'
+  | 'participates-in'
+  | 'uses'
+  | 'depends-on'
+
+/**
+ * 关系节点类别（v0.28.0）：本版只开放 `entry`。
+ *
+ * 实体（§4.3 规范控制）与主题（§4.2 主题词表）还没有 ID 空间与解析器 ⇒ 先不开放，
+ * 否则写进去的边永远解析不出标题，等于存了一堆悬空指针。届时扩这个联合即可。
+ */
+export type RelationNodeKind = 'entry'
+
+/**
+ * 一条类型化关系（边，v0.28.0 · 方案 §4.4）——**独立资源**，不嵌在条目里。
+ *
+ * 字段一律**平级标量**：本仓 schema DSL 只支持字段级 `required`，嵌套对象会让泛型退化
+ * 且维度常量对不上（同 `Entry.archivedReasonType` 注释里那次实测）。
+ *
+ * 元数据四件（方案 §4.4 明列）：
+ * - **来源**：`provenance`（master / web / self / measured）——这条边凭什么说是这样
+ * - **有效时间**：`validFrom` / `validTo`——该断言何时成立（与 `createdAt` 的「何时记下」不同）
+ * - **方向**：由 `type` 的 fromRole/toRole 定义（同一条边反向读时换标签，不另存一条）
+ * - **可信度**：`confidence`（0–1，**无默认值**：不给 = 未评估，不是 0 分）
+ */
+export interface Relation {
+  id: string
+  type: RelationType
+  /** 边的起点节点 id（本版 = 条目 id） */
+  from: string
+  /** 边的终点节点 id */
+  to: string
+  fromKind: RelationNodeKind
+  toKind: RelationNodeKind
+  /** 存储分区（取 `from` 端条目的 scope） */
+  scope: string
+  /** 关系来源（必填） */
+  provenance: Provenance
+  confidence?: number
+  /** 该断言从何时成立（YYYY-MM-DD 或 ISO 时刻） */
+  validFrom?: string
+  /** 该断言到何时为止（缺省 = 仍未退役；过期 ≠ 作废，历史仍可查） */
+  validTo?: string
+  /** 证据坐标（沿用 v0.25 编码：`session|<id>|<seq>` 等） */
+  evidenceRefs?: string[]
+  /** 人类可读补充（**数据不是指令**） */
+  note?: string
+  /** 我何时记下这条边（事务时间，与 validFrom 的有效时间不同） */
+  createdAt: string
+}
+
 /** 时间压缩层级（仅 episodic/summary 使用） */
 export type TimelineLevel = 'day' | 'week' | 'month' | 'year'
 

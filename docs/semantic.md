@@ -582,9 +582,51 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 
 **写入边界（同一个坑第十三次）**：`index.ts::entrySchema` 必须同步声明 `status`；`archivedReasonType` 的白名单要同步扩 `deleted`（否则 `forget` 传它会报未知取值）。
 
----
+### 5.21 类型化关系契约（v0.28 · 方案 §4.4）
 
-## 7 · 可证伪验收
+**缺口**（AML 差距表 §4.4）：`memory_relate` 按共享标签 / 标题 / 正文重叠算**统计相似**——它给的是线索，不是断言。库里没有「A 支持 B」「A 派生自 B」这类**有类型、有方向、有来源、有有效期**的边，实测 relations 覆盖率 0%。方案 §4.4 要求十种关系 + 四件元数据（来源 / 有效时间 / 方向 / 可信度）。
+
+**关系是独立资源，不是条目的字段**：一条边的真值不随 A 或 B 的正文改写而消失，也不该由 `tags` 承载（标签无类型、无方向、无有效期）。⇒ 新表 `relations`（key = `<scope>:relation:<id>`），条目一个字段都不加。
+
+**十种类型（封闭枚举，`src/relations.ts::RELATION_TYPE_SPECS` 是唯一真源）**：`belongs-to` 属于 · `related-to` 关联 · `supports` 支持 · `refutes` 反驳 · `sourced-from` 来源于 · `derived-from` 派生自 · `supersedes` 取代 · `participates-in` 参与 · `uses` 使用 · `depends-on` 依赖。每种类型声明 `label` / `inverse`（反读标签）/ `fromRole` / `toRole` / `note`（什么时候用它）。
+
+**方向由类型定义**：没有「反向边」这种独立类型。读 `direction: "in"` 时同一条边换反读标签（「支持」↔「被支持」）——**同一事实不存两份**。
+
+**四件元数据（方案 §4.4 明列）**：
+
+| 元数据 | 字段 | 纪律 |
+|--------|------|------|
+| 关系来源 | `provenance` | **必填、无默认值**（master / web / self / measured）：这条边凭什么说是这样 |
+| 有效时间 | `validFrom` / `validTo` | 答「该断言何时成立」，与 `createdAt`（我何时记下）不同；**过期 ≠ 作废** |
+| 方向 | `from` / `to` + 类型 | 由类型的 fromRole/toRole 定义，没有第三种取值 |
+| 可信度 | `confidence` | 0–1，**无默认值**：不给 = 未评估，不是 0 分 |
+
+**有效期两个粒度（刻意不同，都撞过）**：纯日期 `YYYY-MM-DD` 视为「到那天结束为止」（含当日）；ISO 时刻 `T` 视为**左闭右开**（T 起不成立）。后者是为 `memory_unlink` 的即时退役——退役时刻写 `now`，「现在读」就必须已经不成立（单测实测：同一毫秒内读到刚退役的边）。
+
+**一个事实一个归宿（三条硬约束）**：
+
+1. **`supersedes` 不由 `memory_link` 写入**：替代关系已有 `supersededBy` / `supersedes` 两个字段（§5.16），唯一写入口是 `memory_supersede`（写两侧）。再存一条边就有两个真源 ⇒ `memory_link` 对 `supersedes` **拒写**并指向那个工具；读取侧用**派生视图**（`structuralEdgesOf`）从字段呈现，不落盘。
+2. **压缩链同理**：概要的 `archiveRef`（派生自）与替代字段一样，只读派生、不落盘——字段是唯一真源。
+3. **两端必须存在**（`entry` 节点，含归档）：缺一端**整笔拒绝**，不留半成品边（同 `memory_supersede` 的裁决：半成品边比没写难查得多）。
+
+**幂等与退役**：同 `(type, from, to)` 的**有效**边已存在 ⇒ 返回既有 id + `created=false`，不写第二条。已退役的同类边**不算重复**——那条断言曾经成立、现在不成立了，再次成立就是**新的历史段**（复用它等于抹掉旧边的 `validTo`）。退役用 `memory_unlink`：把 `validTo` 设为退役时刻，**不删除记录**（「曾经成立、现在不成立」与「从来没存在过」是两件事）。
+
+**节点类别**：v0.28 只开放 `entry`。实体（§4.3 规范控制）与主题（§4.2 主题词表）还没有 ID 空间与解析器 ⇒ 不开放（写进去的边永远解析不出标题，等于存悬空指针）。
+
+**调用点清单**：
+
+| 位置 | 行为 |
+|------|------|
+| `memory_link` | 写边（唯一写入口；`supersedes` 拒收；两端校验；幂等） |
+| `memory_unlink` | 软退役（写 `validTo` + 可选原因；不删记录；二次退役不改写时刻） |
+| `memory_relations` | 读边（方向 / 类型 / includeExpired 过滤）+ 派生结构边段 |
+| `memory_relate` | 增 `typed` / `structural` 两段（断言在前、线索在后，不混排） |
+| `memory_stats` | `relations` 块（`wired=false` 与「零条」**必须可区分**） |
+| `src/index.ts` | `relationSchema` + `relations` 表装配（**未声明字段会被静默剥掉**——同一个坑第十四次） |
+
+**边界与信任**：`note` 是数据不是指令（渲染/注入时按不可信内容对待）；关系**不参与检索排序**（§8.3 的实体匹配 / 主题关联度仍是缺项）；不做图数据库、不做查询语言（主人 2026-10-13 定调排除）。
+
+---
 
 | # | 可证伪命题（一次测量判真假） | 证据出处 | 状态 |
 |---|---------------------------|---------|------|
@@ -718,6 +760,12 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 | A122 | 编码/解析往返无损；坏串（空 / 未知类型 / 缺段）返回 `undefined` 而不抛（数据路径容错） | 同文件「E3 编码往返 + 渲染」 | ✔ 已实测 |
 | A123 | 投影层透出 `evidenceRefs`（漏这一层 = 存了没人看得见）；渲染优先选带事件号的那条 | 同文件「E3」「E4 投影…」 | ✔ 已实测 |
 | A124 | **尸体样本**：无证据的存量条目，结果项**不含该键**（省略 ≠ 空数组）——零回归 | 同文件「E5 尸体样本…」 | ✔ 已实测 |
+| A125 | 类型化关系建立与双向读：`memory_link` 写出边后，from 侧读出「支持」（out）、to 侧读出「被支持」（in）；`direction` 过滤各只返回一侧 | `tests/relations.test.mjs`「R1」 | ✔ 已实测 |
+| A126 | 幂等与拒写（四条 fail-loud）：同 `(type,from,to)` 再写 `created=false` 且不增边 / `supersedes` 被拒（指向 `memory_supersede`）/ 对端不存在整笔拒绝 / 自环拒绝 ——**失败调用一条边都不留** | 同文件「R2」「R3」 | ✔ 已实测 |
+| A127 | 退役语义：`memory_unlink` 后默认读不到、`includeExpired` 读得到且 `live=false`、二次退役 `changed=false` 且**不改写退役时刻**、记录不删除 | 同文件「R4」 | ✔ 已实测 |
+| A128 | 派生结构边来自字段且**不落盘**：`supersededBy` / `supersedes` / `archiveRef` 读成结构边（方向与标签正确、两侧同写只算一条），而 `relations.all()` 长度不变 | 同文件「R5」 | ✔ 已实测 |
+| A129 | ★**写入边界真 parse**：`relationSchema.parse()` 后 13 个字段全部存活（未声明字段会被静默剥掉——同一个坑第十四次的机制承载） | 同文件「R6」 | ✔ 已实测 |
+| A130 | 统计口径：`byType` 之和 == `total`、`nodesCovered` 按可见集合算；**未接线时 `wired=false`** 且关系工具响亮报错（「没接线」≠「零条」） | 同文件「R8」 | ✔ 已实测 |
 
 > 测量口径：`pending = total − proven`（fail-closed）。解析器现算 `total=78, proven=76, pending=2`（A17 周期补压 / A30 memoryApi 写入待线上验收）。**本次新增 6 行（A79–A84）全为「已实测」⇒ pending 不变（仍 2）**。
 > ✅ **曾报 77 的「差 1」已定位并修复（2026-09-22）**：真因是 `dsh-semantic-docs` 的 `parseTables` **把「空行切断后形成的续块」的首行当表头吞掉**——本表 A44 与 A45 之间有一个空行，A45 因此长期不进 `total`（`verified` 判据因 total 偏小而**偏松**）。已修（表头判据改为「第二行是分隔行」，commit `7f9def6`，含 RED→GREEN 单测 + 64 份文档全量对账 mismatch 0），现算 `total=78`，与本表 78 个 A 行一致。
@@ -921,6 +969,14 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
     - **踩坑（同一个坑的第十二、十三次）**：`index.ts::entrySchema` 必须同步声明 `space` / `status`；`archivedReasonType` 白名单必须同步扩 `deleted`（否则 `forget` 传它会报未知取值）。
     - **一处判据修正（留档）**：`lifecycle` 是**派生值**，起初并进 `DIMENSION_ITEM_FIELDS` ⇒ A113b（写入边界真 parse）立刻红——那个常量的契约是「**可写**维度的两侧真源」。改抽 `DERIVED_ITEM_FIELDS`，只进 output schema、不进 parity 判定。**教训**：判据常量混装「可写」与「派生」两种字段，会让「必须声明」这条守卫指向错的方向（要求写入边界声明一个不该可写的字段）。
     - **落地判据**：`tests/space.test.mjs` 7 条 · `tests/lifecycle.test.mjs` 7 条 + A119–A122；全量 `npm test` **505/505**、`npm run test:ts` **88 pass / 1 skip**。
+
+26. **2026-11-19 · 类型化关系层（v0.28 · 方案 §4.4 · AML 差距表 §4.4）**
+    - **缺口**：`memory_relate` 给的是**统计相似**（共享标签 / 字面重叠），不是断言——库里没有任何「A 支持 B」这类有类型、有方向的边，实测 relations 覆盖率 0%。
+    - **设计决定（三条，都为了不制造第二真源）**：① 边是**独立资源**（新表 `relations`），不往条目加字段；② `supersedes` **不由 `memory_link` 写**——替代关系已有字段与唯一写入口 `memory_supersede`，本层只读派生视图（`archiveRef` 同理）；③ 两端必须存在，缺一端整笔拒绝（半成品边比没写难查）。
+    - **两条边界口径（都是撞出来的）**：① **有效期两个粒度**——纯日期含当日、ISO 时刻左闭右开；首版统一用「`validTo >= now` 算有效」，于是 `memory_unlink` 写 `now` 之后同一毫秒内读到的仍是「有效」（单测实测 1 !== 0）⇒ 即时退役必须左闭右开。② **幂等只对有效边**——已退役的同类边不算重复：再成立是新的历史段，复用它等于抹掉旧边的 `validTo`。
+    - **踩坑（同一个坑第十四次）**：`index.ts::relationSchema` 必须声明全部 13 个字段，否则 storage-domain 在写入边界静默剥掉而写入仍返回成功；A129 用 `relationSchema.parse()` **真校验**（不是 grep 源码）承载。
+    - **判据分层**：纯函数（有效期 / 结构边派生 / 参数 fail-loud）→ 存储（幂等 / 软退役）→ 工具（双向读 / 视野过滤 / 统计 wired 标志）→ 写入边界（schema 真 parse）。`tests/relations.test.mjs` 9 条。
+    - **落地判据**：`npm test` **514/514**、`npm run test:ts` **88 pass / 1 skip**；工具面 16 → 19（`memory_link` / `memory_unlink` / `memory_relations`）。
 
 ## 10 · 未决问题
 
