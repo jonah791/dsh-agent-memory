@@ -54,6 +54,12 @@ import {
   structuralHitsOf,
   type RelationStore,
 } from './relations.ts'
+import {
+  isConceptActive,
+  labelsOf,
+  type ConceptDraft,
+  type ConceptStore,
+} from './thesaurus.ts'
 
 /** 概要重压的外部结果（工具层回报用；与 timeline.RecompressResult 解耦，界面只认这几个读数） */
 export interface RecompressOutcome {
@@ -155,6 +161,13 @@ export interface MemoryToolDeps {
    * `undefined` 时**响亮报错**（「关系层未接线」），绝不假装成功——silent skip 比缺能力更坏。
    */
   relations?: RelationStore
+  /**
+   * 主题词表（v0.29.0 · 方案 §4.2）：受控词表存储。
+   *
+   * 与 `relations` 同形的可选依赖（19 个既有测试文件构造 deps 时不带它）；
+   * 未接线时概念工具与 `memory_stats.concepts` **响亮报错/明确标注**，不假装成功。
+   */
+  concepts?: ConceptStore
 }
 
 /** 缺省配置加载器：读取 .dsh/memory.yml，缺失走默认，非法 fail loud */
@@ -575,6 +588,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看**该重看**的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`（还早）。典型用法：`["expired","due-soon"]` = 「**我的哪些结论该重看了**」。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目在任何取值下都不返回（它们的时效状态是「**不知道**」，不是「有效」）。' },
       superseded: { type: 'string', description: '替代状态筛（v0.24.0）：`current` = 只看**还没被替代**的条目 / `superseded` = 只看**已被替代**的条目。缺省 = 不过滤。⚠ **缺省不隐藏已过时条目是刻意的**——对照是它的全部价值（旧值里往往写着「以前为什么这么定」）。本筛子是**审查入口**：「我有哪些结论已经被顶掉了」。' },
       collapseFamily: { type: 'boolean', description: '家族折叠（v0.16.0 · 论文 Memory Echo 的 Family 组件）：把**候选池内**的「时间桶概要 + 它 archiveRef 的原料」压成**每族一位**（族内得分最高者为代表），其余不占本次服务位。论文依据：「Repeated writes therefore add records, not independent votes」（arXiv 2610.17763v1 §5.1）——同一来源的派生不该当多个独立证据占位。**缺省 false**：论文消融显示 Family 单独上线会把准确率从 0.825 打到 0.651（≈ −33 题），须与「当前事实优先」配对才安全，故先做成可选。⚠ 只在 `includeArchive: true` 时有实际效果（默认视图下原料已冷归档，不会与概要同时命中）；折叠不删数据，只是本次不占位。' },
+      expandThesaurus: { type: 'boolean', description: '按主题词表扩展查询（v0.29.0 · 方案 §4.2）：把查询里出现的概念换成它的**全部同义词**再检索（查「记忆库」也能命中写成「智能体记忆」的条目）。**缺省 false**（存量检索行为逐字不变）；展开的词会出现在返回的 `expandedTerms` 里，**看得见才可复核**。词表为空时静默不扩展（不是错误）。前提：该概念已在词表中且适用中（`memory_concept` 建立、`memory_thesaurus` 查看）。' },
     },
     output: {
       schema: {
@@ -592,6 +606,12 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
             items: { type: 'string' },
             description:
               'v0.12：被泛词门抑制的词项（**仅结果为空时出现**）。出现即说明「命中 0 条」是**打分被抑制**，不是「没有相关记忆」。',
+          },
+          expandedTerms: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'v0.29.0：主题词表扩展出的词（**仅当真发生扩展时出现**）——「这次检索多用了哪些同义词」，让扩展**看得见才可复核**；未开 `expandThesaurus` 时不含本键。',
           },
           results: {
             type: 'array',
@@ -712,7 +732,13 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         })
         return [{
           type: 'text',
-          text: [`命中 ${value.total} 条，返回 ${value.results.length} 条：`, ...lines].join('\n'),
+          text: [
+            (value.expandedTerms !== undefined && value.expandedTerms.length > 0
+              ? `词表扩展 +${value.expandedTerms.length} 词：${value.expandedTerms.join(' / ')}`
+              : ''),
+            `命中 ${value.total} 条，返回 ${value.results.length} 条：`,
+            ...lines,
+          ].filter((line) => line !== '').join('\n'),
         }]
       },
     },
@@ -766,8 +792,21 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         staleness,
         now,
       )
+      // 词表扩展（v0.29.0 · 方案 §4.2）：**开了才扩展**（缺省 false ⇒ 存量检索行为逐字不变）。
+      // 展开出的同义词随结果返回（`expandedTerms`）——扩展改了排序，就必须**看得见**才可复核；
+      // 词表为空 / 未接线时静默不扩展（不是错误：没有受控词表就没有可扩展的东西）。
+      const queryBase = typeof args.query === 'string' ? args.query : ''
+      const expandedTerms: string[] = []
+      if (args.expandThesaurus === true && deps.concepts !== undefined && queryBase.trim().length > 0) {
+        for (const scope of readScopes) {
+          for (const term of deps.concepts.expand(scope, queryBase).extraTerms) {
+            if (!expandedTerms.includes(term)) expandedTerms.push(term)
+          }
+        }
+      }
+      const effectiveQuery = [queryBase, ...expandedTerms].filter((term) => term.trim().length > 0).join(' ')
       const result = recallEntries(filterByLifecycle(filterBySpace(filterByMemType(entries, memTypes), spaces), statuses), {
-        query: args.query,
+        query: effectiveQuery.length > 0 ? effectiveQuery : undefined,
         kind: args.kind,
         tags: args.tags,
         since: args.since,
@@ -785,7 +824,8 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           ids: result.results.map((item) => item.id),
         })
       }
-      return result
+      // 扩展词只在真发生时出现（省略 ≠ 空数组：没开就是没开，不是「扩展了 0 个词」）
+      return expandedTerms.length > 0 ? { ...result, expandedTerms } : result
     },
   })
 }
@@ -1492,6 +1532,21 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
               withValidity: { type: 'integer', required: true, description: '填了有效期（validFrom 或 validTo）的边数' },
             },
           },
+          concepts: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            description: '主题词表（v0.29.0 · 方案 §4.2）：受控词表的读数。⚠ 未接线时 `wired=false`（**「没接线」与「词表为空」必须可区分**）。',
+            properties: {
+              wired: { type: 'boolean', required: true, description: 'false = 词表未接线 ⇒ 下面的 0 不代表「没有概念」' },
+              total: { type: 'integer', required: true },
+              active: { type: 'integer', required: true, description: '适用中的概念数（停用的不算）' },
+              deprecated: { type: 'integer', required: true, description: '已停用（记录保留，旧标签仍可解释）' },
+              withAltLabels: { type: 'integer', required: true, description: '带同义词的概念数（没有同义词的词表只管归一，不管扩展）' },
+              withDefinition: { type: 'integer', required: true, description: '带定义的概念数' },
+              withBroader: { type: 'integer', required: true, description: '有上位概念的概念数（层级从这长出来）' },
+            },
+          },
         },
       },
       render: (args, value) => [{
@@ -1512,7 +1567,11 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           // 关系层（v0.28.0）：单独一行——wired=false 必须看得见（「没接线」≠「零条」）
           + `\n关系层：${value.relations.wired
             ? `${value.relations.total} 条类型化边（有效 ${value.relations.live} / 已退役 ${value.relations.expired}；覆盖 ${value.relations.nodesCovered} 个条目；来源 ${JSON.stringify(value.relations.byProvenance)}；可信度 ${value.relations.withConfidence} 条 / 有效期 ${value.relations.withValidity} 条）`
-            : '未接线（relations 表未装配）——此处的 0 不代表库里没有关系'}`,
+            : '未接线（relations 表未装配）——此处的 0 不代表库里没有关系'}`
+          // 主题词表（v0.29.0）：同 relations——wired=false 必须看得见
+          + `\n主题词表：${value.concepts.wired
+            ? `${value.concepts.total} 个概念（适用 ${value.concepts.active} / 停用 ${value.concepts.deprecated}；带同义词 ${value.concepts.withAltLabels} / 带定义 ${value.concepts.withDefinition} / 有上位 ${value.concepts.withBroader}）`
+            : '未接线（concepts 表未装配）——此处的 0 不代表词表为空'}`,
       }],
     },
     async execute(args, exec) {
@@ -1577,6 +1636,22 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
             }
           }
           return { wired: true, ...relationStats, nodesCovered: covered.size }
+        })(),
+        // 主题词表（v0.29.0）：同 relations——`wired=false` 与「词表为空」必须可区分
+        concepts: (() => {
+          if (deps.concepts === undefined) {
+            return { wired: false, total: 0, active: 0, deprecated: 0, withAltLabels: 0, withDefinition: 0, withBroader: 0 }
+          }
+          const stats = deps.concepts.stats()
+          return {
+            wired: true,
+            total: stats.total,
+            active: stats.active,
+            deprecated: stats.deprecated,
+            withAltLabels: stats.withAltLabels,
+            withDefinition: stats.withDefinition,
+            withBroader: stats.withBroader,
+          }
         })(),
       }
     },
@@ -2103,6 +2178,307 @@ function buildRelations(deps: MemoryToolDeps): ToolDefinition {
         })),
         total: hits.length,
       }
+    },
+  })
+}
+
+/** 词表取用：未接线时**响亮报错**（绝不静默降级成「没有这个概念」） */
+function conceptStoreOf(deps: MemoryToolDeps): ConceptStore {
+  if (deps.concepts === undefined) {
+    throw new Error(
+      '主题词表未接线（deps.concepts 缺失）——受控词表（v0.29.0 · 方案 §4.2）需要 index.ts 装配 '
+      + '`new ConceptStore(domain.table("concepts"))`。这是装配缺陷，不是「词表里没有这个词」。',
+    )
+  }
+  return deps.concepts
+}
+
+/** 构建 memory_concept 工具（v0.29.0 · 方案 §4.2）：维护受控词表的概念 */
+function buildConcept(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_concept',
+    deferLoading: true,
+    description: '维护**受控词表**里的概念（v0.29.0 · 方案 §4.2 · 参考 SKOS）：新建 / 修改 / 停用，或批量导入。'
+      + '一个概念 = 一个首选名（`prefLabel`）+ 若干同义词（`altLabels`）+ 定义 + 使用范围 + 上位（`broader`）+ 关联（`related`）。'
+      + '**它解决什么**：`tags` 是自由文本，同义词各写各的（「记忆库」/「记忆系统」/「智能体记忆」），检索只能逐字匹配；词表让 `recall({expandThesaurus:true})` 按同义词扩展。'
+      + '**唯一标签空间**：同一 scope 内任两个概念的标签不得归一后相同 ⇒ 冲突整笔拒绝（不许自动合并——两个同名词未必是同一件事）。'
+      + '**停用不删除**：`deprecate` 只是「不再用」，旧记忆上的标签仍能解释。上位只存 `broader`，下位由反查派生（一个事实一个归宿）。',
+    parameters: {
+      id: { type: 'string', description: '概念 id（**给了就是修改**；不给 = 新建）。' },
+      prefLabel: { type: 'string', description: '首选名（新建必填；同 scope 内唯一）。' },
+      altLabels: { type: 'array', items: { type: 'string' }, description: '同义词与其他名称（整体替换；空数组 = 清空）。' },
+      definition: { type: 'string', description: '概念定义（它是什么）。' },
+      scopeNote: { type: 'string', description: '使用范围说明（什么时候该用它、什么时候不该用）。' },
+      broader: { type: 'array', items: { type: 'string' }, description: '上位概念 id 列表（整体替换）。⚠ **只存上位**：下位由反查派生，不用手填；成环整笔拒绝。' },
+      related: { type: 'array', items: { type: 'string' }, description: '关联概念 id 列表（整体替换）。**对称**：只写一侧，读时双向都算。' },
+      deprecate: { type: 'boolean', description: '`true` = 停用该概念（需同时给 `id` 与 `reason`）。停用不删除：旧记忆上的标签仍可解释。' },
+      reason: { type: 'string', description: '为什么改 / 为什么停用（可选，但记下来才有复核价值）。' },
+      importJson: { type: 'string', description: '批量导入：JSON 字符串，形态 `{"concepts":[{prefLabel, altLabels, definition, broader, related}]}` 或直接数组。**验完全部再写全部**——任何一项非法则整批拒绝（半套词表比没有更坏）。' },
+      scope: { type: 'string', description: '作用域（缺省当前 workspace；概念与条目同一套存储分区）。⚠ 标签唯一性只在同 scope 内成立。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', required: true, description: 'created / updated / deprecated / unchanged / imported' },
+          id: { type: 'string', required: true },
+          prefLabel: { type: 'string', required: true },
+          scope: { type: 'string', required: true },
+          status: { type: 'string', description: 'deprecated 时出现（未给 = 适用中）' },
+          altLabels: { type: 'array', items: { type: 'string' } },
+          revisionCount: { type: 'integer', required: true, description: '该概念保留的变更记录条数' },
+          imported: { type: 'integer', description: '批量导入时成功写入的概念数' },
+        },
+      },
+      render: (_a, v) => [{
+        type: 'text',
+        text: v.action === 'imported'
+          ? `已导入 ${v.imported} 个概念（首批 ${v.prefLabel}，id=${v.id}）。`
+          : v.action === 'created'
+            ? `已新建概念「${v.prefLabel}」(id=${v.id})${v.altLabels !== undefined && v.altLabels.length > 0 ? `，同义词：${v.altLabels.join(' / ')}` : ''}。`
+            : v.action === 'updated'
+              ? `已更新概念「${v.prefLabel}」(id=${v.id})，变更记录 ${v.revisionCount} 条。`
+              : v.action === 'deprecated'
+                ? `已停用概念「${v.prefLabel}」(id=${v.id})——记录保留，旧记忆上的标签仍可解释。`
+                : `概念「${v.prefLabel}」(id=${v.id}) 无变化（给的字段与现值相同）。`,
+      }],
+    },
+    async execute(args, exec) {
+      const concepts = conceptStoreOf(deps)
+      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { writeScope } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+
+      if (typeof args.importJson === 'string' && args.importJson.trim().length > 0) {
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(args.importJson)
+        } catch (error) {
+          throw new Error(`memory_concept.importJson: 不是合法 JSON（${error instanceof Error ? error.message : String(error)}）`)
+        }
+        const list = Array.isArray(parsed)
+          ? parsed
+          : typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as { concepts?: unknown }).concepts)
+            ? (parsed as { concepts: unknown[] }).concepts
+            : undefined
+        if (list === undefined) throw new Error('memory_concept.importJson: 期望数组或 {concepts: [...]}')
+        const drafts: ConceptDraft[] = list.map((item, index) => {
+          if (typeof item !== 'object' || item === null) throw new Error(`memory_concept.importJson: 第 ${index + 1} 项不是对象`)
+          const raw = item as Record<string, unknown>
+          const prefLabel = typeof raw.prefLabel === 'string' ? raw.prefLabel : ''
+          if (prefLabel.trim().length === 0) throw new Error(`memory_concept.importJson: 第 ${index + 1} 项缺 prefLabel`)
+          const pickStrings = (value: unknown, field: string): string[] | undefined => {
+            if (value === undefined) return undefined
+            if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+              throw new Error(`memory_concept.importJson: 第 ${index + 1} 项 ${field} 必须是字符串数组`)
+            }
+            return value as string[]
+          }
+          return {
+            scope: writeScope,
+            prefLabel,
+            ...(pickStrings(raw.altLabels, 'altLabels') !== undefined ? { altLabels: pickStrings(raw.altLabels, 'altLabels')! } : {}),
+            ...(typeof raw.definition === 'string' ? { definition: raw.definition } : {}),
+            ...(typeof raw.scopeNote === 'string' ? { scopeNote: raw.scopeNote } : {}),
+            ...(pickStrings(raw.broader, 'broader') !== undefined ? { broader: pickStrings(raw.broader, 'broader')! } : {}),
+            ...(pickStrings(raw.related, 'related') !== undefined ? { related: pickStrings(raw.related, 'related')! } : {}),
+          }
+        })
+        const created = await concepts.importMany(drafts, writeScope)
+        const first = created[0]!
+        return {
+          action: 'imported',
+          id: first.id,
+          prefLabel: first.prefLabel,
+          scope: first.scope,
+          revisionCount: (first.revisions ?? []).length,
+          imported: created.length,
+        }
+      }
+
+      const reason = typeof args.reason === 'string' ? args.reason : undefined
+      if (args.deprecate === true) {
+        const id = typeof args.id === 'string' ? args.id.trim() : ''
+        if (id.length === 0) throw new Error('memory_concept: deprecate 需要 id')
+        if (reason === undefined || reason.trim().length === 0) throw new Error('memory_concept: deprecate 需要 reason（为什么不再用）')
+        const result = await concepts.deprecate(id, reason)
+        return {
+          action: result.changed ? 'deprecated' : 'unchanged',
+          id: result.concept.id,
+          prefLabel: result.concept.prefLabel,
+          scope: result.concept.scope,
+          status: 'deprecated',
+          revisionCount: (result.concept.revisions ?? []).length,
+        }
+      }
+
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      if (id.length > 0) {
+        const patch = {
+          ...(typeof args.prefLabel === 'string' ? { prefLabel: args.prefLabel } : {}),
+          ...(Array.isArray(args.altLabels) ? { altLabels: args.altLabels as string[] } : {}),
+          ...(typeof args.definition === 'string' ? { definition: args.definition } : {}),
+          ...(typeof args.scopeNote === 'string' ? { scopeNote: args.scopeNote } : {}),
+          ...(Array.isArray(args.broader) ? { broader: args.broader as string[] } : {}),
+          ...(Array.isArray(args.related) ? { related: args.related as string[] } : {}),
+        }
+        const before = concepts.find(id)
+        if (before === undefined) throw new Error(`memory_concept: 未找到概念 id="${id}"`)
+        const updated = await concepts.update(id, patch, reason)
+        const changed = updated.updatedAt !== before.updatedAt
+        return {
+          action: changed ? 'updated' : 'unchanged',
+          id: updated.id,
+          prefLabel: updated.prefLabel,
+          scope: updated.scope,
+          ...(updated.status !== undefined ? { status: updated.status } : {}),
+          ...(updated.altLabels !== undefined ? { altLabels: updated.altLabels } : {}),
+          revisionCount: (updated.revisions ?? []).length,
+        }
+      }
+
+      const prefLabel = typeof args.prefLabel === 'string' ? args.prefLabel : ''
+      if (prefLabel.trim().length === 0) throw new Error('memory_concept: 新建需要 prefLabel（首选名）；修改请给 id')
+      const draft: ConceptDraft = {
+        scope: writeScope,
+        prefLabel,
+        ...(Array.isArray(args.altLabels) ? { altLabels: args.altLabels as string[] } : {}),
+        ...(typeof args.definition === 'string' ? { definition: args.definition } : {}),
+        ...(typeof args.scopeNote === 'string' ? { scopeNote: args.scopeNote } : {}),
+        ...(Array.isArray(args.broader) ? { broader: args.broader as string[] } : {}),
+        ...(Array.isArray(args.related) ? { related: args.related as string[] } : {}),
+      }
+      const created = await concepts.create(draft)
+      return {
+        action: 'created',
+        id: created.id,
+        prefLabel: created.prefLabel,
+        scope: created.scope,
+        ...(created.altLabels !== undefined ? { altLabels: created.altLabels } : {}),
+        revisionCount: (created.revisions ?? []).length,
+      }
+    },
+  })
+}
+
+/** 构建 memory_thesaurus 工具（v0.29.0 · 方案 §4.2）：查词表 / 看概念详情 / 导出 */
+function buildThesaurus(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_thesaurus',
+    deferLoading: true,
+    description: '查**受控词表**（v0.29.0 · 方案 §4.2）：按标签查概念（首选名或同义词都认）、看一个概念的上下位/关联/变更记录、或导出整份词表（SKOS-lite JSON，可再导入）。'
+      + '**与 `tags` 的分工**：`tags` 是自由文本（逐字匹配），词表是**同义词与层级的唯一真源**——`recall({expandThesaurus:true})` 就是靠它把查询词换成全部写法。'
+      + '缺省列出适用中的概念（停用的不列，`includeDeprecated:true` 才看；**停用不删除**：旧记忆上的标签还要能解释）。',
+    parameters: {
+      query: { type: 'string', description: '按标签查：命中首选名或任一**同义词**（归一后子串匹配，中文不需要分词）。' },
+      id: { type: 'string', description: '看单个概念详情：含全部标签、定义、范围说明、下位（派生）、关联、上位链、变更记录。' },
+      scope: { type: 'string', description: '作用域覆盖（缺省当前 workspace + global 一起查）。' },
+      export: { type: 'boolean', description: '`true` = 导出整份词表（SKOS-lite JSON 字符串，含 prefLabel/altLabel/broader/related/definition/scopeNote/status）。' },
+      includeDeprecated: { type: 'boolean', description: '是否包含已停用的概念（缺省否）。' },
+      limit: { type: 'integer', description: '列表条数上限（缺省 50）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          mode: { type: 'string', required: true, description: 'lookup / detail / list / export' },
+          total: { type: 'integer', required: true, description: '本次返回的概念数' },
+          concepts: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                prefLabel: { type: 'string', required: true },
+                altLabels: { type: 'array', items: { type: 'string' } },
+                definition: { type: 'string' },
+                scopeNote: { type: 'string' },
+                status: { type: 'string' },
+                broader: { type: 'array', items: { type: 'string' }, description: '上位概念**标题**（不是 id，便于直接读）' },
+                narrower: { type: 'array', items: { type: 'string' }, description: '下位概念标题（反查派生，不存字段）' },
+                related: { type: 'array', items: { type: 'string' }, description: '关联概念标题（对称，只写一侧也算）' },
+                revisions: { type: 'integer', description: '变更记录条数（详情模式下出现）' },
+              },
+            },
+          },
+          exportJson: { type: 'string', description: 'export 模式下的整份词表 JSON' },
+        },
+      },
+      render: (_a, v) => {
+        if (v.mode === 'export') return [{ type: 'text', text: `词表导出：${v.total} 个概念\n\`\`\`json\n${v.exportJson ?? ''}\n\`\`\`` }]
+        const concepts = v.concepts ?? []
+        if (concepts.length === 0) {
+          return [{ type: 'text', text: '词表：没有匹配的概念。\n用 memory_concept 建立概念（prefLabel + altLabels），之后 recall({expandThesaurus:true}) 才会按同义词扩展。' }]
+        }
+        const lines = concepts.map((concept) => {
+          const parts: string[] = [`- 「${concept.prefLabel}」(id=${concept.id})`]
+          if (concept.altLabels !== undefined && concept.altLabels.length > 0) parts.push(`同义词：${concept.altLabels.join(' / ')}`)
+          if (concept.status === 'deprecated') parts.push('**已停用**')
+          if (concept.definition !== undefined) parts.push(`定义：${concept.definition}`)
+          if (concept.broader !== undefined && concept.broader.length > 0) parts.push(`上位：${concept.broader.join(' / ')}`)
+          if (concept.narrower !== undefined && concept.narrower.length > 0) parts.push(`下位：${concept.narrower.join(' / ')}`)
+          if (concept.related !== undefined && concept.related.length > 0) parts.push(`关联：${concept.related.join(' / ')}`)
+          return parts.join('；')
+        })
+        return [{ type: 'text', text: `词表（${v.mode}）：${concepts.length} 个概念\n` + lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const concepts = conceptStoreOf(deps)
+      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      const includeDeprecated = args.includeDeprecated === true
+      const limit = typeof args.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 50
+      const titles = new Map(concepts.all().map((concept) => [concept.id, concept.prefLabel]))
+      const titleOf = (id: string): string => titles.get(id) ?? id
+      const view = (concept: ReturnType<ConceptStore['all']>[number], detail: boolean) => ({
+        id: concept.id,
+        prefLabel: concept.prefLabel,
+        ...(concept.altLabels !== undefined ? { altLabels: concept.altLabels } : {}),
+        ...(concept.definition !== undefined ? { definition: concept.definition } : {}),
+        ...(concept.scopeNote !== undefined ? { scopeNote: concept.scopeNote } : {}),
+        ...(concept.status !== undefined ? { status: concept.status } : {}),
+        ...((concept.broader ?? []).length > 0 ? { broader: (concept.broader ?? []).map(titleOf) } : {}),
+        ...(concepts.narrowerOf(concept.id).length > 0 ? { narrower: concepts.narrowerOf(concept.id).map((child) => child.prefLabel) } : {}),
+        ...(concepts.relatedOf(concept.id).length > 0 ? { related: concepts.relatedOf(concept.id).map((peer) => peer.prefLabel) } : {}),
+        ...(detail ? { revisions: (concept.revisions ?? []).length } : {}),
+      })
+
+      if (args.export === true) {
+        const scoped = args.scope === undefined ? concepts.all() : concepts.byScope(String(args.scope))
+        return { ok: true, mode: 'export', total: scoped.length, concepts: [], exportJson: concepts.exportJson(args.scope) }
+      }
+
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      if (id.length > 0) {
+        const concept = concepts.find(id)
+        if (concept === undefined) return { ok: false, mode: 'detail', total: 0, concepts: [] }
+        return { ok: true, mode: 'detail', total: 1, concepts: [view(concept, true)] }
+      }
+
+      const query = typeof args.query === 'string' ? args.query.trim() : ''
+      if (query.length > 0) {
+        const hits = new Map<string, ReturnType<ConceptStore['all']>[number]>()
+        for (const scope of readScopes) {
+          const exact = concepts.findByLabel(scope, query)
+          if (exact !== undefined) hits.set(exact.id, exact)
+          for (const concept of concepts.expand(scope, query).concepts) hits.set(concept.id, concept)
+        }
+        const out = [...hits.values()]
+          .filter((concept) => includeDeprecated || isConceptActive(concept))
+          .slice(0, limit)
+        return { ok: true, mode: 'lookup', total: out.length, concepts: out.map((concept) => view(concept, false)) }
+      }
+
+      const out = readScopes
+        .flatMap((scope) => concepts.byScope(scope))
+        .filter((concept) => includeDeprecated || isConceptActive(concept))
+        .sort((a, b) => a.prefLabel.localeCompare(b.prefLabel))
+        .slice(0, limit)
+      return { ok: true, mode: 'list', total: out.length, concepts: out.map((concept) => view(concept, false)) }
     },
   })
 }
@@ -2858,6 +3234,8 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildLink(deps),
     buildUnlink(deps),
     buildRelations(deps),
+    buildConcept(deps),
+    buildThesaurus(deps),
     buildUpdate(deps),
     buildSupersede(deps),
     buildForget(deps),

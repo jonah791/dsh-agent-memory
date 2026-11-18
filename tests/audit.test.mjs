@@ -115,13 +115,14 @@ function seedRaw(kv, entries) {
 
 // ---------- A42 工具面 ----------
 
-test('A42 工具面：memory_audit 已注册（共 19 个工具）', () => {
+test('A42 工具面：memory_audit 已注册（共 21 个工具）', () => {
   const { byName } = setup()
   // 计数是有意硬编码的：工具面每变一次都必须显式确认一次，
   // 否则「少挂了一个工具」会静默通过（2026-10-29 加 memory_dispose 时它如期变红；
   // 2026-11-17 v0.24.0 加 memory_supersede 时它**又一次如期变红** = 判据有分辨力；
-  // 2026-11-19 v0.28.0 加 memory_link / memory_unlink / memory_relations（类型化关系）**第三次如期变红**）。
-  assert.equal(byName.size, 19)
+  // 2026-11-19 v0.28.0 加 memory_link / memory_unlink / memory_relations（类型化关系）**第三次如期变红**；
+  // v0.29.0 加 memory_concept / memory_thesaurus（主题词表）**第四次如期变红**）。
+  assert.equal(byName.size, 21)
   assert.ok(byName.has('memory_audit'))
   assert.ok(byName.get('memory_audit').description.includes('只读'))
   // v0.9：合并原语进工具面（近重复簇从「只标记」到「可执行」）

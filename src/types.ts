@@ -114,6 +114,66 @@ export interface Relation {
 export type TimelineLevel = 'day' | 'week' | 'month' | 'year'
 
 /**
+ * 主题词表概念（v0.29.0 · 方案 §4.2 · 参考 SKOS）。
+ *
+ * ## 为什么需要它（与 `tags` 的分工）
+ *
+ * `tags` 是**自由文本**：同义词（「记忆库」/「记忆系统」/「智能体记忆」）各写各的，
+ * 检索时只能逐字匹配。受控词表把「同一个概念的多种写法」收在一处，于是
+ * ① 查询可以按同义词扩展（`recall({expandThesaurus:true})`）② 我写标签时有规范名可依。
+ *
+ * ## 一个事实一个归宿（与 SKOS 的两处刻意不同）
+ *
+ * - **只存 `broader`**：SKOS 的 `narrower` 是 `broader` 的逆关系，两边都存会在
+ *   「只改了一侧」时产生矛盾的事实 ⇒ 下位由反查派生（`narrowerOf`）。
+ * - **`related` 对称但只存一次**：读路径双向都算（A→B 与 B→A 是同一句「两者相关」）。
+ *
+ * ## 停用而不删除
+ *
+ * `status: 'deprecated'` 表示「这个词不再用」（同 SKOS 的 deprecated 标记）：它仍可被
+ * 查到（旧条目上的标签还要能解释），只是不再参与查询扩展的默认集合。
+ *
+ * 平级标量 + 数组；`revisions` 是唯一的嵌套（与条目的 `revisions` 同形，仅存储侧用，
+ * 不进工具参数 schema——本仓 schema DSL 的嵌套会让泛型退化，见 `relations.ts` 注释）。
+ */
+export interface Concept {
+  id: string
+  /** 存储分区（与条目同源：global 或 workspaceId） */
+  scope: string
+  /** SKOS prefLabel：首选名（同 scope 内唯一，按 `normalizeLabel` 归一口径） */
+  prefLabel: string
+  /** SKOS altLabel：同义词与其他名称 */
+  altLabels?: string[]
+  /** SKOS definition：概念定义 */
+  definition?: string
+  /** SKOS scopeNote：使用范围说明（什么时候该用它、什么时候不该用） */
+  scopeNote?: string
+  /** SKOS broader：上位概念 id 列表（下位由反查派生，不存） */
+  broader?: string[]
+  /** SKOS related：关联概念 id 列表（对称，读时双向） */
+  related?: string[]
+  /** 停用标记；**无默认值**（未给 = 适用中） */
+  status?: 'deprecated'
+  /** 停用理由（仅在 deprecated 时出现） */
+  deprecatedNote?: string
+  createdAt: string
+  updatedAt: string
+  /** 变更记录：最近 MAX_CONCEPT_REVISIONS 条（创建/改名/增删标签/停用），带原因 */
+  revisions?: ConceptRevision[]
+}
+
+/** 概念的变更记录（与条目的 `revisions` 同形：只留最近几条，全历史在提交里） */
+export interface ConceptRevision {
+  at: string
+  /** 动作：create / update / deprecate */
+  action: string
+  /** 变更内容的人类可读说明（如「prefLabel：旧 → 新」「altLabels +记忆库」） */
+  detail: string
+  /** 为什么改（可选；不填就是「没记原因」，不假装有） */
+  reason?: string
+}
+
+/**
  * 主体层（v0.13.0）：条目**关于谁**——`self`（我，爱丽丝）/ `master`（主人）。
  *
  * 与 `role`（条目归属，v0.5）**正交**：role 答「谁写的」，subject 答「关于谁的」。

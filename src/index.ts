@@ -16,6 +16,7 @@ import { z as zod } from 'zod'
 import { defineDomain, domainTable } from '@deepseek-ai/dsh-storage-domain'
 import { MemoryStore } from './store.ts'
 import { RelationStore } from './relations.ts'
+import { ConceptStore } from './thesaurus.ts'
 import { TimelineCompressor, type SummarizeFn } from './timeline.ts'
 import { summarizeEntries, type SummarizerConfig } from './summarizer.ts'
 import { registerMemoryTools, type MemoryToolDeps } from './tools.ts'
@@ -30,7 +31,7 @@ import { appendDedupeTrace, readDedupeTrace as readDedupeTraceFromSidecar } from
 import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import type { Entry, Grounding, Relation, Subject } from './types.ts'
+import type { Concept, Entry, Grounding, Relation, Subject } from './types.ts'
 import { normalizeSubject } from './subject.ts'
 import { normalizeGrounding } from './grounding.ts'
 import { normalizeReviewAfter, normalizeWatchFor } from './temporal.ts'
@@ -227,7 +228,35 @@ export const relationSchema = zod.object({
   createdAt: zod.string(),
 })
 
-/** 记忆域声明：条目表 + 关系表，key = `<scope>:<kind|relation>:<id>`（domain 即命名空间，规格 §2.2） */
+/**
+ * 概念表 schema（v0.29.0 · 方案 §4.2 主题词表）。
+ *
+ * 同 `entrySchema` / `relationSchema` 的地位：storage-domain 在写入边界用它校验，
+ * **未声明的字段会被静默剥掉而写入仍返回成功**。`revisions` 是本表唯一的嵌套结构
+ * （与条目的 `revisions` 同形，只在存储侧；工具参数面仍保持平级标量）。
+ */
+export const conceptSchema = zod.object({
+  id: zod.string(),
+  scope: zod.string(),
+  prefLabel: zod.string(),
+  altLabels: zod.array(zod.string()).optional(),
+  definition: zod.string().optional(),
+  scopeNote: zod.string().optional(),
+  broader: zod.array(zod.string()).optional(),
+  related: zod.array(zod.string()).optional(),
+  status: zod.enum(['deprecated']).optional(),
+  deprecatedNote: zod.string().optional(),
+  createdAt: zod.string(),
+  updatedAt: zod.string(),
+  revisions: zod.array(zod.object({
+    at: zod.string(),
+    action: zod.string(),
+    detail: zod.string(),
+    reason: zod.string().optional(),
+  })).optional(),
+})
+
+/** 记忆域声明：条目表 + 关系表 + 概念表，key = `<scope>:<kind|relation|concept>:<id>`（domain 即命名空间，规格 §2.2） */
 export const memoryDomainSpec = defineDomain({
   name: 'agent_memory', // DSH 域名限制 /^[a-z][a-z0-9_]*$/（不允许连字符）
   version: 1,
@@ -239,6 +268,10 @@ export const memoryDomainSpec = defineDomain({
     // `relations` 键 ⇒ 读出空表，不需要迁移。判据：重启后 memory_stats.relations.total 为 0
     // 且不报 version-mismatch（见 aml-eval.md 的部署读数）。
     relations: domainTable<string, Relation>(relationSchema),
+    // 概念表（v0.29.0 · 方案 §4.2 主题词表）：同 `relations`——加表不抬 version，
+    // 存量文件里没有 `concepts` 键 ⇒ 读出空表（判据：重启后 memory_stats.concepts.total 为 0
+    // 且不报 version-mismatch）。
+    concepts: domainTable<string, Concept>(conceptSchema),
   },
 })
 
@@ -334,6 +367,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const store = new MemoryStore(domain.table('entries'))
   // 关系层（v0.28.0 · 方案 §4.4）：独立表，节点存在性由工具层校验
   const relations = new RelationStore(domain.table('relations'))
+  // 主题词表（v0.29.0 · 方案 §4.2）：独立表，标签唯一性由 ConceptStore 校验
+  const concepts = new ConceptStore(domain.table('concepts'))
 
   // 侧车用量轨迹（v0.6 价值体检器的用量信号）——**只追加 / 吞错 / 按体积轮转**，绝不改条目。
   // 路径约定与既有插件同源：`<DSH_HOME>/<plugin>-trace.jsonl`。
@@ -541,7 +576,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolveEvidence: NonNullable<MemoryToolDeps['resolveEvidence']> = (sessionId) =>
     lastSeqBySession.get(sessionId)
 
-  registerMemoryTools(ctx, { store, relations, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
+  registerMemoryTools(ctx, { store, relations, concepts, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })
