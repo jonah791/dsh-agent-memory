@@ -38,6 +38,41 @@ const SCORE_BODY = 1
 const SCORE_ENTITY = 2.5
 
 /**
+ * 打分分解里的一个词项贡献（v0.32 · 诊断视图）。
+ *
+ * 存在的理由是可复现的事故：v0.17 加 BM25 长度归一就是**跳过分数分解直接动刀**，
+ * 结果 out-of-sample 差 5.7 个百分点（三次实测见 `BM25_B` 注释）。判据：任何噪声抑制
+ * 改动落地前，必须先看见「哪个 token、在哪个字段、贡献了多少」。
+ */
+export interface ScoreTermBreakdown {
+  /** 该词项贡献的查询词项（小写；中文查询已被展开成 2-gram） */
+  term: string
+  /** 实际用于打分的 IDF（0 = 被泛词门抑制；`entity` 项不乘 IDF，恒记 1） */
+  idf: number
+  /** 重心权重（`weightedTerms` 路径取该词项的权重，普通路径恒 1） */
+  weight: number
+  /**
+   * 命中字段。`alias` = 检索入口词（`aliases` ∪ `cue`，与 `lowerOf` 的合并视图同源）；
+   * `entity` = 实体匹配加成（按整个 hay 匹配，不分字段）；
+   * `cap` = 多字段封顶的**负贡献**（只有开 `tuning.multiFieldCap` 时出现，见 `applyCap`）。
+   */
+  field: 'alias' | 'tag' | 'title' | 'body' | 'entity' | 'cap'
+  /** 实际加进分数的量（已含 IDF、重心权重、长度归一、实体权重） */
+  contribution: number
+}
+
+/** 单个条目的打分分解（v0.32 · 诊断视图；不参与生产排序，也不改变 `total` 语义） */
+export interface ScoreExplanation {
+  id: string
+  title: string
+  /** 正文长度（诊断用：判断一个条目的词面优势是否来自体量） */
+  bodyLength: number
+  score: number
+  /** 逐项贡献，**求和恰好等于 `score`**（A150）；被泛词门抑制的词项也会出现（贡献 0） */
+  terms: ScoreTermBreakdown[]
+}
+
+/**
  * 实体匹配用小写正文视图的缓存（与 `lowerCache` 同一模式、同一失效理由）。
  * 只在真开了实体匹配（`entityMatches` 非空）时才构造 —— 关着的时候零成本。
  */
@@ -56,13 +91,19 @@ function entityHayOf(entry: Entry, view: LowerView): string {
  * @param entry - 候选条目
  * @param view - 该条目的小写视图
  * @param matches - 查询解析出的实体（缺省 = 不做实体匹配）
+ * @param collect - 诊断收集器（缺省 = 不收集，零分配）
  */
-function entityBonus(entry: Entry, view: LowerView, matches: readonly RecallEntityMatch[] | undefined): number {
+function entityBonus(entry: Entry, view: LowerView, matches: readonly RecallEntityMatch[] | undefined, collect?: ScoreTermBreakdown[]): number {
   if (matches === undefined || matches.length === 0) return 0
   const hay = entityHayOf(entry, view)
   let bonus = 0
   for (const match of matches) {
-    if (match.names.some((name) => matchesName(hay, name))) bonus += SCORE_ENTITY * match.weight
+    if (match.names.some((name) => matchesName(hay, name))) {
+      const add = SCORE_ENTITY * match.weight
+      bonus += add
+      // term 取该实体的第一个称呼（调用方按规范名在前构造，见 `RecallEntityMatch.names`）
+      collect?.push({ term: match.names[0] ?? '', idf: 1, weight: match.weight, field: 'entity', contribution: add })
+    }
   }
   return bonus
 }
@@ -187,27 +228,64 @@ const GENERIC_MIN_DF = 50
 const GENERIC_DF_RATIO = 0.1
 
 /**
- * 为查询词集合预算 IDF 表（每词一次 DF 扫描，O(T×N)；recall 为低频操作，实测耗时无感）。
+ * 单个查询词项的检索面画像（v0.32 · 诊断视图）。
+ *
+ * 存在的理由是噪声抑制的核心问题：**同一个查询里，哪些词项有区分力、哪些只是噪声**。
+ * 没有这张表，判断只能靠「哪条排前面」的间接观察——而 v0.17 的教训正是从观察直接跳到结论。
+ */
+export interface TokenProfile {
+  /** 小写词项（中文查询已展开成 2-gram） */
+  term: string
+  /** 检索面上包含该词的条目数 */
+  df: number
+  /** 实际用于打分的 IDF（与 `buildIdf` 同源；0 = 被泛词门抑制） */
+  idf: number
+  /** 是否被泛词门置零（= 该词在本次候选集里没有区分力） */
+  suppressed: boolean
+}
+
+/**
+ * 泛词门判据（v0.9 · 单一真源）：`df ≥ GENERIC_MIN_DF` **且** `df/N > GENERIC_DF_RATIO` ⇒ 无区分力。
+ *
+ * 绝对下限用于**保护小语料**——测试夹具里 df/N 也会到 100%，但那里的词其实有区分力。
+ * 动机（2026-09-26 实测）：主人说「相关度算法可以再改进改进」时命中 135 条、top5 分数并列
+ * （旧实现 6/6/6/6），全是靠 bigram「改进」命中的无关条目——泛词盖过了查询的真实意图。
+ */
+function isGenericTerm(total: number, df: number): boolean {
+  return total > 0 && df >= GENERIC_MIN_DF && df / total > GENERIC_DF_RATIO
+}
+
+/**
+ * 预算查询词项画像（每词一次 DF 扫描，O(T×N)；recall 为低频操作，实测耗时无感）。
+ * @param entries - 候选全集（打分上下文）
+ * @param tokens - 查询词项（可含重复；按小写去重，保持首次出现顺序）
+ */
+export function tokenProfile(entries: readonly Entry[], tokens: readonly string[]): TokenProfile[] {
+  const total = entries.length
+  const seen = new Set<string>()
+  const out: TokenProfile[] = []
+  for (const raw of tokens) {
+    // 统一小写做键：scoreEntry* 查表用小写 token（tokenizeQuery 已小写，但 v0.7 重心项
+    // 来自对话原文，未小写——不在此归一就会查空、静默退化为等权）
+    const term = raw.toLowerCase()
+    if (seen.has(term)) continue
+    seen.add(term)
+    const df = documentFrequency(entries, term)
+    const suppressed = isGenericTerm(total, df)
+    out.push({ term, df, idf: suppressed ? 0 : idfOf(total, df), suppressed })
+  }
+  return out
+}
+
+/**
+ * 为查询词集合预算 IDF 表（委托 `tokenProfile` —— 判据只有一处）。
  * @param entries - 候选全集
  * @param tokens - 查询词项（可含重复）
  * @returns token → IDF
  */
 function buildIdf(entries: readonly Entry[], tokens: readonly string[]): Map<string, number> {
   const out = new Map<string, number>()
-  const total = entries.length
-  for (const raw of tokens) {
-    // 统一小写做键：scoreEntry* 查表用小写 token（tokenizeQuery 已小写，但 v0.7 重心项
-    // 来自对话原文，未小写——不在此归一就会查空、静默退化为等权）
-    const token = raw.toLowerCase()
-    if (out.has(token)) continue
-    const df = documentFrequency(entries, token)
-    // 泛词门（v0.9）：无区分力的词置 idf=0 ⇒ 不贡献分数。动机（2026-09-26 实测）：
-    // 主人说「相关度算法可以再改进改进」时命中 135 条、top5 分数并列（旧实现 6/6/6/6），
-    // 全是靠 bigram「改进」命中的无关条目——泛词盖过了查询的真实意图。
-    // 过滤后若无人得分 ⇒ 结果为空 ⇒ 上游静默跳过（**没有相关记忆就不打扰**）。
-    const generic = total > 0 && df >= GENERIC_MIN_DF && df / total > GENERIC_DF_RATIO
-    out.set(token, generic ? 0 : idfOf(total, df))
-  }
+  for (const profile of tokenProfile(entries, tokens)) out.set(profile.term, profile.idf)
   return out
 }
 
@@ -388,6 +466,36 @@ export function relateClosure(
   return out
 }
 
+/** 一条带分数的候选：`recallEntries` 与 `explainRecall` 共用的排序输入 */
+interface ScoredEntry {
+  entry: Entry
+  score: number
+  /** 诊断收集器（只有 `explainRecall` 填；生产路径不分配） */
+  terms?: ScoreTermBreakdown[]
+}
+
+/**
+ * 排序比较器（v0.32 · 单一真源）：分数降序 → `accessedAt` 新→旧 → `updatedAt` 新→旧 → 稳定。
+ *
+ * **为什么抽成函数**：`explainRecall` 必须复现 `recallEntries` 的**名次**——否则「诊断说第 8、
+ * 实际排第 5」就是新的两把尺子（手写判据已在 v0.17 吃过一次亏）。同分兜底漏一条，
+ * 并列时名次就会错位，而并列在本库并不罕见（长条目多点命中常打出同分）。
+ */
+function compareScored(a: ScoredEntry, b: ScoredEntry): number {
+  if (b.score !== a.score) return b.score - a.score
+  // accessedAt 新→旧（ISO 字典序即时间序）
+  if (a.entry.accessedAt !== b.entry.accessedAt) {
+    return a.entry.accessedAt < b.entry.accessedAt ? 1 : -1
+  }
+  // 同刻稳定排序：updatedAt 新→旧兜底
+  if (a.entry.updatedAt !== b.entry.updatedAt) {
+    return a.entry.updatedAt < b.entry.updatedAt ? 1 : -1
+  }
+  // 全平局返回 0（保持稳定排序/插入序）——2026-09-01 修复：
+  // 原实现相等时返回 -1，违反比较器契约，导致全等条目顺序被打乱
+  return 0
+}
+
 /**
  * recall 主入口：过滤 → 打分 → 排序 → 截断 → 联想（为结果附加相关链）。
  * @param entries - 候选条目（通常为当前 scope 与 global 合并后的全量）
@@ -402,7 +510,7 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   const weighted = query.weightedTerms !== undefined && query.weightedTerms.length > 0
     ? query.weightedTerms
     : undefined
-  const tokens = tokenizeQuery(query.query)
+  const tokens = tokenizeQuery(query.query, query.tuning)
   const hasQuery = weighted !== undefined || tokens.length > 0
   // v0.9：IDF 表——罕见词（特征词）权重高、高频泛词权重低。
   // 在**过滤后**的候选集上算 DF（比较基准就是本次检索范围）。
@@ -426,20 +534,7 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   }))
   // 带查询时剔除零分条目（无关内容不进结果）；无查询词时全量按新鲜度排序
   if (hasQuery) scored = scored.filter(({ score }) => score > 0)
-  scored.sort((a, b) => {
-    if (b.score !== a.score) return b.score - a.score
-    // accessedAt 新→旧（ISO 字典序即时间序）
-    if (a.entry.accessedAt !== b.entry.accessedAt) {
-      return a.entry.accessedAt < b.entry.accessedAt ? 1 : -1
-    }
-    // 同刻稳定排序：updatedAt 新→旧兜底
-    if (a.entry.updatedAt !== b.entry.updatedAt) {
-      return a.entry.updatedAt < b.entry.updatedAt ? 1 : -1
-    }
-    // 全平局返回 0（保持稳定排序/插入序）——2026-09-01 修复：
-    // 原实现相等时返回 -1，违反比较器契约，导致全等条目顺序被打乱
-    return 0
-  })
+  scored.sort(compareScored)
   // v0.17 相对分数门槛：只保留 `score ≥ topScore × RECALL_RELATIVE_FLOOR`。
   // 施加位置有讲究：**排序之后**（要先知道 topScore）、**截断之前**（limit 只负责显示条数，
   // 不负责相关性过滤——旧实现里它是唯一的"减法"，于是 190 条全算命中）。
@@ -483,6 +578,54 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
     // v0.12：仅在「结果为空且确因泛词门」时上报——有结果时不加噪声
     ...(scored.length === 0 && suppressedTerms.length > 0 ? { suppressedTerms } : {}),
   }
+}
+
+/**
+ * 打分分解（v0.32 · 诊断视图）：逐条目返回「哪些词项、在哪个字段、各贡献多少」。
+ *
+ * **为什么必须与生产路径同源**：分解若另写一套打分，它会解释一个**不存在的排序**——
+ * v0.17 的教训正是「没做分解就动刀」（长度归一 out-of-sample 差 5.7 个百分点，见 `BM25_B`）。
+ * 因此本函数复用 `filterEntries` / `buildIdf` / `scoreEntry(Weighted)` / `compareScored`，
+ * 只往打分里挂收集器，**不复制任何判据**（A150：各项贡献之和 == score）。
+ *
+ * 与 `recallEntries` 只有两处刻意差异，都不改分数与名次：
+ * ① 不做相对分数门槛与 `limit` 截断——诊断要看「真金标排第 8」这种被 top5 挡住的事实；
+ * ② 不附联想链（`related`）与家族折叠（两者都不参与打分）。
+ *
+ * @param entries - 候选条目（必须是 recall 的同一个池子，否则名次不可比）
+ * @param query - 与 recall 相同的查询条件（`tuning` 一并生效）
+ * @returns 按分数降序的分解（带查询时零分条目同样不返回）
+ */
+export function explainRecall(entries: Entry[], query: RecallQuery = {}): ScoreExplanation[] {
+  const filtered = filterEntries(entries, query)
+  const tuning = resolveTuning(query.tuning)
+  const weighted = query.weightedTerms !== undefined && query.weightedTerms.length > 0
+    ? query.weightedTerms
+    : undefined
+  const tokens = tokenizeQuery(query.query, query.tuning)
+  const hasQuery = weighted !== undefined || tokens.length > 0
+  const idfTokens = weighted !== undefined ? weighted.map((item) => item.term) : tokens
+  const idf = hasQuery ? buildIdf(filtered, idfTokens) : new Map<string, number>()
+  const avgBodyLen = filtered.length > 0
+    ? filtered.reduce((sum, entry) => sum + entry.body.length, 0) / filtered.length
+    : 0
+  const scored: ScoredEntry[] = filtered.map((entry) => {
+    const terms: ScoreTermBreakdown[] = []
+    const score = weighted !== undefined
+      ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen, tuning, query.entityMatches, terms)
+      : scoreEntry(entry, tokens, idf, avgBodyLen, tuning, query.entityMatches, terms)
+    return { entry, score, terms }
+  })
+  // 与 recallEntries 同一口径：带查询时零分条目不算候选
+  const kept = hasQuery ? scored.filter((item) => item.score > 0) : scored
+  kept.sort(compareScored)
+  return kept.map(({ entry, score, terms }) => ({
+    id: entry.id,
+    title: entry.title,
+    bodyLength: entry.body.length,
+    score,
+    terms: terms ?? [],
+  }))
 }
 
 /**
@@ -557,12 +700,17 @@ const STOP_WORDS = new Set([
 
 /** 查询文本分词：小写 + 按空白切分 + 过滤停用词；无有效词返回空数组（按新鲜度排序）。
  *  **导出（v0.7）**：上下文重心（centroid.ts）复用同一套分词——判据单一真源，不得各写一份。 */
-export function tokenizeQuery(query: string | undefined): string[] {
+export function tokenizeQuery(query: string | undefined, tuning?: RecallTuning): string[] {
   if (query === undefined) return []
   const raw = query.toLowerCase().split(/\s+/).filter((token) => token.length > 0 && !STOP_WORDS.has(token))
   const tokens: string[] = []
+  const dropLongCjk = tuning?.longToken === 'drop'
   for (const token of raw) {
-    tokens.push(token) // 保留原词（英文词 / 精确短语）
+    // 中文长段（≥5 字）的整词 token 只在「某条文档引用过这句话」时命中——那是抄袭检测的
+    // 信号，不是相关性。v0.32 实测：查「压缩之后怎么恢复上下文」时它 df=1 / idf 6.79，
+    // 竟是该查询的**最高分项**，把一条引用了这句查询的记忆推到第 1 名。
+    // `longToken='drop'` 只剔除整词，**不影响下面照常展开它的 2-gram**。
+    if (!(dropLongCjk && /^[\u4e00-\u9fff]{5,}$/.test(token))) tokens.push(token) // 保留原词（英文词 / 精确短语）
     for (const bigram of cjkBigrams(token)) {
       if (!STOP_WORDS.has(bigram) && !tokens.includes(bigram)) tokens.push(bigram)
     }
@@ -638,6 +786,10 @@ interface ResolvedTuning {
   k1: number
   b: number
   relativeFloor: number
+  /** 中文长段整词 token 策略（v0.32）；`keep` = 现行行为 */
+  longToken: 'keep' | 'drop'
+  /** 单 token 多字段封顶（v0.32）；`false` = 现行行为 */
+  multiFieldCap: boolean
 }
 
 /**
@@ -652,7 +804,48 @@ function resolveTuning(tuning?: RecallTuning): ResolvedTuning {
     k1: tuning?.k1 ?? BM25_K1,
     b: tuning?.b ?? BM25_B,
     relativeFloor: tuning?.relativeFloor ?? RECALL_RELATIVE_FLOOR,
+    longToken: tuning?.longToken ?? 'keep',
+    multiFieldCap: tuning?.multiFieldCap ?? false,
   }
+}
+
+/**
+ * 分解收集器写入（v0.32 · 零分配纪律）：`collect === undefined` 时**不构造对象**。
+ *
+ * 为什么不做成 `collect?.push({...})`：参数是对象字面量，即使 `collect` 为 undefined
+ * 它也会被求值构造 —— 而 `scoreEntry` 是热路径（每次 recall 要跑「候选数 × 词项数」遍）。
+ * 插桩不得让生产路径产生任何临时对象。
+ */
+function addTerm(
+  collect: ScoreTermBreakdown[] | undefined,
+  term: string,
+  idf: number,
+  weight: number,
+  field: ScoreTermBreakdown['field'],
+  contribution: number,
+): void {
+  if (collect !== undefined) collect.push({ term, idf, weight, field, contribution })
+}
+
+/**
+ * 单 token 多字段封顶（v0.32 · `tuning.multiFieldCap`）：返回该词项最终计入的分数。
+ *
+ * 未开启时原样返回（缺省行为逐位不变）。开启时封顶在 `SCORE_TAG × IDF`（最高单档），
+ * 并把超额部分记成一条 `field:'cap'` 的**负贡献** —— 这样分解求和仍等于总分（A150），
+ * 且「这个词被削掉了多少」在诊断里看得见。
+ */
+function applyCap(
+  tokenScore: number,
+  capValue: number,
+  tuning: ResolvedTuning,
+  collect: ScoreTermBreakdown[] | undefined,
+  term: string,
+  idf: number,
+  weight: number,
+): number {
+  if (!tuning.multiFieldCap || tokenScore <= capValue) return tokenScore
+  addTerm(collect, term, idf, weight, 'cap', capValue - tokenScore)
+  return capValue
 }
 
 function bodyLengthNorm(bodyLen: number, avgBodyLen: number, tuning: ResolvedTuning): number {
@@ -670,7 +863,7 @@ function bodyLengthNorm(bodyLen: number, avgBodyLen: number, tuning: ResolvedTun
  * @param idf - token → IDF；缺项回退 1（等权，与原行为一致，避免静默变差）
  * @param avgBodyLen - 候选集正文平均长度（用于 BM25 归一化）
  */
-function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning, entityMatches?: readonly RecallEntityMatch[]): number {
+function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning, entityMatches?: readonly RecallEntityMatch[], collect?: ScoreTermBreakdown[]): number {
   if (tokens.length === 0) return 0
   const view = lowerOf(entry)
   const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen, tuning)
@@ -679,12 +872,30 @@ function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, num
     const w = idf.get(token) ?? 1
     // aliases 与 tags 同级（×3，2026-10-13 重做）：二者都是「人工给的检索入口」，
     // 而标题/正文是「内容本身」——入口的意图明确性高于内容偶然的用词。
-    if (view.aliases.some((alias) => alias.includes(token))) score += SCORE_TAG * w
-    if (view.tags.some((tag) => tag.includes(token))) score += SCORE_TAG * w
-    if (view.title.includes(token)) score += SCORE_TITLE * w
-    if (view.body.includes(token)) score += SCORE_BODY * w * lenNorm
+    const hitAlias = view.aliases.some((alias) => alias.includes(token))
+    const hitTag = view.tags.some((tag) => tag.includes(token))
+    const hitTitle = view.title.includes(token)
+    const hitBody = view.body.includes(token)
+    if (hitAlias) addTerm(collect, token, w, 1, 'alias', SCORE_TAG * w)
+    if (hitTag) addTerm(collect, token, w, 1, 'tag', SCORE_TAG * w)
+    if (hitTitle) addTerm(collect, token, w, 1, 'title', SCORE_TITLE * w)
+    if (hitBody) addTerm(collect, token, w, 1, 'body', SCORE_BODY * w * lenNorm)
+    if (tuning.multiFieldCap) {
+      // 封顶路径：先算出该词项的总贡献，再由 `applyCap` 决定计入多少（可能削掉超额）。
+      const tokenScore = (hitAlias ? SCORE_TAG * w : 0)
+        + (hitTag ? SCORE_TAG * w : 0)
+        + (hitTitle ? SCORE_TITLE * w : 0)
+        + (hitBody ? SCORE_BODY * w * lenNorm : 0)
+      score += applyCap(tokenScore, SCORE_TAG * w, tuning, collect, token, w, 1)
+    } else {
+      // 缺省路径：逐项直接累进 score —— 浮点加法顺序与 v0.31 完全相同（零行为变化）。
+      if (hitAlias) score += SCORE_TAG * w
+      if (hitTag) score += SCORE_TAG * w
+      if (hitTitle) score += SCORE_TITLE * w
+      if (hitBody) score += SCORE_BODY * w * lenNorm
+    }
   }
-  return score + entityBonus(entry, view, entityMatches)
+  return score + entityBonus(entry, view, entityMatches, collect)
 }
 
 /**
@@ -692,20 +903,36 @@ function scoreEntry(entry: Entry, tokens: string[], idf: ReadonlyMap<string, num
  * `IDF × 重心权重 × (标签 3 / 标题 2 / 正文 1×lenNorm)`。
  * 与 `scoreEntry` 同构，只是词项带重心权重——这样「话题重心」比「最后一个词」更有话语权。
  */
-function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning, entityMatches?: readonly RecallEntityMatch[]): number {
+function scoreEntryWeighted(entry: Entry, terms: readonly WeightedTerm[], idf: ReadonlyMap<string, number>, avgBodyLen: number, tuning: ResolvedTuning, entityMatches?: readonly RecallEntityMatch[], collect?: ScoreTermBreakdown[]): number {
   if (terms.length === 0) return 0
   const view = lowerOf(entry)
   const lenNorm = bodyLengthNorm(view.body.length, avgBodyLen, tuning)
   let score = 0
   for (const { term, weight } of terms) {
     const token = term.toLowerCase()
-    const w = (idf.get(token) ?? 1) * weight
-    if (view.aliases.some((alias) => alias.includes(token))) score += SCORE_TAG * w
-    if (view.tags.some((tag) => tag.includes(token))) score += SCORE_TAG * w
-    if (view.title.includes(token)) score += SCORE_TITLE * w
-    if (view.body.includes(token)) score += SCORE_BODY * w * lenNorm
+    // 分解里 `idf` 记基值、`weight` 记重心权重，两者相乘才是实际系数——分开记才能看清
+    // 「是这个词罕见」还是「是这个词在重心上」在起作用。
+    const base = idf.get(token) ?? 1
+    const w = base * weight
+    const hitAlias = view.aliases.some((alias) => alias.includes(token))
+    const hitTag = view.tags.some((tag) => tag.includes(token))
+    const hitTitle = view.title.includes(token)
+    const hitBody = view.body.includes(token)
+    if (hitAlias) addTerm(collect, token, base, weight, 'alias', SCORE_TAG * w)
+    if (hitTag) addTerm(collect, token, base, weight, 'tag', SCORE_TAG * w)
+    if (hitTitle) addTerm(collect, token, base, weight, 'title', SCORE_TITLE * w)
+    if (hitBody) addTerm(collect, token, base, weight, 'body', SCORE_BODY * w * lenNorm)
+    // 本路径末尾有 `Math.round(…×1000)/1000`，词项级重排的浮点差被它吸收
+    // ⇒ 这里可以单路径累加（不需要为保真复制两份累加顺序）。
+    const tokenScore = (hitAlias ? SCORE_TAG * w : 0)
+      + (hitTag ? SCORE_TAG * w : 0)
+      + (hitTitle ? SCORE_TITLE * w : 0)
+      + (hitBody ? SCORE_BODY * w * lenNorm : 0)
+    score += applyCap(tokenScore, SCORE_TAG * w, tuning, collect, token, base, weight)
   }
-  return Math.round((score + entityBonus(entry, view, entityMatches)) * 1000) / 1000
+  // ⚠ 这里的 round 是本函数既有行为（v0.7 起）。后果：分解各项之和与 score 存在
+  // **< 1e-3 的舍入差**，A150 的判据在加权路径按容差判、普通路径按逐位相等判。
+  return Math.round((score + entityBonus(entry, view, entityMatches, collect)) * 1000) / 1000
 }
 
 /** 结果项组装：概要字段 + score + 层级标注（level 原样透出，标注文案由工具层给模型） */
