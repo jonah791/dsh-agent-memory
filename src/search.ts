@@ -704,21 +704,82 @@ const STOP_WORDS = new Set([
   '的', '地', '得', '着', '过', '呢', '吧', '啊',
 ])
 
+/**
+ * 疑问 / 指代短语（v0.33 · 意图识别的第一版）——**可枚举的最小集合**。
+ *
+ * 纪律：**新增一条短语必须带来一条能检验它的问法**，不许凭感觉加。加错了会把主题词
+ * 当骨架剔掉，而那种错误在读数上只表现为「相关性变差」，几乎无法归因。
+ */
+const QUESTION_PHRASES = [
+  '是什么', '是啥', '是谁', '为什么', '怎么', '怎样', '如何',
+  '有哪些', '有哪几个', '都有谁', '哪个', '哪些',
+  '什么', '多少', '几个', '是否', '能不能', '可不可以',
+]
+
+/**
+ * 取出查询里命中的疑问短语所对应的「应剔除词项」集合（短语本身 + 它的 2-gram）。
+ *
+ * 为什么不剔「短语 + 名词」里的名词（如 `什么状态` 的「状态」）：那需要分词器，而无分词的
+ * 猜词会误杀主题词——`状态` 在「状态管理和进度管理是重中之重」里就是主题词。
+ * ⇒ 只处理字面可枚举的部分，宁可少剔（见 `docs/semantic.md §5.26`）。
+ */
+function questionFrameGrams(query: string): Set<string> {
+  const lowered = query.toLowerCase()
+  const out = new Set<string>()
+  for (const phrase of QUESTION_PHRASES) {
+    if (!lowered.includes(phrase)) continue
+    out.add(phrase)
+    for (const bigram of cjkBigrams(phrase)) out.add(bigram)
+  }
+  return out
+}
+
+/**
+ * 中文词边界分词器（v0.33）：`Intl.Segmenter` 是 Node 内置 ICU 能力，**零依赖、零安装**。
+ *
+ * 模块级创建一次——构造 Segmenter 有成本，而分词在每次 recall 都会跑。
+ * ⚠ 只在 `tuning.tokenizer === 'segmenter'` 时使用；缺省仍走 2-gram（零行为变化）。
+ */
+const WORD_SEGMENTER = new Intl.Segmenter('zh', { granularity: 'word' })
+
 /** 查询文本分词：小写 + 按空白切分 + 过滤停用词；无有效词返回空数组（按新鲜度排序）。
  *  **导出（v0.7）**：上下文重心（centroid.ts）复用同一套分词——判据单一真源，不得各写一份。 */
 export function tokenizeQuery(query: string | undefined, tuning?: RecallTuning): string[] {
   if (query === undefined) return []
+  // ---------- 词边界分词（v0.33）----------
+  // 为什么它能治噪声：2-gram 的跨词垃圾（`缩之` / `后怎` / `么恢`）df 只有 3–6 ⇒ IDF 5.5–6.1，
+  // 会压过真正的主题词；按词切分后这类字符对结构上不存在。实测真金标从第 9 升到第 5。
+  if (tuning?.tokenizer === 'segmenter') {
+    const banned = tuning.dropQuestionFrames === true ? questionFrameGrams(query) : undefined
+    const out: string[] = []
+    for (const part of WORD_SEGMENTER.segment(query.toLowerCase())) {
+      if (!part.isWordLike) continue
+      const word = part.segment
+      if (word.length === 0 || STOP_WORDS.has(word)) continue
+      if (QUESTION_PHRASES.includes(word)) continue
+      if (banned?.has(word) === true) continue
+      if (!out.includes(word)) out.push(word)
+    }
+    return out
+  }
+  // ---------- 2-gram 展开（缺省 · v0.2 起的现行行为）----------
   const raw = query.toLowerCase().split(/\s+/).filter((token) => token.length > 0 && !STOP_WORDS.has(token))
   const tokens: string[] = []
   const dropLongCjk = tuning?.longToken === 'drop'
+  // 疑问句式骨架（v0.33）：命中短语 ⇒ 短语本身连同它的 2-gram 一起不进词项。
+  const banned = tuning?.dropQuestionFrames === true ? questionFrameGrams(query) : undefined
   for (const token of raw) {
     // 中文长段（≥5 字）的整词 token 只在「某条文档引用过这句话」时命中——那是抄袭检测的
     // 信号，不是相关性。v0.32 实测：查「压缩之后怎么恢复上下文」时它 df=1 / idf 6.79，
     // 竟是该查询的**最高分项**，把一条引用了这句查询的记忆推到第 1 名。
     // `longToken='drop'` 只剔除整词，**不影响下面照常展开它的 2-gram**。
-    if (!(dropLongCjk && /^[\u4e00-\u9fff]{5,}$/.test(token))) tokens.push(token) // 保留原词（英文词 / 精确短语）
+    if (!(dropLongCjk && /^[\u4e00-\u9fff]{5,}$/.test(token)) && banned?.has(token) !== true) {
+      tokens.push(token) // 保留原词（英文词 / 精确短语）
+    }
     for (const bigram of cjkBigrams(token)) {
-      if (!STOP_WORDS.has(bigram) && !tokens.includes(bigram)) tokens.push(bigram)
+      if (STOP_WORDS.has(bigram)) continue
+      if (banned?.has(bigram) === true) continue
+      if (!tokens.includes(bigram)) tokens.push(bigram)
     }
   }
   return tokens
@@ -798,6 +859,8 @@ interface ResolvedTuning {
   multiFieldCap: boolean
   /** 泛词门生效值系数（v0.32）；`0` = 归零（v0.9 行为） */
   genericFactor: number
+  /** 疑问句式骨架剥离（v0.33）；`false` = 现行行为 */
+  dropQuestionFrames: boolean
 }
 
 /**
@@ -815,6 +878,7 @@ function resolveTuning(tuning?: RecallTuning): ResolvedTuning {
     longToken: tuning?.longToken ?? 'keep',
     multiFieldCap: tuning?.multiFieldCap ?? false,
     genericFactor: tuning?.genericFactor ?? 0,
+    dropQuestionFrames: tuning?.dropQuestionFrames ?? false,
   }
 }
 
