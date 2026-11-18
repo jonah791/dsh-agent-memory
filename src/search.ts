@@ -259,8 +259,11 @@ function isGenericTerm(total: number, df: number): boolean {
  * 预算查询词项画像（每词一次 DF 扫描，O(T×N)；recall 为低频操作，实测耗时无感）。
  * @param entries - 候选全集（打分上下文）
  * @param tokens - 查询词项（可含重复；按小写去重，保持首次出现顺序）
+ * @param genericFactor - 泛词门的**生效值系数**：0（缺省）= 归零（v0.9 行为）；
+ *   正数 = 降权而不归零（理由见 `RecallTuning.genericFactor`）。
+ *   ⚠ 判据只有一处（`isGenericTerm`），本参数只决定「判为泛词之后怎么处置」。
  */
-export function tokenProfile(entries: readonly Entry[], tokens: readonly string[]): TokenProfile[] {
+export function tokenProfile(entries: readonly Entry[], tokens: readonly string[], genericFactor = 0): TokenProfile[] {
   const total = entries.length
   const seen = new Set<string>()
   const out: TokenProfile[] = []
@@ -272,7 +275,9 @@ export function tokenProfile(entries: readonly Entry[], tokens: readonly string[
     seen.add(term)
     const df = documentFrequency(entries, term)
     const suppressed = isGenericTerm(total, df)
-    out.push({ term, df, idf: suppressed ? 0 : idfOf(total, df), suppressed })
+    // `genericFactor === 0` 时 `base × 0 === 0`，与 v0.9 的「直接给 0」逐位相同（idfOf 恒正）。
+    const base = idfOf(total, df)
+    out.push({ term, df, idf: suppressed ? base * genericFactor : base, suppressed })
   }
   return out
 }
@@ -281,11 +286,12 @@ export function tokenProfile(entries: readonly Entry[], tokens: readonly string[
  * 为查询词集合预算 IDF 表（委托 `tokenProfile` —— 判据只有一处）。
  * @param entries - 候选全集
  * @param tokens - 查询词项（可含重复）
+ * @param genericFactor - 泛词门生效值系数（0 = 归零，缺省）
  * @returns token → IDF
  */
-function buildIdf(entries: readonly Entry[], tokens: readonly string[]): Map<string, number> {
+function buildIdf(entries: readonly Entry[], tokens: readonly string[], genericFactor = 0): Map<string, number> {
   const out = new Map<string, number>()
-  for (const profile of tokenProfile(entries, tokens)) out.set(profile.term, profile.idf)
+  for (const profile of tokenProfile(entries, tokens, genericFactor)) out.set(profile.term, profile.idf)
   return out
 }
 
@@ -515,7 +521,7 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   // v0.9：IDF 表——罕见词（特征词）权重高、高频泛词权重低。
   // 在**过滤后**的候选集上算 DF（比较基准就是本次检索范围）。
   const idfTokens = weighted !== undefined ? weighted.map((item) => item.term) : tokens
-  const idf = hasQuery ? buildIdf(filtered, idfTokens) : new Map<string, number>()
+  const idf = hasQuery ? buildIdf(filtered, idfTokens, tuning.genericFactor) : new Map<string, number>()
   // v0.12：被泛词门置 0 的词项。idfOf 恒 > 0（log(1+N/(1+df))），故 idf===0 ⟺ 泛词门命中。
   // 用途：把「真的没有相关记忆」与「查询词过泛被抑制」分开（仅结果为空时上报）。
   const suppressedTerms = hasQuery
@@ -605,7 +611,7 @@ export function explainRecall(entries: Entry[], query: RecallQuery = {}): ScoreE
   const tokens = tokenizeQuery(query.query, query.tuning)
   const hasQuery = weighted !== undefined || tokens.length > 0
   const idfTokens = weighted !== undefined ? weighted.map((item) => item.term) : tokens
-  const idf = hasQuery ? buildIdf(filtered, idfTokens) : new Map<string, number>()
+  const idf = hasQuery ? buildIdf(filtered, idfTokens, tuning.genericFactor) : new Map<string, number>()
   const avgBodyLen = filtered.length > 0
     ? filtered.reduce((sum, entry) => sum + entry.body.length, 0) / filtered.length
     : 0
@@ -790,6 +796,8 @@ interface ResolvedTuning {
   longToken: 'keep' | 'drop'
   /** 单 token 多字段封顶（v0.32）；`false` = 现行行为 */
   multiFieldCap: boolean
+  /** 泛词门生效值系数（v0.32）；`0` = 归零（v0.9 行为） */
+  genericFactor: number
 }
 
 /**
@@ -806,6 +814,7 @@ function resolveTuning(tuning?: RecallTuning): ResolvedTuning {
     relativeFloor: tuning?.relativeFloor ?? RECALL_RELATIVE_FLOOR,
     longToken: tuning?.longToken ?? 'keep',
     multiFieldCap: tuning?.multiFieldCap ?? false,
+    genericFactor: tuning?.genericFactor ?? 0,
   }
 }
 
