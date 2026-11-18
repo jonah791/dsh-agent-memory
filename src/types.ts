@@ -10,6 +10,15 @@ import type { StalenessLevel } from './temporal.ts'
 /** 记忆条目类型 */
 export type EntryKind = 'fact' | 'knowledge' | 'episodic' | 'summary'
 
+/**
+ * 内容分类（v0.26.0 · 方案 §3.1 七类记忆）。
+ *
+ * 与 `EntryKind` **两轴正交**：`kind` 是存储与粒度轴（去重/压缩/体检的既有契约，不动），
+ * 本类型是内容性质轴（保留策略 / 任务路由 / 知识组织的坐标系）。
+ * 语义、别名、为什么没有默认值，全部在 `src/memType.ts` 文件头。
+ */
+export type MemType = 'episodic' | 'semantic' | 'procedural' | 'profile' | 'project' | 'relational' | 'operational'
+
 /** 时间压缩层级（仅 episodic/summary 使用） */
 export type TimelineLevel = 'day' | 'week' | 'month' | 'year'
 
@@ -304,6 +313,14 @@ export interface Entry {
    * `update({ subject })` 或 `remember({ subject })`（见 src/subject.ts 三条设计决定）。
    */
   subject?: Subject
+  /**
+   * 内容分类（v0.26.0 · 方案 §3.1 七类）：这条记忆**是哪一类馆藏**。
+   *
+   * 与 `kind` 正交（见 `MemType` 注释）；**无默认值**——未给 = 未分类，
+   * 统计单列 `unclassified`，不折进任何一类（判断型字段禁默认值）。
+   * 新建时盖章；显式纠正走 `update({ memType })`。
+   */
+  memType?: MemType
   /**
    * 执行位置·领域（v0.23.0）：这条记忆是在**哪个项目**里得到的——`alice` / `pp` / 不设（通用）。
    *
@@ -644,6 +661,12 @@ export interface RecallQuery {
    */
   subject?: Subject
   /**
+   * 内容分类过滤（v0.26.0）：只看某几类馆藏（七类可多选）。缺省 = 不过滤。
+   * ⚠ 可选筛子，不是可见性边界；**未分类条目在任何取值下都不返回**（它的类型是
+   * 「不知道」，不是某一类——同 `staleness` 的「未设死线」纪律）。
+   */
+  memType?: MemType[]
+  /**
    * 执行位置过滤（v0.23.0）：只看某个项目 / 某个任务的条目。
    *
    * 级联语义：只给 `project` = 该项目全部（含其下所有任务）；给 `project` + `taskId` =
@@ -725,6 +748,8 @@ export interface RecallResultItem {
   role?: string
   /** 主体层（v0.13.0，缺省 = 通用；仅当条目已标注时出现在结果里） */
   subject?: Subject
+  /** 内容分类（v0.26.0；仅当条目已分类时出现在结果里）——情景 / 语义 / 程序 / 画像 / 项目 / 关系 / 运行 */
+  memType?: MemType
   /** 执行位置（v0.23.0；仅当条目已标注时出现在结果里）——这条记忆是在哪个项目得到的 */
   project?: string
   /** 执行位置（v0.23.0；仅当条目已标注时出现）——哪个任务节点（只在 project 内唯一） */
@@ -815,6 +840,8 @@ export interface BrowseQuery {
   role?: string
   /** 主体层过滤（v0.13.0）：只看「关于谁」的条目。缺省 = 不过滤。 */
   subject?: Subject
+  /** 内容分类过滤（v0.26.0）：只看某几类馆藏。缺省 = 不过滤；未分类条目在任何取值下都不返回。 */
+  memType?: MemType[]
   /** 执行位置过滤（v0.23.0）：只看某个项目的条目。缺省 = 不过滤。 */
   project?: string
   /** 执行位置过滤（v0.23.0）：任务节点 id；必须与 `project` 同时给 */

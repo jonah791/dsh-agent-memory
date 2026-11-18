@@ -175,6 +175,13 @@ export const entrySchema = zod.object({
    * 而写入**仍返回成功**。证据层尤其致命：它会安静地让「可追溯率」永远是 0。
    */
   evidenceRefs: zod.array(zod.string()).optional(),
+  /**
+   * 内容分类（v0.26.0 · 方案 §3.1 七类）。
+   *
+   * ⚠ **必须在此声明**（同一个坑**第十一次**）：storage-domain 在写入边界用本 schema 校验，
+   * 未声明的字段会被静默剥掉而写入**仍返回成功**。
+   */
+  memType: zod.enum(['episodic', 'semantic', 'procedural', 'profile', 'project', 'relational', 'operational']).optional(),
 })
 
 /** 记忆域声明：单表 entries，key = <scope>:<kind>:<id>（domain 即命名空间，规格 §2.2） */

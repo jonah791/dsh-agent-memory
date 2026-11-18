@@ -12,7 +12,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import type { ArchiveReasonType, ArchiveRecord, Entry, EntryKind, Grounding, Provenance, RememberResult, Subject, TimelineLevel } from './types.ts'
+import type { ArchiveReasonType, ArchiveRecord, Entry, EntryKind, Grounding, MemType, Provenance, RememberResult, Subject, TimelineLevel } from './types.ts'
 import { COLD_CHECKPOINT_TAG } from './types.ts'
 
 /** 转出冷存档标签（v0.22.1）：读取侧（list 的跳过判据）与写入侧（compaction-sink 盖章）共用同一真源 */
@@ -80,6 +80,14 @@ export interface EntryDraft {
    * 与 `role` 刻意不同的一点：显式纠正走 `update({ subject })`（见 subject.ts 决定 3）。
    */
   subject?: Subject
+  /**
+   * 内容分类（v0.26.0 · 方案 §3.1 七类）：**只在新建时生效**。
+   *
+   * 与 `subject` 同形（合并路径保留原归类，写入不得静默改判）：两条不同内容的记忆
+   * 因标题相同合并时，「首要归类」保留先到者，冲突由正文承载。显式纠正走
+   * `update({ memType })`。
+   */
+  memType?: MemType
   /**
    * 执行位置·领域（v0.23.0）：这条记忆是在**哪个项目**里得到的（`alice` / `pp`；不设 = 通用）。
    *
@@ -165,6 +173,14 @@ export interface EntryPatch {
    * 本条反对的只是**静默**转移：不给该字段就绝不动它。
    */
   subject?: Subject | null
+  /**
+   * 内容分类（v0.26.0）——显式改判 / 清除路径，三态同 `subject`：
+   * `undefined` = 不动 / `null` = 清除回未分类 / 值 = 设置。
+   *
+   * 为什么需要这条路径：七类里「程序 / 项目 / 关系」在存量条目里大量存在，
+   * 不允许事后改判，等于让几千条历史记忆永远停在未分类。
+   */
+  memType?: MemType | null
   /**
    * 执行位置（v0.23.0）——显式转移 / 清除路径，三态同 `subject`：
    * `undefined` = 不动 / `null` = 清除 / 值 = 设置。
@@ -379,6 +395,8 @@ export class MemoryStore {
       // 理由见 EntryDraft.provenance 注释）。
       ...(draft.provenance !== undefined ? { provenance: draft.provenance } : {}),
       ...(draft.author !== undefined ? { author: draft.author } : {}),
+      // 内容分类（v0.26.0）：只在新建时盖章（与 subject/grounding 同形——合并路径保留原归类）
+      ...(draft.memType !== undefined ? { memType: draft.memType } : {}),
       // 证据引用（v0.25.0）：新建路径原样写入（去重与上限在 mergeEvidence 一处实现）
       ...(mergeEvidence(undefined, draft.evidenceRefs) ?? {}),
     }
@@ -429,6 +447,12 @@ export class MemoryStore {
     if (patch.grounding !== undefined) {
       if (patch.grounding === null) delete updated.grounding
       else updated.grounding = patch.grounding
+    }
+    // 内容分类显式改判 / 清除（v0.26.0）：三态同 subject。
+    // 存量改判（几千条历史记忆停在未分类）走的就是这条路径。
+    if (patch.memType !== undefined) {
+      if (patch.memType === null) delete updated.memType
+      else updated.memType = patch.memType
     }
     // 时效维显式续期 / 清除（v0.15.0）：三态同 subject（见 EntryPatch.reviewAfter）。
     // 这条路径承载「到期后的动作链」——核实完再 update 续死线或清除，否则标记永远消不掉。

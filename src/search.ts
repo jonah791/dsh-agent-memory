@@ -470,9 +470,15 @@ function filterEntries(entries: Entry[], query: RecallQuery): Entry[] {
   const until = normalizeUntil(query.until)
   const kinds = query.kind
   const tags = query.tags
+  const memTypes = query.memType
   return entries.filter((entry) => {
     if (kinds !== undefined && kinds.length > 0 && !kinds.includes(entry.kind)) return false
     if (tags !== undefined && tags.length > 0 && !tags.every((tag) => entry.tags.some((et) => tagMatches(et, tag)))) return false
+    // 内容分类（v0.26.0）：未分类条目在任何取值下都不返回——它的类型是「不知道」
+    if (memTypes !== undefined && memTypes.length > 0) {
+      const type = entry.memType
+      if (type === undefined || !(memTypes as readonly string[]).includes(type)) return false
+    }
     if (!query.includeArchive && entry.archived) return false
     if (query.scope !== undefined && entry.scope !== query.scope) return false
     if (since !== undefined && entry.createdAt < since) return false
@@ -664,6 +670,8 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     // 共用的唯一投影点，漏一行就会出现「过滤生效了（total 对）但结果项里没有该字段
     // ⇒ 渲染层打不出标记」。本次实测就是这样被 subject.test.mjs 的 A88/A88c 抓住的。
     ...(entry.subject !== undefined ? { subject: entry.subject } : {}),
+    // 内容分类（v0.26.0）——**同一投影点、同一教训**（第六次在同一位置补字段）。
+    ...(entry.memType !== undefined ? { memType: entry.memType } : {}),
     // 执行位置（v0.23.0）——**同一投影点、同一教训**（v0.13/v0.14/v0.15/v0.21 连续四版
     // 都栽在漏这一行：过滤生效了、total 对，但结果项里没有该字段 ⇒ 渲染层打不出标记）。
     // ⚠ 两级不拆：taskId 只在 project 存在时透出——无项目的任务 id 透出去会被读成

@@ -35,6 +35,7 @@ import { countByProject, executionTag, filterByExecution, normalizeProject, pars
 import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, parseGroundingArg, UNLABELED_GROUNDING } from './grounding.ts'
 import { countByStaleness, cueTag, filterByStaleness, parseReviewAfterArg, parseStalenessFilterArg, parseWatchForArg, stalenessTag, stalenessVerdict, watchForTag } from './temporal.ts'
 import { transcriptiveTag } from './origin.ts'
+import { countByMemType, filterByMemType, memTypeTag, parseMemTypeArg, parseMemTypeFilterArg } from './memType.ts'
 import { evidenceTag, formatEvidenceRef } from './evidence.ts'
 import { archivalOf, archiveReasonTag, countByArchiveReason, countByProvenance, filterByProvenance, parseArchiveReasonTypeArg, parseProvenanceArg, provenanceTag } from './archive.ts'
 import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, parseValidAfterArg, shortId, supersededByTag, supersedesTag, validAfterTag } from './succession.ts'
@@ -279,6 +280,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       scope: { type: 'string', description: '写入作用域覆盖：global 或 workspaceId（缺省按项目 memory.yml 路由）。' },
       role: { type: 'string', description: '角色归属（v0.5 多智能体工作台）：条目归属的角色隔间。缺省时——项目启用 roles 则盖调用者角色，否则为共享记忆（所有角色可见）。' },
       subject: { type: 'string', description: '主体层（v0.13.0）：这条记忆**关于谁**——`self`（关于我：我的判断/错误/成长/决策理由）或 `master`（关于主人：主人的偏好/定调/习惯/反馈）。缺省 = **通用**（技术知识/项目工作/外部论文这类不关于特定主体的）。⚠ 它不是隔离：设了 subject 的条目**依然对所有调用方可见**，只是可被过滤与统计。只在**新建**时盖章；命中已有条目（key 覆盖/标题合并）时不覆盖原标注——纠正用 update。' },
+      memType: { type: 'string', description: '内容分类（v0.26.0 · 方案 §3.1 七类）：这条记忆**是哪一类馆藏**——`episodic` 情景（发生过的事/对话/经历）/ `semantic` 语义（稳定事实与结论）/ `procedural` 程序（怎么做/工作流/经验）/ `profile` 画像（关于主人的持久偏好）/ `project` 项目（目标/进度/决策）/ `relational` 关系（实体之间的关联）/ `operational` 运行（工具经验/失败原因/环境限制）。可与 `kind` 不同——`kind` 是存储与粒度轴，本字段是内容性质轴。**没有默认值**：不填 = 未分类（统计单列），不替你猜。只在新建设章；改判用 update。' },
       project: { type: 'string', description: '执行位置·领域（v0.23.0）：这条记忆是在**哪个项目**里得到的（如 `alice` / `pp`）。**缺省自动判定**——按会话工作目录查项目注册表（`dsh-project-state`），命中则盖章、没有则留空（不猜）。**什么时候要显式给**：① 在别的目录里干活时（注入只覆盖会话 cwd）② 想纠正自动判定。⚠ 与 `scope` 不同：scope 是存储分区与准入（值是路径，目录改名就漂），本字段是语义标记（只是可选筛子，不改变可见性）。⚠ **通用知识不要盖项目标记**（不属于任何项目的方法论 / 外部论文）——自动判定可能盖错，用 `update({ project: "" })` 清除。' },
       taskId: { type: 'string', description: '执行位置·节点（v0.23.0）：这条记忆是在**哪个任务**里得到的（`dsh-project-state` 的任务 id，如 `ps-4a2b`）。**只在 project 内唯一** ⇒ 给 taskId 必须同时给 project，否则报错。**不自动判定**——「这条记忆是否来自该任务」是判断，不由机制替你断言；只在确实是从某个任务里得到结论时才填。用途：项目侧可反查「这个任务留下了哪些经验」，记忆侧可按任务聚合出**执行路径**（而不是按内容相似度捞条目）。' },
       grounding: { type: 'string', description: '约定状态（v0.14.0）：这条记忆涉及的事**是否已被主人与我共同建立**——`established`（主人明确说过/定调过）· `proposed`（**我自己提的、主人未回应**）· `scoped`（主人接受但限定范围）· `rejected`（主人否决过）。缺省 = 未标注。⚠ **写入纪律**：我提出的、主人没回应的方案，**必须标 `proposed`**——否则未来的我会把它当成「主人说过的」而当授权用（论文实测：未接受提议被记成「已确认信息」的比例高达 86–100%）。' },
@@ -345,6 +347,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       // 主体层（v0.13.0）：**显式给值才盖章**——不猜（猜错会静默污染检索，错标比不标更坏）；
       // 非法值 fail-loud（parseSubjectArg），不静默降级成通用。
       const subject = parseSubjectArg(args.subject, 'remember.subject')
+      // 内容分类（v0.26.0）：参数路径 fail-loud（拼错当场报），不静默当未分类
+      const memType = parseMemTypeArg(args.memType, 'remember.memType')
       // 约定状态（v0.14.0）：同纪律——**显式给值才标**，非法值 fail-loud
       // （静默降级成「未标注」正是本维度要防的那种失败：以为标了、其实没标）。
       const grounding = parseGroundingArg(args.grounding, 'remember.grounding')
@@ -422,6 +426,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         // 证据坐标（v0.25.0）：会话 + 写入时刻的事件序号（有则盖，不猜）
         ...evidenceStampOf(exec, deps),
         ...(subject !== undefined ? { subject } : {}),
+        // 内容分类（v0.26.0）：没有默认值——不填就是未分类，不替你猜
+        ...(memType !== undefined ? { memType } : {}),
         ...(grounding !== undefined ? { grounding } : {}),
         ...(reviewAfter !== undefined ? { reviewAfter } : {}),
         ...(watchFor !== undefined ? { watchFor } : {}),
@@ -486,6 +492,11 @@ export const DIMENSION_ITEM_FIELDS = {
     items: { type: 'string' },
     description: '证据引用（v0.25.0）：这条记忆**能回到哪里**，形如 `session|<会话id>|<事件号>` / `compaction|<会话id>|<压缩id>` / `derived|<定位>`。与 `provenance`（权威归谁）互补——那个答「谁说的」，这个答「去哪核」。⚠ 事件号是**写入时刻该会话的最新事件**（可回查「写这条时对话进行到哪」），不是「这句内容出自哪条事件」的精确指针。未带证据坐标的条目省略该键（省略 = 不知道，不是「无出处」）。',
   },
+  memType: {
+    type: 'string',
+    enum: ['episodic', 'semantic', 'procedural', 'profile', 'project', 'relational', 'operational'],
+    description: '内容分类（v0.26.0 · 方案 §3.1 七类）：情景 / 语义 / 程序 / 画像 / 项目 / 关系 / 运行。与 `kind`（存储与粒度轴）正交——它答「这是哪一类馆藏」，服务保留策略与任务路由。未分类的条目省略该键（⚠ 省略 = 不知道，**不折进任何一类**）。',
+  },
 } as const
 
 /** 构建 recall 工具 */
@@ -504,6 +515,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       includeArchive: { type: 'boolean', description: '是否包含已归档条目（缺省 false）。' },
       role: { type: 'string', description: '角色视角覆盖（v0.5）：以指定角色检索。缺省 = 按调用者会话身份推导（人类会话→主脑角色；子代理/队员→派生角色）。仅当项目启用 roles 时生效。' },
       subject: { type: 'string', description: '主体层过滤（v0.13.0）：只看「关于谁」的条目——`self` = 只看关于我自己的，`master` = 只看关于主人的。缺省 = 不过滤（通用条目照常返回）。⚠ 与 role 的**准入**不同：这是**可选筛子**，不是可见性边界——它只是不匹配就不返回，不改变任何条目的可见性。想「关于我的 + 关于主人的、排除通用」目前需分两次调用。' },
+      memType: { type: 'array', items: { type: 'string', enum: ['episodic', 'semantic', 'procedural', 'profile', 'project', 'relational', 'operational'] }, description: '内容分类过滤（v0.26.0 · 方案 §3.1 七类）：只看某几类馆藏（可多选）——`semantic` 语义 / `procedural` 程序 / `project` 项目 / `operational` 运行 / `profile` 画像 / `relational` 关系 / `episodic` 情景。缺省 = 不过滤。⚠ 未分类条目在任何取值下都不返回（它们的类型是「不知道」，不是某一类）。' },
       project: { type: 'string', description: '执行位置过滤（v0.23.0）：只看某个**项目**的条目（如 `alice` / `pp`）。缺省 = 不过滤。用途：① 换到别的目录干活时取回「那个项目的经验」② 自查「这个项目的结论都有哪些」。⚠ 可选筛子，不是可见性边界。' },
       taskId: { type: 'string', description: '执行位置过滤（v0.23.0）：精确到某个**任务**（`dsh-project-state` 的任务 id）。**必须与 project 同时给**（任务 id 只在项目内唯一，单给会报错）。用途：取回「这个任务一路留下的经验」= 按执行路径聚合，而不是按内容相似度捞。' },
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` = **只看我自己提的、主人未回应的事**——自查「我有没有把提议当成定论」时用它；`rejected` = 只看主人否决过的（防我旧事重提）；`established` = 只看主人明确说过的。缺省 = 不过滤。⚠ 同为**可选筛子**，不是可见性边界。' },
@@ -623,6 +635,8 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // 证据标记（v0.25.0）：`⚓会话@33847` = 这条能回到该会话的那个事件位置。
           // 放在权威簇里（紧邻 provenance）：provenance 答「谁说的」，它答「去哪核」。
           const evidenceNote = evidenceTag(item.evidenceRefs)
+          // 内容分类标记（v0.26.0）：`·语义` 拼进元数据方括号；未分类留空（标记要挑着打）
+          const memTypeNote = memTypeTag(item.memType)
           // 归档标记（v0.21.0）：只在**结论已不能用**的原因上打（`[被证伪]` / `[被取代]` /
           // `[已过时]`）；`merged` / `capacity` / 未分类留空——内容还在，换位置而已。
           // 仅在 includeArchive 时才有归档条目进来，但一旦进来这一格就是「能不能引用它」的答案。
@@ -637,7 +651,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           const supersededNote = supersededByTag(item.supersededBy)
           const validAfterNote = validAfterTag(item.validAfter)
           const supersedesNote = supersedesTag(item.supersedes)
-          return `- ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${relatedNote}`
+          return `- ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote}${memTypeNote} 相关度${item.score}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${relatedNote}`
         })
         return [{
           type: 'text',
@@ -676,6 +690,9 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       // 替代状态筛（v0.24.0）：同为可选筛子。**未给参数时零拷贝原样透传**
       // （`filterBySuccession(entries, undefined) === entries`，判据 A1）⇒ 存量行为逐字节不变。
       const superseded = parseSupersessionFilterArg(args.superseded, 'recall.superseded')
+      // 内容分类筛（v0.26.0）：同为可选筛子。**未给时零拷贝透传**（存量行为逐字节不变）；
+      // 给了就只返回已分类且匹配的——未分类条目在任何取值下都不返回（类型是「不知道」）。
+      const memTypes = parseMemTypeFilterArg(args.memType, 'recall.memType')
       const now = new Date()
       const entries = filterByStaleness(
         filterByProvenance(
@@ -685,7 +702,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         staleness,
         now,
       )
-      const result = recallEntries(entries, {
+      const result = recallEntries(filterByMemType(entries, memTypes), {
         query: args.query,
         kind: args.kind,
         tags: args.tags,
@@ -853,6 +870,7 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       aliases: { type: 'array', items: { type: 'string' }, description: '替换后的**检索别名**（整体替换，与 tags 同语义）；缺省不动。用途：给已存在的记忆补「它可能被怎么问」的同义表述——实测补后可从 #5 升到 #1。' },
       cue: { type: 'array', items: { type: 'string' }, description: '替换后的**情境形状**（整体替换，v0.16.0；留空数组即清空）；缺省不动。用途：给已存在的经验补「什么形状的处境该用它」——与 aliases 的区别是它防**场景失配**而非词面失配。' },
       subject: { type: 'string', description: '主体层（v0.13.0）——**显式纠正/标注**已存在条目的「关于谁」：给 `self`/`master` = 设置，给空字符串 = 清除回通用，缺省 = 不动。用途：给存量历史记忆补标注（新建时忘标或标错时的唯一入口）；批量标注请先用 recall/memory_browse 定位 id。' },
+      memType: { type: 'string', description: '内容分类（v0.26.0 · 方案 §3.1 七类）——**显式改判 / 清除**已存在条目的「是哪一类馆藏」：给 `episodic`/`semantic`/`procedural`/`profile`/`project`/`relational`/`operational` = 设置，给空字符串 = 清除回未分类，缺省 = 不动。用途：存量条目改判（新建时没填或填错）；批量改判请先用 recall/memory_browse 定位 id。' },
       project: { type: 'string', description: '执行位置（v0.23.0）——**显式纠正 / 清除**已存在条目的项目归属：给值 = 设置，给**空字符串** = 清除（⚠ **清除会连带清 taskId**——任务 id 没有项目归属就成了悬空指针），缺省 = 不动。用途：① 自动判定盖错了（通用知识被盖成项目记忆）② 存量条目回填。' },
       taskId: { type: 'string', description: '执行位置（v0.23.0）——显式纠正 / 清除任务归属：给值 = 设置（必须该条目已有 project 或同批给 project），给**空字符串** = 清除（不动 project），缺省 = 不动。' },
       grounding: { type: 'string', description: '约定状态（v0.14.0）——**显式纠正/回填**已存在条目的「是否已被共同建立」：给 `established`/`proposed`/`scoped`/`rejected` = 设置，给空字符串 = 清除回未标注，缺省 = 不动。**主要用途是回填**：把库里「我自己提的、主人未回应」的条目标成 `proposed`，防止未来的我把它当授权用；批量回填请先用 recall({ grounding: ... }) 定位 id。' },
@@ -914,6 +932,11 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       // 仍不静默：不给该参数就绝不动它（反对的是静默转移，不是显式纠正）。
       if (args.subject !== undefined) {
         patch.subject = parseSubjectArg(args.subject, 'update.subject') ?? null
+      }
+      // 内容分类显式改判 / 清除（v0.26.0）：三态同 subject（给值 = 设置 / 空串 = 清除回未分类 /
+      // 缺省 = 不动）。存量几千条历史记忆停在未分类，这条路径是唯一的改判入口。
+      if (args.memType !== undefined) {
+        patch.memType = parseMemTypeArg(args.memType, 'update.memType') ?? null
       }
       // 约定状态显式转移 / 清除（v0.14.0）：三态同 subject（给值 = 设置 / 空串 = 清除回未标注 /
       // 缺省 = 不动）。这是**回填 `proposed` 的唯一入口**——本维度若不回填，保护等于没有
@@ -1375,6 +1398,7 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           scopes: { type: 'array', required: true, items: { type: 'string' } },
           byProvenance: { type: 'object', additionalProperties: true, required: true, description: '来源分布（v0.21.0）：master（主人说的）/ web（外部）/ self（我推的）/ measured（我实测的）/ unlabeled（**未标注**）。⚠ unlabeled 是常态不是缺陷——但若它长期≈总数，说明这一维没被用起来，「这条是主人说的还是我从网上读来的」仍然无法区分。' },
           byArchiveReason: { type: 'object', additionalProperties: true, required: true, description: '归档原因分布（v0.21.0）：refuted（被证伪）/ superseded（被取代）/ stale（已过时）/ merged（已合并）/ capacity（容量清理）/ unspecified（未分类）。⚠ unspecified 大意味着大量归档没标原因（含 v0.16 及以前的存量，它们的原因还在 `source.reason` 里、没有类型）。' },
+          byMemType: { type: 'object', additionalProperties: true, required: true, description: '内容分类分布（v0.26.0 · 方案 §3.1 七类）：episodic / semantic / procedural / profile / project / relational / operational / **unclassified**（未分类）。⚠ unclassified 与任何一类都是两件事——它是「还没判断」，不是「属于某类」；之和恒等于 total。' },
         },
       },
       render: (args, value) => [{
@@ -1385,7 +1409,10 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           + `\n${stalenessVerdict(value.byStaleness)}`
           // 来源 + 归档（v0.21.0）：同样单独一行——覆盖率的意义是「看得见才知道该不该补」，
           // 挤进括号会被读成一堆数字（同 staleness 的教训）。
-          + `\n来源：${JSON.stringify(value.byProvenance)}；归档原因：${JSON.stringify(value.byArchiveReason)}`,
+          + `\n来源：${JSON.stringify(value.byProvenance)}；归档原因：${JSON.stringify(value.byArchiveReason)}`
+          // 内容分类（v0.26.0）：单独一行——unclassified 长期≈总数说明这一维没被用起来，
+          // 挤进括号会被读成一堆数字（同上一条的教训）。
+          + `\n内容分类：${JSON.stringify(value.byMemType)}`,
       }],
     },
     async execute(args, exec) {
@@ -1419,6 +1446,8 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
         // 不是「这些条目没原因」。
         byProvenance: countByProvenance(entries),
         byArchiveReason: countByArchiveReason(entries),
+        // 内容分类（v0.26.0）：七类 + 未分类，之和 == total（同一批 entries，口径同体）
+        byMemType: countByMemType(entries),
       }
     },
   })
@@ -1442,6 +1471,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       pageSize: { type: 'integer', description: '每页组数（默认 20）。' },
       role: { type: 'string', description: '角色视角覆盖（v0.5）：缺省按调用者会话身份推导。仅当项目启用 roles 时生效。' },
       subject: { type: 'string', description: '主体层过滤（v0.13.0）：只看「关于谁」的条目——`self` / `master`。缺省 = 不过滤。用于翻看某一层的积累（如「我对主人的认识都记了些什么」）。' },
+      memType: { type: 'array', items: { type: 'string', enum: ['episodic', 'semantic', 'procedural', 'profile', 'project', 'relational', 'operational'] }, description: '内容分类过滤（v0.26.0 · 七类）：只看某几类馆藏。缺省 = 不过滤；未分类条目在任何取值下都不返回。' },
       project: { type: 'string', description: '执行位置过滤（v0.23.0）：只看某个**项目**的条目（如 `alice` / `pp`）。缺省 = 不过滤。用于翻某个项目的积累（如「这个项目踩过哪些坑」）。' },
       taskId: { type: 'string', description: '执行位置过滤（v0.23.0）：精确到某个**任务**；**必须与 project 同时给**（任务 id 只在项目内唯一）。' },
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` / `rejected` / `scoped` / `established`。缺省 = 不过滤。用于翻档案自查（如「我提过哪些主人没回应的方案」）。' },
@@ -1518,6 +1548,8 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
           // 证据标记（v0.25.0）：`⚓会话@33847` = 这条能回到该会话的那个事件位置。
           // 放在权威簇里（紧邻 provenance）：provenance 答「谁说的」，它答「去哪核」。
           const evidenceNote = evidenceTag(item.evidenceRefs)
+          // 内容分类标记（v0.26.0）：`·语义` 拼进元数据方括号；未分类留空（标记要挑着打）
+          const memTypeNote = memTypeTag(item.memType)
               const archiveNote = archiveReasonTag(item.archivedReasonType)
               // 执行位置标记（v0.23.0）：与 recall 同一位置、同一纪律（同一事实两个界面不能长得不一样）
               const projectNote = executionTag(item.project, item.taskId)
@@ -1528,7 +1560,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               const supersededNote = supersededByTag(item.supersededBy)
               const validAfterNote = validAfterTag(item.validAfter)
               const supersedesNote = supersedesTag(item.supersedes)
-              return `  - ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}`
+              return `  - ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}${memTypeNote}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}`
             })
             .join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
@@ -1548,23 +1580,27 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       // 时效维筛（v0.15.0）：第三级同为可选筛子。加在 browse 上不是「为对称而对称」——
       // **审查入口必须在所有读路径上可达**：否则「我以为能翻到，结果那个工具不支持」
       // 会复现 2026-09-26 那个坑（知道标题却拿不到 id，因为 render 层漏了字段）。
-      const entries = filterByStaleness(
-        filterByProvenance(
-          filterByGrounding(
-            filterByExecution(
-              filterBySubject(
-                // 替代状态筛（v0.24.0）：可选筛子（未给 = 零拷贝透传），审查入口与 recall 同源
-                filterBySuccession(gathered.entries, parseSupersessionFilterArg(args.superseded, 'memory_browse.superseded')),
-                parseSubjectArg(args.subject, 'memory_browse.subject'),
+      const entries = filterByMemType(
+        filterByStaleness(
+          filterByProvenance(
+            filterByGrounding(
+              filterByExecution(
+                filterBySubject(
+                  // 替代状态筛（v0.24.0）：可选筛子（未给 = 零拷贝透传），审查入口与 recall 同源
+                  filterBySuccession(gathered.entries, parseSupersessionFilterArg(args.superseded, 'memory_browse.superseded')),
+                  parseSubjectArg(args.subject, 'memory_browse.subject'),
+                ),
+                parseExecutionArgs({ project: args.project, taskId: args.taskId }, 'memory_browse'),
               ),
-              parseExecutionArgs({ project: args.project, taskId: args.taskId }, 'memory_browse'),
+              parseGroundingArg(args.grounding, 'memory_browse.grounding'),
             ),
-            parseGroundingArg(args.grounding, 'memory_browse.grounding'),
+            parseProvenanceArg(args.provenance, 'memory_browse.provenance'),
           ),
-          parseProvenanceArg(args.provenance, 'memory_browse.provenance'),
+          parseStalenessFilterArg(args.staleness, 'memory_browse.staleness'),
+          new Date(),
         ),
-        parseStalenessFilterArg(args.staleness, 'memory_browse.staleness'),
-        new Date(),
+        // 内容分类筛（v0.26.0）：与 recall 同源，未给 = 零拷贝透传
+        parseMemTypeFilterArg(args.memType, 'memory_browse.memType'),
       )
       const result = browseEntries(entries, {
         kind: args.kind,
