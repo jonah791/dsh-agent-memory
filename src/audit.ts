@@ -33,6 +33,7 @@ import type {
   AuditWeights,
   Entry,
 } from './types.ts'
+import { COLD_CHECKPOINT_TAG } from './types.ts'
 
 /** 缺省权重（和 = 1.0；**先验**，非拟合） */
 export const DEFAULT_AUDIT_WEIGHTS: AuditWeights = Object.freeze({
@@ -367,9 +368,17 @@ export function auditMemory(input: AuditInput): AuditResult {
   const config = input.config ?? DEFAULT_AUDIT_CONFIG
   const query = input.query ?? {}
   const nowMs = input.now ?? Date.now()
-  const entries = [...input.entries]
-  // 索引作用域（缺省 = 本次集合）：引用 / 标签复用 / 重复簇都按它算
-  const indexScope = input.indexEntries === undefined ? entries : [...input.indexEntries]
+  const rawEntries = [...input.entries]
+  // 冷存档（压缩检查点）退出体检口径（v0.24.1 · lh-4e67f6f6）：
+  // 检索面本来就跳过它们（store.ts 的 `!archived && !tags.includes(COLD_CHECKPOINT_TAG)`），
+  // 若体检把它们算进「活跃条数 / 字符数」，同一件事就有了两个口径——而体检的用途恰恰是判断
+  // 「哪些条目值得继续占位置」，冷存档根本不占检索位置。**跳过必须自报**（记忆 dc1182b5），
+  // 否则「没列出来」与「不存在」在报告上同形 ⇒ 见下方 notes。
+  const entries = rawEntries.filter((entry) => entry.tags?.includes(COLD_CHECKPOINT_TAG) !== true)
+  const skippedCold = rawEntries.length - entries.length
+  // 索引作用域（缺省 = 本次集合的**全量**，含冷存档）：引用 / 标签复用 / 重复簇的原料要完整，
+  // 否则「谁引用了谁」会因为本次不看它而失真。
+  const indexScope = input.indexEntries === undefined ? rawEntries : [...input.indexEntries]
 
   const refs = referenceIndex(indexScope)
   const tagReuse = tagReuseIndex(indexScope)
@@ -500,6 +509,12 @@ export function auditMemory(input: AuditInput): AuditResult {
     usageNote,
     '提案 ≠ 裁决：本工具只读，不归档不删除；动记忆数据请显式发起（属须请示类）。',
   ]
+
+  // 跳过的要自报（记忆 dc1182b5「过滤器必须自报它滤掉了什么」）：
+  // 不说清楚的话，「体检里没看到那些检查点」会被读成「库里没有」。
+  if (skippedCold > 0) {
+    notes.push(`已跳过 ${skippedCold} 条冷存档（${COLD_CHECKPOINT_TAG} 压缩检查点）——检索面同样跳过它们，体检口径与检索面对齐；要翻它们请用 memory_browse({ includeArchive: true })。`)
+  }
 
   // 「看不见」≠「没有」：索引里承重、但不在本次集合内的条目要如实报出来
   // （典型：被概要吸收的原料已归档 ⇒ 默认视图下 referenced 显示 0，容易被误读成「没有承重原料」）

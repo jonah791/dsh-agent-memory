@@ -2004,7 +2004,11 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
         ]
         for (const candidate of value.candidates.slice(0, 10)) {
           const title = candidate.title.length > 42 ? candidate.title.slice(0, 41) + '…' : candidate.title
-          lines.push(`- [${candidate.bucket}] ${title}（${candidate.evidence['chars']} 字 · ${candidate.evidence['ageDays']} 天 · ${candidate.evidence['refs']} 引用）${candidate.reasons[0] ?? ''}`)
+          // v0.24.1（lh-8069f7da）：把 id 印出来——提案要能被执行，而 forget / update /
+          // memory_recompress / memory_review_mark 全都凭 id 消费（findEntry 是精确匹配，
+          // 没有前缀解析 ⇒ **必须印全量 id**，印 8 位会让提案无法直接执行）。
+          // 旧版只给标题，每执行一条都得再花一次 browse 反查 ⇒「提案」与「动作」之间隔着一跳。
+          lines.push(`- [${candidate.bucket}] ${candidate.id} ${title}（${candidate.evidence['chars']} 字 · ${candidate.evidence['ageDays']} 天 · ${candidate.evidence['refs']} 引用）${candidate.reasons[0] ?? ''}`)
         }
         if (value.candidates.length > 10) {
           lines.push(`（另有 ${value.candidates.length - 10} 条候选，见结构化返回）`)
