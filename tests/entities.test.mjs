@@ -300,6 +300,30 @@ test('E8 端到端：memory_entity 建/改 → memory_entities 按别名解析�
   assert.equal(listed.total, 1)
 })
 
+// ---------- E8b 名称匹配边界（线上验收抓到的缺陷） ----------
+
+test('E8b 拉丁名按词边界匹配：别名 AML 不得命中 yaml / example（尸体样本）', async () => {
+  const { byName, exec, store } = setup()
+  const decoy = await seedEntry(store, 'yaml 配置要点：缩进与锚点')
+  const decoy2 = await seedEntry(store, 'example.com 的 TLS 证书链')
+  const real = await seedEntry(store, 'AML 方案 §4.3 实体权威档')
+
+  await byName.get('memory_entity').execute({ canonicalName: '智能体记忆图书馆', entityType: '项目', aliases: ['AML'] }, exec)
+  const looked = await byName.get('memory_entities').execute({ name: 'AML' }, exec)
+  const mentions = looked.entities[0].mentions.map((mention) => mention.id)
+  assert.ok(mentions.includes(real.id), '「AML 方案 …」必须被反查到')
+  assert.ok(!mentions.includes(decoy.id), '「yaml …」不得命中 AML（首版纯子串 5/5 全是 yaml 假阳）')
+  assert.ok(!mentions.includes(decoy2.id), '「example.com …」不得命中 AML')
+
+  // 中文仍走子串（没有词边界可依）：中文名出现在词中间也应命中
+  const cn = await seedEntry(store, '我在整理智能体记忆图书馆的差距表')
+  const lookedCn = await byName.get('memory_entities').execute({ name: '智能体记忆图书馆' }, exec)
+  assert.ok(
+    lookedCn.entities[0].mentions.some((mention) => mention.id === cn.id),
+    '中文名按子串匹配（无词边界），出现在句中也要命中',
+  )
+})
+
 // ---------- E9 未接线 ----------
 
 test('E9 未接线：两个实体工具响亮报错，memory_stats.entities.wired=false', async () => {

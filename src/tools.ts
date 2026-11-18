@@ -2581,6 +2581,24 @@ function entitySignature(entity: {
   ])
 }
 
+/**
+ * 名称匹配器（反查「提到它的条目」用）：**CJK 走子串，含 ASCII 的名字走词边界**。
+ *
+ * 为什么必须分开（2026-11-19 线上验收当场抓到的缺陷）：别名 `AML` 用纯子串匹配会把
+ * `yaml` / `example` 里的 `aml` 当成命中——首版实测反查 5 条**全是 yaml 噪声（5/5 假阳）**，
+ * 而这个工具的全部价值就在这 5 条上。中文没有词边界，只能子串；拉丁名有空格与标点，
+ * 用边界既准又稳。
+ * @param key - 已归一的名称（`normalizeEntityName` 的输出）
+ */
+function nameMatcher(key: string): (haystack: string) => boolean {
+  if (/^[\x20-\x7e]+$/.test(key)) {
+    const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const pattern = new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`)
+    return (haystack) => pattern.test(haystack)
+  }
+  return (haystack) => haystack.includes(key)
+}
+
 /** 实体档取用：未接线时**响亮报错**（绝不静默降级成「库里没有这个实体」） */
 function entityStoreOf(deps: MemoryToolDeps): EntityStore {
   if (deps.entities === undefined) {
@@ -2904,10 +2922,11 @@ function buildEntities(deps: MemoryToolDeps): ToolDefinition {
         if (!withEntries) return []
         const keys = namesOf(entity).map(normalizeEntityName).filter((key) => key.length >= 2)
         if (keys.length === 0) return []
+        const matchers = keys.map(nameMatcher)
         const hits: Array<{ id: string; title: string; kind: string }> = []
         for (const entry of readable) {
           const hay = (entry.title + '\n' + entry.body + '\n' + entry.tags.join('\n') + '\n' + (entry.aliases ?? []).join('\n')).toLowerCase()
-          if (!keys.some((key) => hay.includes(key))) continue
+          if (!matchers.some((match) => match(hay))) continue
           hits.push({ id: entry.id, title: entry.title, kind: entry.kind })
           if (hits.length >= 5) break
         }

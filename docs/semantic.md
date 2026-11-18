@@ -684,6 +684,8 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 
 **本期不做 `entry → entity` 的类型化边**（方案 §4.4 里没有，且开放判据不满足）：`memory_relations` 的读路径按**角色准入视野**过滤两端，而实体档不吃角色可见性 ⇒ 在「实体节点如何过准入」定下来之前不开放（半件能力比没有更坏：写进去的边读不回来）。实体的用处本期由**名称解析 + 文本反查**承担：`memory_entities({name})` 返回实体 + 提到它的条目（在可见集合里按名称做包含匹配）。
 
+**名称反查的匹配口径（上线当天改过一次）**：**CJK 名字走子串，含 ASCII 的名字走词边界**。首版全用子串，结果别名 `AML` 把 `yaml` / `example` 里的 `aml` 当命中——首次线上实测反查 5 条**全是 yaml 噪声（5/5 假阳）**，而该工具的全部价值就在这 5 条上。中文没有词边界可依，只能子串；拉丁名有空格与标点，用边界既准又稳。判据固定为尸体样本 `tests/entities.test.mjs`「E8b」（A146）。
+
 **调用点清单**：
 
 | 位置 | 行为 |
@@ -704,11 +706,12 @@ Pr[f 在行动时仍成立] ≤ e^(−λ_f · Δact)      （Prop. 1；多依赖
 | A119 | 空间授权 fail-closed：策略给了 `spaces` 后，**未标注 `space` 的条目不被放行**；未给 `spaces` 的策略零变化 | `tests/space.test.mjs`「S7 授权」 | ✔ 已实测（单测） |
 | A120 | 六态唯一读法：同一批条目经 `lifecycleOf()` 恰好落入六态之一，且 `countByLifecycle` 之和 == 总数 | `tests/lifecycle.test.mjs`「L1 优先级」「L3 计数」 | ✔ 已实测（单测） |
 | A121 | `pending` **不进注入**：`isInjectable({status:'pending'}) === false`，而 `disputed` / `superseded` 为 true | `tests/lifecycle.test.mjs`「L4 注入判据」 | ✔ 已实测（单测） |
-| A123 | 实体 ID 与解析：同 scope 内 id 递增（`ENTITY-0001`/`ENTITY-0002`）；规范名 / 别名 / 大小写与多余空白变体**都解析到同一实体**；`entitySchema.parse` 后 `canonicalName`/`entityType`/`aliases`/`firstSeen` 四字段仍在（写入边界不得剥字段） | `tests/entities.test.mjs`「E1 建立与读取」 | ✔ 已实测（单测） |
-| A124 | 撞名消歧：同名新建/加别名而**未写 `disambiguation`** ⇒ 整笔拒绝并点名占用者 id；写了 ⇒ 两候选并存且 `resolveName().ambiguous === true`（**程序不替调用方挑**）；规范名与别名内部重复 ⇒ 拒绝 | `tests/entities.test.mjs`「E2 撞名」「E3 输入 fail-loud」 | ✔ 已实测（单测） |
-| A125 | 合并：旧档全部称呼并入存续档（旧规范名降为别名）、旧档 `status:'merged'` + `mergedInto`、旧写法解析归存续档；**合并目标不得是已合并体**（报错点名最终存续档）、不得自合并、不得跨 scope | `tests/entities.test.mjs`「E4 合并」「E5 写入边界」 | ✔ 已实测（单测） |
-| A126 | 引用 fail-loud：`relatedEntities` 自引用 / 不存在 / 跨 scope / 指向已合并档 ⇒ 拒绝；`topics` 在概念表未接线时**拒绝写入**（宁可不写不写悬空引用）、概念不存在或跨 scope ⇒ 拒绝 | `tests/entities.test.mjs`「E6」「E7」 | ✔ 已实测（单测） |
-| A127 | 未接线可区分 + 端到端：`deps.entities` 缺失时两个工具**响亮报错**且 `memory_stats.entities.wired === false`；接线后 `memory_entity` 建/改 → `memory_entities({name})` 按别名解析并反查提到它的条目（渲染含 id） | `tests/entities.test.mjs`「E8 端到端」「E9 未接线」「E10 统计」 | ✔ 已实测（单测） |
+| A141 | 实体 ID 与解析：同 scope 内 id 递增（`ENTITY-0001`/`ENTITY-0002`）；规范名 / 别名 / 大小写与多余空白变体**都解析到同一实体**；`entitySchema.parse` 后 `canonicalName`/`entityType`/`aliases`/`firstSeen` 四字段仍在（写入边界不得剥字段） | `tests/entities.test.mjs`「E1 建立与读取」 | ✔ 已实测（单测） |
+| A142 | 撞名消歧：同名新建/加别名而**未写 `disambiguation`** ⇒ 整笔拒绝并点名占用者 id；写了 ⇒ 两候选并存且 `resolveName().ambiguous === true`（**程序不替调用方挑**）；规范名与别名内部重复 ⇒ 拒绝 | `tests/entities.test.mjs`「E2 撞名」「E3 输入 fail-loud」 | ✔ 已实测（单测） |
+| A143 | 合并：旧档全部称呼并入存续档（旧规范名降为别名）、旧档 `status:'merged'` + `mergedInto`、旧写法解析归存续档；**合并目标不得是已合并体**（报错点名最终存续档）、不得自合并、不得跨 scope | `tests/entities.test.mjs`「E4 合并」「E5 写入边界」 | ✔ 已实测（单测） |
+| A144 | 引用 fail-loud：`relatedEntities` 自引用 / 不存在 / 跨 scope / 指向已合并档 ⇒ 拒绝；`topics` 在概念表未接线时**拒绝写入**（宁可不写不写悬空引用）、概念不存在或跨 scope ⇒ 拒绝 | `tests/entities.test.mjs`「E6」「E7」 | ✔ 已实测（单测） |
+| A145 | 未接线可区分 + 端到端：`deps.entities` 缺失时两个工具**响亮报错**且 `memory_stats.entities.wired === false`；接线后 `memory_entity` 建/改 → `memory_entities({name})` 按别名解析并反查提到它的条目（渲染含 id） | `tests/entities.test.mjs`「E8 端到端」「E9 未接线」「E10 统计」 | ✔ 已实测（单测） |
+| A146 | 名称反查的匹配边界：含 ASCII 的别名 `AML` **不得**命中 `yaml` / `example`（词边界），CJK 名字仍按子串命中句中位置 | `tests/entities.test.mjs`「E8b 拉丁名按词边界匹配」 | ✔ 已实测（单测；尸体样本 = 首版纯子串线上 5/5 假阳） |
 | A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
 | A2 | 同标题 `knowledge` 再写 → `merged`（标签并集 + 正文追加，不新增条目） | `tests/tools.test.ts`「remember：同标题 knowledge → merged（标签并集）」；`tests/store.test.mjs` describe「去重合并（规格 §2.2）」 | ✔ 已实测 |
