@@ -80,9 +80,12 @@ test('工具齐备，名称与契约一致', () => {
   // 2026-10-14 对齐（**预先存在的债**，非本轮引入——v0.15 只在既有工具上加参数、不改工具集合）：
   // v0.11 `memory_recompress` 与 v0.13 期 `memory_review_mark` 上线时，本断言未同步。
   // 2026-11-12：`memory_dispose`（v0.22 近重复欠账销账）同样漏补 —— 已一并补齐。
+  // 2026-11-18：`memory_supersede`（v0.24.0 事实生命周期）同样漏补 —— 已补齐。
   // ⚠ 这行的用途是「工具集合被意外增删时变红」，但它每漏补一次就变成**恒红**，
   //   而恒红的断言不再是指标（读数纪律：两次读数是同一个坏值 ⇒ 先怀疑量法）。
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_check', 'memory_dispose', 'memory_health', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_review_mark', 'memory_stats', 'memory_version', 'recall', 'remember', 'update'])
+  //   ⇒ 判据：新增工具时**同一次提交**里改这一行；`.ts` 套件不在 `npm test` 的绿线内，
+  //   所以它冷了六周才被发现（v0.24.0 → 2026-11-18）。
+  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_check', 'memory_dispose', 'memory_health', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_review_mark', 'memory_stats', 'memory_supersede', 'memory_version', 'recall', 'remember', 'update'])
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
 })

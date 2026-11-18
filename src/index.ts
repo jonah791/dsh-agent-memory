@@ -165,6 +165,16 @@ export const entrySchema = zod.object({
     delegationDepth: zod.number().optional(),
     preset: zod.string().optional(),
   }).optional(),
+  /**
+   * 证据引用（v0.25.0）：这条记忆**能回到哪里**（编码串，格式见 `types.ts::EvidenceKind`）。
+   *
+   * ⚠ **必须在此声明**（同一个坑**第十次**：v0.12 `aliases`、v0.13 `subject`、v0.14
+   * `grounding`、v0.15 `reviewAfter/watchFor`、v0.16 `cue`、v0.21 `provenance` 与
+   * `archivedReasonType`、v0.23 `project/taskId`、v0.24 `validAfter/supersededBy/supersedes`）：
+   * storage-domain 在写入边界用本 schema 校验，**未声明的字段会被静默剥掉**——存了等于没存，
+   * 而写入**仍返回成功**。证据层尤其致命：它会安静地让「可追溯率」永远是 0。
+   */
+  evidenceRefs: zod.array(zod.string()).optional(),
 })
 
 /** 记忆域声明：单表 entries，key = <scope>:<kind>:<id>（domain 即命名空间，规格 §2.2） */
@@ -459,7 +469,19 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
   }
 
-  registerMemoryTools(ctx, { store, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject })
+  // 证据坐标（v0.25.0）：`ToolRunContext` 里没有事件号（2026-11-18 实测），
+  // seq 只能从会话火线观察 ⇒ 订阅一次，维护「每会话最新 seq」。
+  // 工具层写入时据此盖证据坐标；精度说明见 `types.ts::EvidenceRef.seq`
+  // （答的是「写这条时对话进行到哪」，不是「这句出自哪条事件」）。
+  const lastSeqBySession = new Map<string, number>()
+  ctx.on('session/event', (session, event) => {
+    const seq = (event as { seq?: unknown }).seq
+    if (typeof seq === 'number') lastSeqBySession.set(session.id, seq)
+  })
+  const resolveEvidence: NonNullable<MemoryToolDeps['resolveEvidence']> = (sessionId) =>
+    lastSeqBySession.get(sessionId)
+
+  registerMemoryTools(ctx, { store, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })

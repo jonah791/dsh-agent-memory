@@ -690,6 +690,11 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     ...(entry.supersedes !== undefined ? { supersedes: entry.supersedes } : {}),
     // 来源类型（v0.21.0）——**同一投影点、同一教训**（v0.13/v0.14/v0.15 连续三版都栽在漏这里）。
     ...(entry.provenance !== undefined ? { provenance: entry.provenance } : {}),
+    // 证据引用（v0.25.0）——**同一投影点、同一教训**（这是第五次在同一个位置补字段）。
+    // ⚠ 判据：任何新字段加进 Entry，先来这里看一眼再跑测试。
+    ...(entry.evidenceRefs !== undefined && entry.evidenceRefs.length > 0
+      ? { evidenceRefs: entry.evidenceRefs }
+      : {}),
     // 归档因果（v0.21.0）：只对**已归档**条目出现。经 `archivalOf` 归一而不是直取存储字段
     // ——存量 1260 条的归档原因还在 `source.reason` 里（零迁移方案，理由见 archive.ts 决定 1），
     // 不归一就会出现「老条目查不到为什么没了」。

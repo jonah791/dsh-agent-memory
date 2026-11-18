@@ -17,7 +17,7 @@ import { readFileSync, statSync } from 'node:fs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { Entry, EntryKind, MemoryConfig, RememberResult, Revision } from './types.ts'
+import type { Entry, EntryKind, EvidenceRef, MemoryConfig, RememberResult, Revision } from './types.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import { resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
@@ -35,6 +35,7 @@ import { countByProject, executionTag, filterByExecution, normalizeProject, pars
 import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, parseGroundingArg, UNLABELED_GROUNDING } from './grounding.ts'
 import { countByStaleness, cueTag, filterByStaleness, parseReviewAfterArg, parseStalenessFilterArg, parseWatchForArg, stalenessTag, stalenessVerdict, watchForTag } from './temporal.ts'
 import { transcriptiveTag } from './origin.ts'
+import { evidenceTag, formatEvidenceRef } from './evidence.ts'
 import { archivalOf, archiveReasonTag, countByArchiveReason, countByProvenance, filterByProvenance, parseArchiveReasonTypeArg, parseProvenanceArg, provenanceTag } from './archive.ts'
 import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, parseValidAfterArg, shortId, supersededByTag, supersedesTag, validAfterTag } from './succession.ts'
 import { auditMemory } from './audit.ts'
@@ -74,6 +75,13 @@ export interface MemoryToolDeps {
    * @returns 项目 id；无归属返回 `undefined`（**不猜**）
    */
   resolveProject?: (cwd: string) => string | undefined
+  /**
+   * 证据坐标（v0.25.0）：该会话**当前最新的事件序号**。缺省 ⇒ 只盖会话级坐标。
+   *
+   * 为什么由外部注入：`ToolRunContext` 里没有事件号（2026-11-18 实测），seq 只能从
+   * `session/event` 火线观察到；index.ts 订阅火线维护「每会话最新 seq」，工具层只读。
+   */
+  resolveEvidence?: (sessionId: string) => number | undefined
   /** 配置加载：workspace 根目录 → MemoryConfig；缺省读 <root>/.dsh/memory.yml */
   loadConfig?: (workspaceRoot: string) => Promise<MemoryConfig> | MemoryConfig
   /** 懒压缩钩子（T7 接线：TimelineCompressor.compressPending；访问记忆时补压上一自然单位，DESIGN.md §五） */
@@ -174,6 +182,25 @@ function roleStampOf(
     ? explicit
     : (view.enabled ? view.role : undefined)
   return { ...(role !== undefined ? { role } : {}), author }
+}
+
+/**
+ * 证据戳（v0.25.0）：写入时能确定的坐标就盖，不确定的就空着。
+ *
+ * 只盖「我知道的」：会话 id 一定知道（`sessionIdOf`），事件序号只在火线订阅到了才有。
+ * **不猜**——宁缺一个 seq，也不写一个假坐标（那会让「可追溯」变成不可核的字段）。
+ * @param exec - 工具执行上下文
+ * @param deps - 工具依赖（`resolveEvidence` 可选）
+ * @returns 可并入 EntryDraft 的补丁；无会话 id 时返回空对象
+ */
+function evidenceStampOf(
+  exec: ToolRunContext,
+  deps: MemoryToolDeps,
+): { evidenceRefs?: Entry['evidenceRefs'] } {
+  const sessionId = sessionIdOf(exec as unknown as RoleCarrierLike)
+  if (sessionId === undefined || sessionId === '') return {}
+  const seq = deps.resolveEvidence?.(sessionId)
+  return { evidenceRefs: [formatEvidenceRef({ kind: 'session', sessionId, ...(seq !== undefined ? { seq } : {}) })] }
 }
 
 /**
@@ -392,6 +419,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         level: null,
         bucket: null,
         ...roleStampOf(exec, config, args.role),
+        // 证据坐标（v0.25.0）：会话 + 写入时刻的事件序号（有则盖，不猜）
+        ...evidenceStampOf(exec, deps),
         ...(subject !== undefined ? { subject } : {}),
         ...(grounding !== undefined ? { grounding } : {}),
         ...(reviewAfter !== undefined ? { reviewAfter } : {}),
@@ -452,6 +481,11 @@ export const DIMENSION_ITEM_FIELDS = {
   validAfter: { type: 'string', description: '生效时间（v0.24.0）：这条结论**从何时开始成立**（`YYYY-MM-DD`）。与 `createdAt`（我何时记下）不同——主人的定调可能今天记下、针对的是上周的决定。未设的条目省略该键（⚠ 省略 = **不知道**，**不是**「等于 createdAt」）。' },
   supersededBy: { type: 'string', description: '被替代（v0.24.0）：替代这条的记忆 id（**字段存在即已过时**；只记一格，不递归成链）。⚠ 旧条目**不会被删除**，仍会返回——保留原值正是为了对照（「以前是 X，因为…」）。' },
   supersedes: { type: 'array', items: { type: 'string' }, description: '替代了谁（v0.24.0）：被这条顶掉的记忆 id 列表（只记**直接**替代对象，不递归展开祖先）。' },
+  evidenceRefs: {
+    type: 'array',
+    items: { type: 'string' },
+    description: '证据引用（v0.25.0）：这条记忆**能回到哪里**，形如 `session|<会话id>|<事件号>` / `compaction|<会话id>|<压缩id>` / `derived|<定位>`。与 `provenance`（权威归谁）互补——那个答「谁说的」，这个答「去哪核」。⚠ 事件号是**写入时刻该会话的最新事件**（可回查「写这条时对话进行到哪」），不是「这句内容出自哪条事件」的精确指针。未带证据坐标的条目省略该键（省略 = 不知道，不是「无出处」）。',
+  },
 } as const
 
 /** 构建 recall 工具 */
@@ -586,6 +620,9 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // 来源标记（v0.21.0）：只凸显**权威不在我这一侧**的（`[外部]` 别人的说法、
           // `[自推]` 我推的）。`master` / `measured` / 未标注留空——标记要挑着打。
           const provenanceNote = provenanceTag(item.provenance)
+          // 证据标记（v0.25.0）：`⚓会话@33847` = 这条能回到该会话的那个事件位置。
+          // 放在权威簇里（紧邻 provenance）：provenance 答「谁说的」，它答「去哪核」。
+          const evidenceNote = evidenceTag(item.evidenceRefs)
           // 归档标记（v0.21.0）：只在**结论已不能用**的原因上打（`[被证伪]` / `[被取代]` /
           // `[已过时]`）；`merged` / `capacity` / 未分类留空——内容还在，换位置而已。
           // 仅在 includeArchive 时才有归档条目进来，但一旦进来这一格就是「能不能引用它」的答案。
@@ -600,7 +637,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           const supersededNote = supersededByTag(item.supersededBy)
           const validAfterNote = validAfterTag(item.validAfter)
           const supersedesNote = supersedesTag(item.supersedes)
-          return `- ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${relatedNote}`
+          return `- ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote} 相关度${item.score}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${relatedNote}`
         })
         return [{
           type: 'text',
@@ -1478,6 +1515,9 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               const transcriptiveNote = transcriptiveTag(item.transcriptiveUncited)
               // 来源 / 归档标记（v0.21.0）：与 recall 同一套渲染纪律（同一事实两个界面不能长得不一样）
               const provenanceNote = provenanceTag(item.provenance)
+          // 证据标记（v0.25.0）：`⚓会话@33847` = 这条能回到该会话的那个事件位置。
+          // 放在权威簇里（紧邻 provenance）：provenance 答「谁说的」，它答「去哪核」。
+          const evidenceNote = evidenceTag(item.evidenceRefs)
               const archiveNote = archiveReasonTag(item.archivedReasonType)
               // 执行位置标记（v0.23.0）：与 recall 同一位置、同一纪律（同一事实两个界面不能长得不一样）
               const projectNote = executionTag(item.project, item.taskId)
@@ -1488,7 +1528,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               const supersededNote = supersededByTag(item.supersededBy)
               const validAfterNote = validAfterTag(item.validAfter)
               const supersedesNote = supersedesTag(item.supersedes)
-              return `  - ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${archiveNote}${projectNote}[${item.kind}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}`
+              return `  - ${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}`
             })
             .join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`

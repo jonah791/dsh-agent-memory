@@ -33,6 +33,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { MemoryStore } from './store.ts'
 import { COLD_CHECKPOINT_TAG } from './store.ts'
 import { workspaceIdOf } from './scope.ts'
+import { formatEvidenceRef } from './evidence.ts'
 import { appendJsonl } from './access-trace.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -220,6 +221,9 @@ export function installCompactionSink(ctx: Context, deps: CompactionSinkDeps): v
       level: null,
       bucket: null,
       source: { sessionId: session.id, reason: 'compaction/end' },
+      // 证据坐标（v0.25.0）：压缩事务自带**事件级**坐标（compactionId 唯一标识一次压缩），
+      // 比 seq 更精确——它是这类条目「能回到原文」的真实依据。
+      evidenceRefs: [formatEvidenceRef({ kind: 'compaction', sessionId: session.id, compactionId: ev.data.compactionId })],
     }).then((result) => { notify(result.id) }).catch((err: unknown) => {
       // ⚠ **不许空吞**（2026-11-12 · 台账 lh-2659bafb）：pending 已删、下次是新 compactionId
       // ⇒ 「下次压缩再试」不存在。这一条原文**就此永久丢失**，唯一能做的就是把它记下来。

@@ -61,6 +61,13 @@ export interface EntryDraft {
   /** summary → 原始条目 id 列表（T6 压缩产物，规格 §2.1） */
   archiveRef?: string[]
   /**
+   * 证据引用（v0.25.0）：这条记忆的原始出处坐标。
+   *
+   * **合并路径按并集累积**（同一结论可能有多个出处，丢掉就是丢证据）；新建路径原样写入。
+   * 上限 `MAX_EVIDENCE_REFS`：证据是坐标不是日志，超量说明写入侧在乱塞。
+   */
+  evidenceRefs?: Entry['evidenceRefs']
+  /**
    * 角色归属（v0.5）：**只在新建时生效**——命中已有条目（key 覆盖 / 标题合并）时
    * 保留原条目的归属，写入不得静默转移分区（转移需要显式路径，本轮不提供）。
    */
@@ -372,6 +379,8 @@ export class MemoryStore {
       // 理由见 EntryDraft.provenance 注释）。
       ...(draft.provenance !== undefined ? { provenance: draft.provenance } : {}),
       ...(draft.author !== undefined ? { author: draft.author } : {}),
+      // 证据引用（v0.25.0）：新建路径原样写入（去重与上限在 mergeEvidence 一处实现）
+      ...(mergeEvidence(undefined, draft.evidenceRefs) ?? {}),
     }
     await this.kv.put(memoryKey(scope, kind, entry.id), entry)
     return { id: entry.id, action: 'created' }
@@ -567,11 +576,43 @@ export class MemoryStore {
       tags,
       ...(aliases.length > 0 ? { aliases } : {}),
       ...(cue.length > 0 ? { cue } : {}),
+      // 证据引用（v0.25.0）：合并路径按**并集**累积——同一结论可能有多个出处，
+      // 只留 draft 的会让原条目的出处消失（那等于把证据丢了）。
+      ...(mergeEvidence(existing.evidenceRefs, draft.evidenceRefs) ?? {}),
       updatedAt: now,
       accessedAt: now,
       ...(draft.source !== undefined ? { source: draft.source } : {}),
     }
   }
+}
+
+/** 单条记忆最多保留几条证据引用（证据是坐标，不是日志；超量说明写入侧在乱塞） */
+export const MAX_EVIDENCE_REFS = 8
+
+/**
+ * 合并证据引用（v0.25.0 合并路径）。
+ *
+ * 按**并集**累积：同一结论可能有多个出处，只留新来的会让原条目的出处消失（那等于丢证据）。
+ * 身份判据是编码串本身——同一条证据（同类型 + 同坐标）只留一份；
+ * 采集时刻不进编码（同一位置的两次采集是同一条证据，不该占两个位置）。
+ * @param existing - 既有条目上的引用
+ * @param incoming - 本次写入给出的引用
+ * @returns 需要写进条目的补丁对象；两侧都空时返回 undefined（不产生空字段）
+ */
+export function mergeEvidence(
+  existing: readonly string[] | undefined,
+  incoming: readonly string[] | undefined,
+): { evidenceRefs: string[] } | undefined {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const ref of [...(existing ?? []), ...(incoming ?? [])]) {
+    if (typeof ref !== 'string' || ref === '') continue
+    if (seen.has(ref)) continue
+    seen.add(ref)
+    out.push(ref)
+    if (out.length >= MAX_EVIDENCE_REFS) break
+  }
+  return out.length > 0 ? { evidenceRefs: out } : undefined
 }
 
 /**

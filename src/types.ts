@@ -169,6 +169,48 @@ export interface RolesConfig {
 }
 
 /** 记忆条目（核心契约） */
+/**
+ * 证据引用类型（v0.25.0）：这条记忆的**原始出处**指向什么。
+ *
+ * 方案 §5.2「独立来源记录」与 §5.3「事实与证据分离」要求每条重要记忆可回溯。
+ * v0 只做**可核的坐标**：写入时知道什么就盖什么，不知道的键不出现。
+ *
+ * ## 为什么存成字符串数组，不存对象
+ *
+ * 本仓 schema DSL 的 `required` 只支持字段级（见 `Entry.archivedReasonType` 的注释）：
+ * **嵌套对象在归一化时会被提成对象级 `required`**，同时让 `defineTool` 泛型推断退化
+ * （TS2719/TS2322）；此外维度常量要求各消费者逐字段 deepEqual，嵌套对象在归一化后
+ * 必然与常量对不上 ⇒ 两条守卫（A4 / A113b）当天就红了。
+ *
+ * 所以沿用本仓既有的平级标量风格：条目里存 `string[]`，**编码格式**见下，
+ * 解析/渲染集中在 `evidence.ts`（格式即契约，改格式必须同版本号）。
+ *
+ * 编码（三段，`|` 分隔）：
+ * - `session|<sessionId>|<seq>` —— 会话级 + 事件号（seq 可省 ⇒ 只到会话级）
+ * - `compaction|<sessionId>|<compactionId>`
+ * - `derived|<locator>`
+ */
+export type EvidenceKind = 'session' | 'compaction' | 'derived'
+
+/** 解析后的证据引用视图（`evidence.ts::parseEvidenceRef` 产出，不直接落盘） */
+export interface EvidenceRef {
+  kind: EvidenceKind
+  /** 会话 id（kind=session / compaction 必有） */
+  sessionId?: string
+  /**
+   * 会话内事件序号：**写入时刻该会话的最新事件 seq**。
+   *
+   * ⚠ 它能回答的是「写这条时对话进行到哪」，不是「这句内容出自哪一条事件」——
+   * 工具调用拿不到自己那次事件号（2026-11-18 实测 `ToolRunContext` 无该字段）。
+   * 精度差别写在字段上而不是靠读者猜：需要精确内容定位时回看 seq 附近的事件。
+   */
+  seq?: number
+  /** 压缩事务 id（kind=compaction）——压缩事件自带坐标，比 seq 更精确 */
+  compactionId?: string
+  /** 非会话定位：`supersedes:<id>` / URL / 文件路径（kind=derived 等） */
+  locator?: string
+}
+
 export interface Entry {
   id: string
   kind: EntryKind
@@ -239,6 +281,14 @@ export interface Entry {
   /** 归档原因的人类可读详情（v0.21.0；类型之外的补充，可选） */
   archivedReason?: string
   source?: { sessionId?: string; seq?: number; reason?: string }
+  /**
+   * 证据引用（v0.25.0）：这条记忆的原始出处坐标，**编码字符串**（格式见 `EvidenceKind` 注释）。
+   *
+   * 三者分工不可互相替代：`source` 在压缩链里被写成「为什么生成」（如 `{reason:"时间压缩…"}`），
+   * `author` 答「谁写的」，本字段答「能回到哪里」。存量条目没有本字段——**不回填、不猜**，
+   * 读取侧按 `[]` 处理（`docs/semantic.md` 证据一节）。
+   */
+  evidenceRefs?: string[]
   /** summary → 原始条目 id 列表 */
   archiveRef?: string[]
   /**
@@ -705,6 +755,11 @@ export interface RecallResultItem {
   supersededBy?: string
   /** 替代了谁（v0.24.0；仅当条目替代过别的条目时出现在结果里）——被它顶掉的记忆 id 列表 */
   supersedes?: string[]
+  /**
+   * 证据引用（v0.25.0；仅当条目带证据坐标时出现在结果里）——这条记忆能回到哪里（编码串）。
+   * 与 `provenance`（权威归谁）互补：那个答「谁说的」，这个答「去哪核」。
+   */
+  evidenceRefs?: string[]
   /** 来源类型（v0.21.0；仅当条目设了时出现在结果里）——`master` / `web` / `self` / `measured` */
   provenance?: Provenance
   /**

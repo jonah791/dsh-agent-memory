@@ -108,6 +108,8 @@ async function seedFull(store) {
     // v0.24.0：事实生命周期。`validAfter` 走 draft（新建时盖章）；`supersedes` / `supersededBy`
     // 是**成对**的边，只由 store.update 写（工具面唯一入口是 memory_supersede）⇒ 下面成对补。
     validAfter: '2026-11-01',
+    // v0.25.0：证据坐标（编码串）。不带它 ⇒ A117 对该字段恒真（返回里没有该键不构成证据）。
+    evidenceRefs: ['session|session-parity-fixture|12'],
   })
   // v0.21.0：`archival`（返回弧）只在**已归档**条目上出现 ⇒ 另造一条并归档，
   // 否则 A117 对 archival 恒真（「返回里没有该键」不构成证据）。
