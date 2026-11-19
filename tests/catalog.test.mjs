@@ -109,9 +109,9 @@ test('C1b 一条 summary 挂在库里不改变覆盖率（分母纯度）', () =
 })
 
 test('C1c ★分项相加 ≠ 净排除：四项有交集，只有 net 能减出分母', () => {
-  // 一条「已归档的 summary」会同时进 archived 与 summary 两个分项——这正是线上那 422 条重叠的形状。
-  // 2026-11-19 实测：全量 3101 − 应编目 1771 = 净排除 1330，而四项相加 1752 ⇒ 旧渲染把它们
-  // 并列成「分母排除：…」，读者相减得 1349，比真分母小 422。
+  // 一条「已归档的 summary」会同时进 archived 与 summary 两个分项——这正是线上那 424 条重叠的形状。
+  // 2026-11-19 实测（工具视野）：全量 3099 − 应编目 1771 = 净排除 1328，而四项相加 1752 ⇒ 重叠 424。
+  // 旧渲染把它们并列成「分母排除：…」，读者相减得 1347，比真分母小 424。
   const entries = [
     entry({ id: 'live1' }),
     entry({ id: 'live2' }),
@@ -325,7 +325,7 @@ test('C12 ★分项不可相加的口径必须进渲染（读数层表达缺陷�
   const value = await tool.execute({}, exec)
   const text = tool.output.render({}, value).map((c) => c.text).join('\n')
 
-  // ① 净排除必须是显式的数——让读者自己把四个分项相减，正是那 422 条误差的来源
+  // ① 净排除必须是显式的数——让读者自己把四个分项相减，正是那 424 条误差的来源
   assert.equal(typeof value.excluded.net, 'number', 'net 必须显式给')
   assert.equal(typeof value.excluded.considered, 'number', 'considered 必须显式给')
   assert.match(text, /净排除/, '净排除是唯一可减的数，必须渲染')
