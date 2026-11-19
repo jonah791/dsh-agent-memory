@@ -30,6 +30,7 @@ import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import { appendAccessTrace, appendJsonl, appendProposalRecord, readAccessIndex, readAccessSummary as readAccessSummaryFromTrace, readReviewMarks as readReviewMarksFromTrace } from './access-trace.ts'
 import { appendCompressTrace, readCompressSummary as readCompressSummaryFromTrace, type CompressTraceSink } from './compress-trace.ts'
 import { appendDedupeTrace, readDedupeTrace as readDedupeTraceFromSidecar } from './dedupe-trace.ts'
+import { readActorAudit, sanitizeActorAuditRecord } from './actor-audit.ts'
 import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
@@ -465,6 +466,13 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const forgetCertPath = join(dshHome, 'memory-forget-certificates.jsonl')
   const recordForget: NonNullable<MemoryToolDeps['recordForget']> = (cert) =>
     appendJsonl(forgetCertPath, cert, DEFAULT_AUDIT_CONFIG.proposalLog.maxBytes)
+  // 操作者审计流（v0.37 · 方案 §11.4）：只记**变更面 + 授权面**的操作者归因——
+  // 读路径已由 access-trace 承载、内容面已由遗忘凭证承载，本文件不重复它们（见 actor-audit.ts 文件头边界表）。
+  // 同纪律（只追加 / 吞错 / 按体积轮转）；写入前过白名单裁剪（最小化的执行点）。
+  const actorAuditPath = join(dshHome, 'memory-actor-audit.jsonl')
+  const recordAudit: NonNullable<MemoryToolDeps['recordAudit']> = (record) =>
+    appendJsonl(actorAuditPath, sanitizeActorAuditRecord(record), DEFAULT_AUDIT_CONFIG.proposalLog.maxBytes)
+  const readAudit: NonNullable<MemoryToolDeps['readAudit']> = () => readActorAudit(actorAuditPath)
   const recordAccess: NonNullable<MemoryToolDeps['recordAccess']> = (record) =>
     appendAccessTrace(accessTracePath, record, DEFAULT_AUDIT_CONFIG.accessTrace.maxBytes)
   const readAccess: NonNullable<MemoryToolDeps['readAccess']> = () => readAccessIndex(accessTracePath)
@@ -659,7 +667,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolveEvidence: NonNullable<MemoryToolDeps['resolveEvidence']> = (sessionId) =>
     lastSeqBySession.get(sessionId)
 
-  registerMemoryTools(ctx, { store, relations, concepts, entities, sources, loadConfig, compress, recompress, recordAccess, recordForget, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
+  registerMemoryTools(ctx, { store, relations, concepts, entities, sources, loadConfig, compress, recompress, recordAccess, recordForget, recordAudit, readAudit, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })

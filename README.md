@@ -2,7 +2,7 @@
   DSH 插件生态公约声明（plugin-ecosystem-convention · 组合优先/声明清晰/兼容优先）
   purpose: Agent 驱动的长期记忆：作用域分区（global + per-workspace）+ 分层条目（fact/knowledge/episodic）+ 时间桶压缩（日→周→月→年）+ 关联检索（related 链 / memory_relate 多跳 BFS）+ 主人消息 auto-recall 注入（CJK 2-gram、尾部追加）；内容决策全归 agent
   inject: 'storageDomain','tools','llm','agents'
-  tools: remember,recall,update,forget,memory_browse,memory_relate,memory_stats,memory_health,memory_version,memory_check,memory_merge,memory_audit,memory_recompress,memory_review_mark,memory_dispose,memory_supersede
+  tools: remember,recall,update,forget,memory_browse,memory_relate,memory_stats,memory_health,memory_version,memory_check,memory_merge,memory_audit,memory_recompress,memory_review_mark,memory_dispose,memory_supersede,memory_link,memory_unlink,memory_relations,memory_concept,memory_thesaurus,memory_entity,memory_entities,memory_source,memory_sources,memory_trail
   runtime: host-only（无 client 侧）
   envDeps: 无外部服务/无网络依赖（LLM 总结走 ctx.llm；另用 yaml + zod 两个纯 JS 依赖，node:fs 只读工作区 memory.yml）
   boundary: 读写自身存储域（agent_memory.entries）与 <workspace>/.dsh/memory.yml；不隔离、不鉴权、不加密、不做内容判断；工具描述明确「不用来记凭据（密钥/口令）」；压缩只作用于 L3 episodic，fact/knowledge 永不作为原料
@@ -23,9 +23,9 @@
 
 ## 能力
 
-23 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
+26 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
 
-> ⚠ 2026-11-17：本节曾写「14 个」而实测 15 个（`memory_dispose` 上线时未回填，**文档漂移**）；v0.24.0 加 `memory_supersede` ⇒ **16 个**；v0.28.0 加 `memory_link` / `memory_unlink` / `memory_relations` ⇒ 19；v0.29.0 加 `memory_concept` / `memory_thesaurus` ⇒ 21；v0.30.0 加 `memory_entity` / `memory_entities` ⇒ **23 个**。工具数由 `tests/audit.test.mjs` A42 硬编码锁定（每变一次必须显式确认）。
+> ⚠ 2026-11-17：本节曾写「14 个」而实测 15 个（`memory_dispose` 上线时未回填，**文档漂移**）；v0.24.0 加 `memory_supersede` ⇒ **16 个**；v0.28.0 加 `memory_link` / `memory_unlink` / `memory_relations` ⇒ 19；v0.29.0 加 `memory_concept` / `memory_thesaurus` ⇒ 21；v0.30.0 加 `memory_entity` / `memory_entities` ⇒ 23；v0.35.0 加 `memory_source` / `memory_sources` ⇒ 25；v0.37 加 `memory_trail` ⇒ **26 个**。工具数由 `tests/audit.test.mjs` A42 硬编码锁定（每变一次必须显式确认）。
 
 | 工具 | 用途 |
 |------|------|
@@ -51,6 +51,9 @@
 | `memory_thesaurus` | **v0.29 查词表**：按标签查（首选名或同义词都认）、看详情（含派生下位、上位链、变更记录）、列表、导出 SKOS-lite JSON（可再导入） |
 | `memory_entity` | **v0.30 维护实体权威档**（方案 §4.3 规范控制）：新建 / 修改 / 合并（`mergeInto`）/ 停用。**一个现实对象一个档**：`ENTITY-0001`（每 scope 递增、可口头引用）+ 规范名 + 别名 + 实体类型（必填、不枚举——它是消歧第一依据）+ 首次出现 + 相关主题（概念 id）+ 关联实体 + 消歧说明。**别名可多指**：两个不同实体可以同名（方案明确不许因同名就合并）⇒ 撞名必须写 `disambiguation`，否则整笔拒绝；**合并是显式动作、只保留一层、不删除旧档** |
 | `memory_entities` | **v0.30 查实体档**：按称呼解析（规范名或别名，多命中标 `ambiguous`——**程序不替调用方挑**）、看详情、列表；并按名称**反查提到它的条目**（可见集合内匹配：CJK 走子串、含 ASCII 的名字走**词边界**——别名 `AML` 不会命中 `yaml`；本期不落 `entry → entity` 边，理由见 `docs/semantic.md §5.23`） |
+| `memory_source` | **v0.35 维护来源实体**（方案 §5.2）：新建 / 修改 / 停用。`SOURCE-0001` 每 scope 递增；七项字段里 `type` 与 `location` 必填，`reliability` / `confidence` / `permissions` **无默认值**（不知道就是不知道）。`permissions` **只存不判**（本层不发明第二套授权语义）。停用不删除；变更记录只留 5 条。与 `provenance` **正交**：那个答「这条归属谁」，来源答「能去哪核」（v0.35.1 裁决，见 `docs/semantic.md §5.28`） |
+| `memory_sources` | **v0.35 查来源**：看详情 / 列表 / **按条目反查引用方**（`memory_sources({entryId})`）；未接线时 `memory_stats.sources.wired=false`（「没接线」与「库是空的」必须可区分） |
+| `memory_trail` | **v0.37 操作者审计流的读入口**（方案 §11.4）：谁写了什么 / 谁改了什么 / 谁删了什么 / 哪条读准入判据拒了多少条 / 有没有高密度动作簇。与 `memory_audit` 的分工是**对象不同**——那个审**条目**（该不该降级），本工具审**动作**（谁干的、有没有越权）。⚠ 三种空必须分清：`wired=false`（没接线）· `total=0`（接了线但还没有任何事件，**不是零违规**）· `rejected=0 且 total>0`（有动作、无拒绝）。动作簇只给信号、不贴「异常」标签（判据见 `docs/semantic.md §5.30`） |
 
 行为侧（无工具面，自动发生）：
 

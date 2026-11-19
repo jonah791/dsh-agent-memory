@@ -85,11 +85,12 @@ test('工具齐备，名称与契约一致', () => {
   // 2026-11-19：`memory_concept` / `memory_thesaurus`（v0.29.0 主题词表 · 方案 §4.2）—— 同上。
   // 2026-11-19：`memory_entity` / `memory_entities`（v0.30.0 实体权威档 · 方案 §4.3）—— 同上。
   // 2026-11-19：`memory_source` / `memory_sources`（v0.35.0 来源实体 · 方案 §5.2）—— 同上。
+  // 2026-11-19：`memory_trail`（v0.37 操作者审计流 · 方案 §11.4）—— 同上，同一次提交内补上。
   // ⚠ 这行的用途是「工具集合被意外增删时变红」，但它每漏补一次就变成**恒红**，
   //   而恒红的断言不再是指标（读数纪律：两次读数是同一个坏值 ⇒ 先怀疑量法）。
   //   ⇒ 判据：新增工具时**同一次提交**里改这一行；`.ts` 套件不在 `npm test` 的绿线内，
   //   所以它冷了六周才被发现（v0.24.0 → 2026-11-18）。
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_check', 'memory_concept', 'memory_dispose', 'memory_entities', 'memory_entity', 'memory_health', 'memory_link', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_relations', 'memory_review_mark', 'memory_source', 'memory_sources', 'memory_stats', 'memory_supersede', 'memory_thesaurus', 'memory_unlink', 'memory_version', 'recall', 'remember', 'update'])
+  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_check', 'memory_concept', 'memory_dispose', 'memory_entities', 'memory_entity', 'memory_health', 'memory_link', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_relations', 'memory_review_mark', 'memory_source', 'memory_sources', 'memory_stats', 'memory_supersede', 'memory_thesaurus', 'memory_trail', 'memory_unlink', 'memory_version', 'recall', 'remember', 'update'])
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
 })

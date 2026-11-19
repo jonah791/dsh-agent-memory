@@ -29,7 +29,8 @@ import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
 import { findNearDuplicates, formatCandidate, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
 import type { DedupeTraceRecord, SimilarDisposition } from './dedupe.ts'
-import { applyRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
+import { filterRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
+import { ACTION_LABELS, ACTOR_AUDIT_ACTIONS, CODE_LABELS, OUTCOME_LABELS, filterActorAudit, findBursts, type ActorAuditAction, type ActorAuditRecord, type ActorAuditSummary, type ActorIdentity, type AuditTarget } from './actor-audit.ts'
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
 import { countByProject, executionTag, filterByExecution, normalizeProject, parseExecutionArgs, parseExecutionId } from './execution.ts'
 import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, parseGroundingArg, UNLABELED_GROUNDING } from './grounding.ts'
@@ -132,6 +133,22 @@ export interface MemoryToolDeps {
    * 「没写」与「写了一条空的」必须可区分，所以 certId 只在真写时出现。
    */
   recordForget?: (cert: ForgetCertificate) => Promise<boolean> | void
+  /**
+   * 操作者审计流写入（v0.37 · 方案 §11.4）：记「谁、对什么、做了什么、成没成」。
+   *
+   * 与 `recordProposal` / `recordForget` 的分工：提案日志记「我提议了什么」（含理由自由文本），
+   * 遗忘凭证记「传播到哪些内容面」，**本回调记操作者归因与权限拒绝**——三者不重复。
+   *
+   * 为什么由外部注入：同 `recordForget`——侧车路径归 `index.ts`，工具层不该知道 dshHome。
+   * 实现方负责只追加 / 吞错 / 按体积轮转 / **白名单裁剪**（最小化的执行点在实现侧，不靠每个调用点自觉）。
+   * 缺省 ⇒ 不落盘（工具照常工作）——「审计未接线」与「审计零事件」是两件事。
+   */
+  recordAudit?: (record: ActorAuditRecord) => Promise<boolean> | void
+  /**
+   * 审计流读取（`memory_trail` 用）：已解析的记录 + 全量汇总。
+   * 缺省 / 读失败 ⇒ `undefined`（工具如实报「未接线」，不报「零事件」）。
+   */
+  readAudit?: () => Promise<{ records: ActorAuditRecord[]; summary: ActorAuditSummary } | undefined>
   /**
    * 侧车轨迹读取（体检用；缺省/读失败 ⇒ undefined = 无用量信号）。
    * v0.12：每项还带 `attributed`（排序加权归因，见 access-trace.ts）——声明与实现对齐；
@@ -288,17 +305,80 @@ function recordAction(
 }
 
 /**
+ * 审计草稿：不含 `atMs` 与 `actor`——两者由 `audit()` 统一填，
+ * **不许各调用点自己造时间戳与身份**（两份身份来源必然分叉，而分叉后「谁干的」就无法对账）。
+ */
+type AuditDraft =
+  | { action: ActorAuditAction; target: AuditTarget; outcome: 'ok' | 'partial'; code?: string; tool?: string }
+  | { action: ActorAuditAction; target: AuditTarget; outcome: 'rejected'; code: string; tool?: string }
+
+/**
+ * 审计操作者三要素（v0.37）——**与写路径 `roleStampOf` 同源**（`sessionIdOf` / `roleViewOf` / `sessionHeaderOf`）。
+ *
+ * `role` 只在角色维度启用时填：未启用的维度不该在审计里突然有值（那会让人误以为存在区分）。
+ * `delegationDepth` 不受该开关影响，且它是多代理场景下最重要的归因维度（0 层与 3 层该问责的对象不同）。
+ */
+function auditActorOf(exec: ToolRunContext, config: MemoryConfig): ActorIdentity {
+  const view = roleViewOf(config, exec as unknown as RoleCarrierLike)
+  const header = sessionHeaderOf(exec as unknown as RoleCarrierLike)
+  const sessionId = sessionIdOf(exec as unknown as RoleCarrierLike)
+  return {
+    ...(sessionId !== undefined && sessionId.length > 0 ? { sessionId } : {}),
+    ...(view.enabled ? { role: view.role } : {}),
+    ...(header?.delegationDepth !== undefined ? { delegationDepth: header.delegationDepth } : {}),
+  }
+}
+
+/**
+ * 记一条审计（**吞错**，绝不影响主流程——同 `recordAction`）。
+ *
+ * 为什么不在埋点处 await：审计是旁证，写入失败不许让 remember / forget 失败。
+ * `deps.recordAudit` 未接线时是 no-op（「未接线」与「零事件」由读取侧的 `wired` 区分）。
+ */
+function audit(deps: MemoryToolDeps, exec: ToolRunContext, config: MemoryConfig, draft: AuditDraft): void {
+  if (deps.recordAudit === undefined) return
+  void deps.recordAudit({ atMs: Date.now(), actor: auditActorOf(exec, config), ...draft } as ActorAuditRecord)
+}
+
+/**
  * 读路径统一取数：作用域合并 → 视野收窄 → 角色准入过滤（v0.5）。
  * 所有读工具（recall / browse / relate / stats）必须走这里——**单点过滤**，
  * 否则「recall 过滤了但 browse 没过滤」= 隔离是假的。
  */
 function gatherReadable(
   deps: MemoryToolDeps,
-  opts: { readScopes: string[]; includeArchive: boolean; view: RoleView; explicitScope?: string },
-): { entries: Entry[]; scopes: string[] } {
+  opts: {
+    readScopes: string[]
+    includeArchive: boolean
+    view: RoleView
+    explicitScope?: string
+    /**
+     * 权限拒绝的审计钩子（v0.37 · 方案 §11.4）——**只有主检索面传**（`recall` / `memory_browse`）。
+     *
+     * 为什么不无条件记：本函数被十五处调用，一次会话里 stats / relate / merge 内部的取数
+     * 都会经过它；每处都记会让审计流变成「每轮一条」的洪水，而**没人读的日志等于没写**。
+     * 主检索面覆盖绝大多数真实读取，且拒绝在那里最值得知道。
+     */
+    auditRejects?: { exec: ToolRunContext; config: MemoryConfig; tool: string }
+  },
+): { entries: Entry[]; scopes: string[]; rejected: number; rejectedBy: Record<string, number> } {
   const scopes = narrowReadScopes(opts.readScopes, opts.view, opts.explicitScope)
   const entries = scopes.flatMap((scope) => deps.store.list(scope, { includeArchive: opts.includeArchive }))
-  return { entries: applyRoleView(entries, opts.view), scopes }
+  const filtered = filterRoleView(entries, opts.view)
+  // 只记异常面：拒绝 > 0 才写，且**每个判据码一条**——拼成一个 joined 码会让
+  // 「哪条策略在工作」统计不出来，而那是这份审计唯一的行动信号。
+  if (filtered.rejected > 0 && opts.auditRejects !== undefined) {
+    for (const [code, count] of Object.entries(filtered.rejectedBy)) {
+      audit(deps, opts.auditRejects.exec, opts.auditRejects.config, {
+        action: 'permission',
+        target: { count, ...(opts.explicitScope !== undefined ? { scope: opts.explicitScope } : {}) },
+        outcome: 'rejected',
+        code,
+        tool: opts.auditRejects.tool,
+      })
+    }
+  }
+  return { entries: filtered.admitted, scopes, rejected: filtered.rejected, rejectedBy: filtered.rejectedBy }
 }
 
 /** action → 中文文案（工具 render 用） */
@@ -564,6 +644,15 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       //       ③ L2/L3 同标题自动合并
       //   - **已知缺口**：写入路径上现在没有布线化的「先搜」，剩下的是我在写之前的 `recall` 纪律。
       //     这不是我以为已经解决了的事——它记在长期台账上，替代方案要求先标定再上线（见 dedupe.ts 注释）。
+      // 操作者审计（v0.37 · 方案 §11.4）：记「谁写了什么」。**只记 id 与结果**——不记标题与正文（最小化）。
+      // `merged` 归 `update`：它改变了一条已存在的记忆，不是新建；`created` 才是 `write`。
+      audit(deps, exec, config, {
+        action: written.action === 'created' ? 'write' : 'update',
+        target: { id: written.id, scope: writeScope },
+        outcome: 'ok',
+        code: written.action,
+        tool: 'remember',
+      })
       return {
         id: written.id,
         action: written.action,
@@ -856,7 +945,14 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       const includeArchive = args.includeArchive ?? wantsArchived
       // 取数：作用域合并 → 视野收窄 → 角色准入过滤（v0.5 单点过滤）
       //      → 主体层筛选（v0.13.0，可选）→ 检索管道
-      const gathered = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
+      const gathered = gatherReadable(deps, {
+        readScopes,
+        includeArchive,
+        view,
+        explicitScope: args.scope,
+        // 权限拒绝埋点（v0.37 · 方案 §11.4）：只在主检索面记（理由见 `gatherReadable` 的 `auditRejects`）。
+        auditRejects: { exec, config, tool: 'recall' },
+      })
       // 主体层是**可选筛子**（非准入）：未给参数时 `filterBySubject` 原样返回同一数组引用
       // （零拷贝）⇒ 存量无 subject 的条目行为逐字节不变。非法值 fail-loud（不静默当通用）。
       const subject = parseSubjectArg(args.subject, 'recall.subject')
@@ -1227,6 +1323,15 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       }
       await deps.store.update(entry.scope, args.id, patch)
       recordAction(deps, config, { action: 'update', id: args.id, mode })
+      // 操作者审计（v0.37 · 方案 §11.4）：`code` 放修改模式（replace/append/patch）——
+      // 「改了哪个形状」比「改了一次」更有用，而 mode 没有别的载体（target 白名单只放标识与计数）。
+      audit(deps, exec, config, {
+        action: 'update',
+        target: { id: args.id, scope: entry.scope },
+        outcome: 'ok',
+        code: mode,
+        tool: 'update',
+      })
       return { id: args.id }
     },
   })
@@ -1387,6 +1492,20 @@ function buildSupersede(deps: MemoryToolDeps): ToolDefinition {
         action: 'supersede',
         id: newId,
         reason: `supersedes: ${oldIds.join(', ')}`,
+      })
+      // 操作者审计（v0.37 · 方案 §11.4）：替代是**更新的一种**——它改变两条条目的状态，不是删除。
+      // `target.id` 记新条目、`ids` 记真正被退役的旧条目（`skipped` 的不算，否则「改了几条」虚高）。
+      audit(deps, exec, config, {
+        action: 'update',
+        target: {
+          id: newId,
+          ...(superseded.some((item) => item.changed)
+            ? { ids: superseded.filter((item) => item.changed).map((item) => item.id), count: superseded.filter((item) => item.changed).length }
+            : {}),
+        },
+        outcome: superseded.some((item) => !item.changed) ? 'partial' : 'ok',
+        code: 'supersede',
+        tool: 'memory_supersede',
       })
       return {
         id: newId,
@@ -1643,6 +1762,20 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
         }
         await deps.recordForget(certificate)
       }
+      // 操作者审计（v0.37 · 方案 §11.4）：补上遗忘凭证**没有的那一维**——谁发起的。
+      // 凭证记「传播到哪些内容面」，本记录记「谁、哪种操作、成没成」（不重复面清单）。
+      // ⚠ `dryRun` 分支已在前面返回、**不记**：审计的判据是「改变了什么」，dry-run 没改变任何东西
+      //   （把查询记成变更会让「删了多少」虚高）；「谁计划要删」由提案日志承载。
+      // ⚠ 零命中**不记**：选择器一个都没匹配时 `forget` 是 fail-loud 抛错（既有护栏），
+      //   抛错前没有动作发生——记一条「已遗忘」就是假记录。这里因此没有 rejected 分支。
+      // `code` 放操作模式（entry/topic/all）——它是「哪种删除」的唯一载体。
+      audit(deps, exec, config, {
+        action: 'forget',
+        target: { ids, count: ids.length, scope: writeScope },
+        outcome: skipped > 0 ? 'partial' : 'ok',
+        code: mode,
+        tool: 'forget',
+      })
       return {
         ...idField,
         mode,
@@ -1748,6 +1881,15 @@ function buildMerge(deps: MemoryToolDeps): ToolDefinition {
         recordAction(deps, config, { action: 'forget', id: other.id, reason })
         archived.push(other.id)
       }
+      // 操作者审计（v0.37 · 方案 §11.4）：合并**同时改变多条**——canonical 被改写、被并入者被归档。
+      // 记成 `update`（改变状态，不是删除）；`code` 放 strategy，让人回看时知道内容是并了还是丢了。
+      audit(deps, exec, config, {
+        action: 'update',
+        target: { id: canonical.id, ...(archived.length > 0 ? { ids: archived, count: archived.length } : {}) },
+        outcome: 'ok',
+        code: strategy,
+        tool: 'memory_merge',
+      })
       return { canonical: canonical.id, merged: merged.length, archived, charsAdded, notes }
     },
   })
@@ -1845,6 +1987,24 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
               withPermissions: { type: 'integer', required: true, description: '带权限的（本阶段只存不判，不构成准入）' },
             },
           },
+          audit: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            description: '操作者审计流（v0.37 · 方案 §11.4）：变更面与授权面的操作者归因读数。⚠ 未接线时 `wired=false`（「没接线」与「零事件」必须可区分）。',
+            properties: {
+              wired: { type: 'boolean', required: true, description: 'false = 审计侧车未接线 ⇒ 下面的 0 不代表「没有动作」' },
+              total: { type: 'integer', required: true, description: '审计记录总数' },
+              writes: { type: 'integer', required: true },
+              updates: { type: 'integer', required: true },
+              forgets: { type: 'integer', required: true },
+              links: { type: 'integer', required: true },
+              permissionRejects: { type: 'integer', required: true, description: '读准入**拒绝**记录数（放行不记是设计）——这是「权限违规」第一次有判据' },
+              rejectedByCode: { type: 'array', required: true, items: { type: 'string' }, description: '拒因分布（`R2-space ×12`）——它同时是「该给这些条目补标注」的行动信号' },
+              distinctActors: { type: 'integer', required: true },
+              lastAt: { type: 'string', required: true },
+            },
+          },
         },
       },
       render: (args, value) => [{
@@ -1877,7 +2037,12 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           // 来源实体（v0.35 · 方案 §5.2）：同 relations / concepts / entities——wired=false 必须看得见
           + `\n来源实体：${value.sources.wired
             ? `${value.sources.total} 个来源（适用 ${value.sources.active} / 停用 ${value.sources.retired}；未标注可靠度 ${value.sources.unlabeledReliability} / 带提供方 ${value.sources.withOwner} / 带权限 ${value.sources.withPermissions}）`
-            : '未接线（sources 表未装配）——此处的 0 不代表来源库为空'}`,
+            : '未接线（sources 表未装配）——此处的 0 不代表来源库为空'}`
+          // 操作者审计流（v0.37 · 方案 §11.4）：同 relations / sources——wired=false 必须看得见。
+          // 「准入拒绝 0」单独给数：它不是「零违规」，只说明没有拒绝被记录（放行不记是设计）。
+          + `\n审计流：${value.audit.wired
+            ? `${value.audit.total} 条（写入 ${value.audit.writes} / 修改 ${value.audit.updates} / 遗忘 ${value.audit.forgets} / 关系 ${value.audit.links} / 准入拒绝 ${value.audit.permissionRejects}；${value.audit.distinctActors} 个操作者；最近 ${value.audit.lastAt.length > 0 ? value.audit.lastAt : '（无）'}）${value.audit.rejectedByCode.length > 0 ? ` 拒因 ${value.audit.rejectedByCode.join(' · ')}` : ''}`
+            : '未接线（recordAudit 缺失）——此处的 0 不代表没有动作'}`,
       }],
     },
     async execute(args, exec) {
@@ -1896,6 +2061,9 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
       })
       // 主体层 + 约定状态分布（v0.13 / v0.14）：与 statsOf 吃**同一批** entries（含归档）——
       // 口径同体，否则「总 N 条但分档加起来不等」这种不自洽会在读数层制造新疑问。
+      // 操作者审计流（v0.37 · 方案 §11.4）：一次读完、下面以同步 IIFE 组装块——
+      // `memory_stats` 是体检入口，读数必须是**全量**，不能只看一页明细。
+      const auditState = deps.readAudit === undefined ? undefined : await deps.readAudit()
       return {
         ...statsOf(entries),
         scopes,
@@ -1991,6 +2159,28 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
             unlabeledReliability: stats.unlabeledReliability,
             withOwner: stats.withOwner,
             withPermissions: stats.withPermissions,
+          }
+        })(),
+        // 操作者审计流（v0.37 · 方案 §11.4）：同 concepts / entities / sources——`wired=false` 与「零事件」必须可区分。
+        // ⚠ 「准入拒绝 0」不是「零违规」：它只说明**没有拒绝被记录**（放行不记是设计）。
+        audit: (() => {
+          if (auditState === undefined) {
+            return { wired: false, total: 0, writes: 0, updates: 0, forgets: 0, links: 0, permissionRejects: 0, rejectedByCode: [] as string[], distinctActors: 0, lastAt: '' }
+          }
+          const s = auditState.summary
+          return {
+            wired: true,
+            total: s.total,
+            writes: s.byAction.write,
+            updates: s.byAction.update,
+            forgets: s.byAction.forget,
+            links: s.byAction.link,
+            permissionRejects: s.byAction.permission,
+            rejectedByCode: Object.entries(s.rejectedByCode)
+              .sort((a, b) => b[1] - a[1])
+              .map(([code, count]) => `${code}${CODE_LABELS[code] !== undefined ? `（${CODE_LABELS[code]}）` : ''} ×${count}`),
+            distinctActors: s.distinctActors,
+            lastAt: s.lastAtMs > 0 ? new Date(s.lastAtMs).toISOString().slice(0, 16) : '',
           }
         })(),
       }
@@ -2128,7 +2318,14 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       const wantsArchived = statuses !== undefined
         && statuses.some((state) => state === 'archived' || state === 'deleted')
       const includeArchive = args.includeArchive ?? wantsArchived
-      const gathered = gatherReadable(deps, { readScopes, includeArchive, view, explicitScope: args.scope })
+      const gathered = gatherReadable(deps, {
+        readScopes,
+        includeArchive,
+        view,
+        explicitScope: args.scope,
+        // 权限拒绝埋点（v0.37）：browse 是全库扫，最容易踩空间白名单——记它。
+        auditRejects: { exec, config, tool: 'memory_browse' },
+      })
       // 主体层筛选（v0.13.0，可选筛子）：未给参数时零拷贝原样返回 ⇒ 存量行为不变
       // 时效维筛（v0.15.0）：第三级同为可选筛子。加在 browse 上不是「为对称而对称」——
       // **审查入口必须在所有读路径上可达**：否则「我以为能翻到，结果那个工具不支持」
@@ -2289,6 +2486,18 @@ function buildLink(deps: MemoryToolDeps): ToolDefinition {
         ...(evidenceRefs !== undefined ? { evidenceRefs } : {}),
         ...(note !== undefined ? { note } : {}),
       })
+      // 操作者审计（v0.37 · 方案 §11.4）：关系变更也是知识组织变更——「谁把这条边连起来的」属治理面。
+      // ⚠ 只在 `created === true` 时记：幂等命中没有改变任何东西（同 dry-run 的判据），
+      //   把「调用过」记成「改过」会让变更计数虚高。
+      if (result.created) {
+        audit(deps, exec, config, {
+          action: 'link',
+          target: { id: result.relation.id, scope: from!.scope, count: 1 },
+          outcome: 'ok',
+          code: `+${type}`,
+          tool: 'memory_link',
+        })
+      }
       return {
         id: result.relation.id,
         type,
@@ -2332,13 +2541,25 @@ function buildUnlink(deps: MemoryToolDeps): ToolDefinition {
           : `该关系本就已退役（边 id=${v.id}，validTo=${v.validTo}）——未改写退役时刻。`,
       }],
     },
-    async execute(args, _exec) {
+    async execute(args, exec) {
       const relations = relationStoreOf(deps)
       const id = typeof args.id === 'string' ? args.id.trim() : ''
       if (id.length === 0) throw new Error('memory_unlink: id 不能为空')
       const reason = typeof args.reason === 'string' ? args.reason : undefined
       const result = await relations.unlink(id, reason !== undefined ? { reason } : {})
       if (result === undefined) throw new Error(`memory_unlink: 未找到边 id="${id}"`)
+      // 操作者审计（v0.37）：只在**真退役**时记（`changed=false` = 本来就已退役，没改变任何东西）。
+      // 关系退役是低频动作，为它多解析一次配置可接受——换来「谁撤的边」可归因。
+      if (result.changed) {
+        const { config } = await resolveRuntime(exec, deps)
+        audit(deps, exec, config, {
+          action: 'link',
+          target: { id: result.relation.id, count: 1 },
+          outcome: 'ok',
+          code: `-${result.relation.type}`,
+          tool: 'memory_unlink',
+        })
+      }
       return {
         id: result.relation.id,
         changed: result.changed,
@@ -4193,6 +4414,201 @@ function buildReviewMark(deps: MemoryToolDeps): ToolDefinition {
 }
 
 /**
+ * 构建 memory_trail 工具（v0.37 · 方案 §11.4）——**操作者审计流的读入口**。
+ *
+ * ## 为什么它是本模块成败的地方
+ *
+ * 只能写的审计流只是一份没人读的文件。`access-trace` 之所以活着，是因为体检在消费它；
+ * 本工具（+ `memory_stats.audit` 块）是同一层意义的消费面。**没有消费面，§11.4 就只是多了一个 jsonl。**
+ *
+ * ## 与邻居的分工（写进 description，因为我自己也会读错）
+ *
+ * - `memory_audit` = **价值体检**（哪些条目该降级）——对象是条目。
+ * - `memory_trail` = **操作审计**（谁干了什么、有没有越权）——对象是动作。
+ * - `access-trace` = **读路径命中**（谁读了哪些）——本工具不重复它。
+ *
+ * ## 三种空必须分清（「读数不自带范围」的教训）
+ *
+ * `wired=false`（没接线）≠ `total=0`（接了线但还没事件，**不是零违规**）≠ `rejected=0 且 total>0`（有动作、无拒绝）。
+ */
+function buildTrail(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_trail',
+    deferLoading: true,
+    description: '读**操作者审计流**（v0.37 · 方案 §11.4）：谁写了什么 / 谁改了什么 / 谁删了什么 / 哪条准入判据拒了多少条 / 有没有高密度动作簇。'
+      + '与 `memory_audit` 的分工：那个是价值体检（哪些条目该降级，对象是条目）；本工具是操作审计（谁干了什么，对象是动作）。'
+      + '与 `memory_audit` 同名的 `audit` 概念不同层：**提案日志**记「我提议了什么」，本流记「谁执行了什么」。'
+      + '⚠ 三种空要分清：`wired=false` = 没接线（读不到）· `total=0` = 接了线但**还没有任何事件**（不是「零违规」）· `rejected=0 且 total>0` = 有动作、无拒绝。',
+    parameters: {
+      action: { type: 'string', enum: ['write', 'update', 'forget', 'link', 'permission'], description: '只取某一类动作：`write` 写入 / `update` 修改（含替代·合并）/ `forget` 遗忘 / `link` 关系写·退役 / `permission` 读准入拒绝。' },
+      sessionId: { type: 'string', description: '只取某个会话的记录（精确匹配会话 id）。' },
+      sinceHours: { type: 'number', description: '只看最近 N 小时（缺省看全部）。' },
+      limit: { type: 'integer', description: '最多返回几条明细（缺省 20，上限 200；取**最近**的）。' },
+      summaryOnly: { type: 'boolean', description: 'true = 只出汇总与动作簇、不出明细（省上下文）。' },
+      windowMinutes: { type: 'number', description: '动作簇的时间窗（分钟，缺省 5）。' },
+      minBurst: { type: 'integer', description: '动作簇的触发计数（缺省 3；小于 2 视为无意义）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          wired: { type: 'boolean', required: true, description: 'false = 侧车未接线（`readAudit` 缺失）——此时其余字段全为 0，**不代表零事件**' },
+          total: { type: 'integer', required: true, description: '全量记录数（不受筛选影响）' },
+          writes: { type: 'integer', required: true },
+          updates: { type: 'integer', required: true },
+          forgets: { type: 'integer', required: true },
+          links: { type: 'integer', required: true },
+          permissions: { type: 'integer', required: true, description: '读准入**拒绝**记录数（放行不记——放行是默认）' },
+          okCount: { type: 'integer', required: true },
+          partialCount: { type: 'integer', required: true },
+          rejectedCount: { type: 'integer', required: true },
+          distinctActors: { type: 'integer', required: true, description: '去重后的操作者会话数（无会话 id 的记录不计入——不知道不等于一个新操作者）' },
+          lastAt: { type: 'string', required: true, description: '最近一条记录时刻（ISO 分钟精度；无记录为空串）' },
+          shown: { type: 'integer', required: true, description: '本次返回的明细条数' },
+          filteredTotal: { type: 'integer', required: true, description: '符合筛选条件的总条数（`shown` 只是其中最近一页）' },
+          records: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+            at: { type: 'string', required: true },
+            action: { type: 'string', required: true },
+            outcome: { type: 'string', required: true },
+            code: { type: 'string' },
+            actor: { type: 'string', required: true, description: '已渲染的操作者（会话 / 角色 / 委派深度；缺项显示「未标注」）' },
+            target: { type: 'string', required: true, description: '已渲染的目标（id / 条数 / scope）' },
+            tool: { type: 'string' },
+          } }, description: '明细（最近优先）' },
+          bursts: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: {
+            actor: { type: 'string', required: true },
+            action: { type: 'string', required: true },
+            count: { type: 'integer', required: true },
+            firstAt: { type: 'string', required: true },
+            lastAt: { type: 'string', required: true },
+          } }, description: '高频动作簇（**信号，不是裁决**——是否异常由我判断，工具不贴标签）' },
+          rejectedByCode: { type: 'array', required: true, items: { type: 'string' }, description: '拒因分布（渲染行 `R4-read ×12`）' },
+        },
+      },
+      render: (_args, v) => {
+        if (!v.wired) {
+          return [{ type: 'text', text: '审计流**未接线**（`deps.readAudit` 缺失）——这不是「零事件」，是**读不到**。' }]
+        }
+        const lines: string[] = [
+          `审计流：${v.total} 条记录 · ${v.distinctActors} 个操作者会话 · 最近 ${v.lastAt.length > 0 ? v.lastAt : '（无）'}`,
+          `动作：写入 ${v.writes} / 修改 ${v.updates} / 遗忘 ${v.forgets} / 关系 ${v.links} / 准入拒绝 ${v.permissions}`,
+          `结果：成功 ${v.okCount} / 部分 ${v.partialCount} / 被拒 ${v.rejectedCount}`,
+        ]
+        if (v.rejectedByCode.length > 0) lines.push(`拒因：${v.rejectedByCode.join(' · ')}`)
+        if (v.total === 0) {
+          lines.push('', '⚠ `total=0` = 接上线之后**还没有任何事件**——不是「零违规」，而是还没有动作发生。')
+        }
+        // 标签查表的键来自 schema 推断（string），与常量表的 union 键不自动对齐 ⇒ 这里显式收窄一次；
+        // 未知键原样显示（不猜、不吞）。
+        const label = (map: Record<string, string>, key: string): string => map[key] ?? key
+        if (v.records.length > 0) {
+          lines.push('', `明细（最近优先，共 ${v.filteredTotal} 条符合筛选，显示 ${v.shown} 条）：`)
+          for (const r of v.records) {
+            lines.push(`· ${r.at} ${label(ACTION_LABELS, r.action)} ${label(OUTCOME_LABELS, r.outcome)}${r.code !== undefined ? `（${r.code}）` : ''} — ${r.actor} → ${r.target}${r.tool !== undefined ? ` [${r.tool}]` : ''}`)
+          }
+        } else if (v.total > 0) {
+          lines.push('', '（筛选条件内没有记录——不等于库里没有动作）')
+        }
+        if (v.bursts.length > 0) {
+          lines.push('', '动作簇（信号，不是裁决——是否异常由我判断）：')
+          for (const b of v.bursts) lines.push(`· ${b.actor} 在 ${b.firstAt}~${b.lastAt} 内 ${label(ACTION_LABELS, b.action)} ${b.count} 次`)
+        }
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args) {
+      const state = deps.readAudit === undefined ? undefined : await deps.readAudit()
+      if (state === undefined) {
+        return {
+          wired: false, total: 0, writes: 0, updates: 0, forgets: 0, links: 0, permissions: 0,
+          okCount: 0, partialCount: 0, rejectedCount: 0, distinctActors: 0, lastAt: '',
+          shown: 0, filteredTotal: 0, records: [], bursts: [], rejectedByCode: [],
+        }
+      }
+      const { records, summary } = state
+      const rawAction = typeof args.action === 'string' && args.action.length > 0 ? args.action : undefined
+      if (rawAction !== undefined && !(ACTOR_AUDIT_ACTIONS as readonly string[]).includes(rawAction)) {
+        throw new Error(`memory_trail: 未知 action="${rawAction}"（允许 ${ACTOR_AUDIT_ACTIONS.join(' / ')}）`)
+      }
+      const sinceMs = typeof args.sinceHours === 'number' && Number.isFinite(args.sinceHours) && args.sinceHours > 0
+        ? Date.now() - args.sinceHours * 3_600_000
+        : undefined
+      const rawLimit = typeof args.limit === 'number' && Number.isFinite(args.limit) ? Math.trunc(args.limit) : 20
+      const limit = Math.min(200, Math.max(1, rawLimit))
+      const sessionId = typeof args.sessionId === 'string' && args.sessionId.length > 0 ? args.sessionId : undefined
+      const page = filterActorAudit(records, {
+        ...(rawAction !== undefined ? { action: rawAction as ActorAuditAction } : {}),
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(sinceMs !== undefined ? { sinceMs } : {}),
+        limit,
+      })
+      const filteredAll = filterActorAudit(records, {
+        ...(rawAction !== undefined ? { action: rawAction as ActorAuditAction } : {}),
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(sinceMs !== undefined ? { sinceMs } : {}),
+      })
+      const windowMs = (typeof args.windowMinutes === 'number' && Number.isFinite(args.windowMinutes) && args.windowMinutes > 0
+        ? args.windowMinutes
+        : 5) * 60_000
+      const minBurst = typeof args.minBurst === 'number' && Number.isFinite(args.minBurst) ? Math.trunc(args.minBurst) : 3
+      const bursts = findBursts(records, { windowMs, minCount: minBurst }).slice(0, 5)
+      const toIso = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace('T', ' ')
+      const actorText = (record: ActorAuditRecord): string => {
+        const parts: string[] = []
+        if (record.actor.sessionId !== undefined) parts.push(`会话 ${shortId(record.actor.sessionId)}`)
+        if (record.actor.role !== undefined) parts.push(`角色 ${record.actor.role}`)
+        if (record.actor.delegationDepth !== undefined) parts.push(`深度 ${record.actor.delegationDepth}`)
+        return parts.length > 0 ? parts.join(' / ') : '未标注'
+      }
+      const targetText = (record: ActorAuditRecord): string => {
+        const parts: string[] = []
+        if (record.target.id !== undefined) parts.push(record.target.id)
+        if (record.target.count !== undefined) parts.push(`${record.target.count} 条`)
+        if (record.target.scope !== undefined) parts.push(`scope=${record.target.scope}`)
+        return parts.length > 0 ? parts.join(' / ') : '（无目标）'
+      }
+      const shownRecords = (args.summaryOnly === true ? [] : page.slice().reverse()).map((record) => ({
+        at: toIso(record.atMs),
+        action: record.action,
+        outcome: record.outcome,
+        ...(record.code !== undefined ? { code: record.code } : {}),
+        actor: actorText(record),
+        target: targetText(record),
+        ...(record.tool !== undefined ? { tool: record.tool } : {}),
+      }))
+      return {
+        wired: true,
+        total: summary.total,
+        writes: summary.byAction.write,
+        updates: summary.byAction.update,
+        forgets: summary.byAction.forget,
+        links: summary.byAction.link,
+        permissions: summary.byAction.permission,
+        okCount: summary.byOutcome.ok,
+        partialCount: summary.byOutcome.partial,
+        rejectedCount: summary.byOutcome.rejected,
+        distinctActors: summary.distinctActors,
+        lastAt: summary.lastAtMs > 0 ? toIso(summary.lastAtMs) : '',
+        shown: shownRecords.length,
+        filteredTotal: filteredAll.length,
+        records: shownRecords,
+        bursts: bursts.map((burst) => ({
+          actor: `会话 ${shortId(burst.sessionId)}`,
+          action: burst.action,
+          count: burst.count,
+          firstAt: toIso(burst.firstAtMs),
+          lastAt: toIso(burst.lastAtMs),
+        })),
+        rejectedByCode: Object.entries(summary.rejectedByCode)
+          .sort((a, b) => b[1] - a[1])
+          .map(([code, count]) => `${code}${CODE_LABELS[code] !== undefined ? `（${CODE_LABELS[code]}）` : ''} ×${count}`),
+      }
+    },
+  })
+}
+
+/**
  * 构建 memory_recompress 工具：把一条已超预算的概要压回预算内（v0.11.3）。
  *
  * 存在的理由：audit 自 v0.11.0 起能**看见**超预算概要，但看见了也没法修——
@@ -4274,6 +4690,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildStats(deps),
     buildAudit(deps),
     buildReviewMark(deps),
+    buildTrail(deps),
     buildRecompress(deps),
     buildCheck(deps),
     buildDispose(deps),

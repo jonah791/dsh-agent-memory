@@ -193,26 +193,81 @@ export function roleViewOf(
   }
 }
 
-/** 单条准入判定（R1–R4，见文件头） */
+/**
+ * 单条准入判定（R1–R4，见文件头）——返回**拒因码**，`undefined` 表示放行。
+ *
+ * 为什么不是单纯的布尔（v0.37 · 方案 §11.4）：布尔把「为什么拒」压成 `false`，
+ * 于是被拒的条目静默消失，「权限违规 0」变成**不可测的断言**（§13.3 该项无判据）。
+ * 判据码让拒绝变成一条可读的事件，也让「哪条策略在工作」有读数。
+ *
+ * 判据码（与 `actor-audit.ts::CODE_LABELS` 一一对应）：
+ * - `R1-kind` 种类不在白名单
+ * - `R2-space` 空间未标注或不在白名单（fail-closed）
+ * - `R3-shared` 共享记忆但 `includeShared=false`
+ * - `R4-read` 条目角色不在读白名单
+ */
+export function rejectReason(
+  policy: RolePolicy,
+  callerRole: string,
+  entry: Pick<Entry, 'kind' | 'role' | 'space'>,
+): string | undefined {
+  const kinds = policy.kinds
+  if (kinds !== undefined && kinds.length > 0 && !kinds.includes(entry.kind)) return 'R1-kind'
+  // 空间授权（v0.27.0 · 方案 §3.2）：设了白名单就 **fail-closed**——未标注空间的条目不放行。
+  // 这是四空间「各自独立授权」的唯一执行点（`roles.enabled=false` 时整段不生效，零行为变化）。
+  const spaces = policy.spaces
+  if (spaces !== undefined && spaces.length > 0) {
+    if (entry.space === undefined || !spaces.includes(entry.space)) return 'R2-space'
+  }
+  const entryRole = entry.role
+  if (entryRole === undefined || entryRole.length === 0) {
+    return policy.includeShared !== false ? undefined : 'R3-shared'
+  }
+  if (entryRole === callerRole) return undefined
+  const read = policy.read ?? []
+  if (read.includes('*')) return undefined
+  return read.includes(entryRole) ? undefined : 'R4-read'
+}
+
+/** 单条准入判定（R1–R4，见文件头）——`rejectReason` 的布尔形态 */
 export function admitsEntry(
   policy: RolePolicy,
   callerRole: string,
   entry: Pick<Entry, 'kind' | 'role' | 'space'>,
 ): boolean {
-  const kinds = policy.kinds
-  if (kinds !== undefined && kinds.length > 0 && !kinds.includes(entry.kind)) return false
-  // 空间授权（v0.27.0 · 方案 §3.2）：设了白名单就 **fail-closed**——未标注空间的条目不放行。
-  // 这是四空间「各自独立授权」的唯一执行点（`roles.enabled=false` 时整段不生效，零行为变化）。
-  const spaces = policy.spaces
-  if (spaces !== undefined && spaces.length > 0) {
-    if (entry.space === undefined || !spaces.includes(entry.space)) return false
+  return rejectReason(policy, callerRole, entry) === undefined
+}
+
+/**
+ * 按视野过滤条目，**同时交出拒绝读数**（v0.37 · 方案 §11.4 的埋点）。
+ *
+ * `view.enabled === false` ⇒ 零过滤、零计数（`rejected: 0`）——向后兼容是硬约束：
+ * 未启用角色维度时不得因为「多了一条审计」改变任何行为。
+ */
+export interface RoleFilterResult {
+  admitted: Entry[]
+  /** 被拒绝的条数（视野管理的工作量；0 = 无拒绝） */
+  rejected: number
+  /** 拒因分布（键是判据码；空 = 无拒绝） */
+  rejectedBy: Record<string, number>
+}
+
+/** 过滤并计数（`applyRoleView` 的带读数形态，读路径埋点用） */
+export function filterRoleView(entries: Entry[], view: RoleView): RoleFilterResult {
+  if (!view.enabled) return { admitted: entries, rejected: 0, rejectedBy: {} }
+  const admitted: Entry[] = []
+  const rejectedBy: Record<string, number> = {}
+  let rejected = 0
+  for (const entry of entries) {
+    const reason = rejectReason(view.policy, view.role, entry)
+    if (reason === undefined) {
+      admitted.push(entry)
+      continue
+    }
+    rejected += 1
+    rejectedBy[reason] = (rejectedBy[reason] ?? 0) + 1
   }
-  const entryRole = entry.role
-  if (entryRole === undefined || entryRole.length === 0) return policy.includeShared !== false
-  if (entryRole === callerRole) return true
-  const read = policy.read ?? []
-  if (read.includes('*')) return true
-  return read.includes(entryRole)
+  return { admitted, rejected, rejectedBy }
 }
 
 /**
@@ -221,8 +276,7 @@ export function admitsEntry(
  * @param view - roleViewOf 的产物
  */
 export function applyRoleView(entries: Entry[], view: RoleView): Entry[] {
-  if (!view.enabled) return entries
-  return entries.filter((entry) => admitsEntry(view.policy, view.role, entry))
+  return filterRoleView(entries, view).admitted
 }
 
 /**
