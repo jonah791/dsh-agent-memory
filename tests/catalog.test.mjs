@@ -340,3 +340,32 @@ test('C12 ★分项不可相加的口径必须进渲染（读数层表达缺陷�
   //    这里的分工只是「防止渲染层偏离结构化返回」，不要把它当成覆盖了自洽性。
   assert.equal(value.excluded.considered, value.denominator + value.excluded.net)
 })
+
+test('C13 ★两个口径必须并列：字段存有率 ≠ 有效分类率', () => {
+  const entries = [
+    entry({ id: 'explicit', memType: 'procedural' }), // 我亲笔填的
+    entry({ id: 'ep', kind: 'episodic' }), // 可派生 episodic（语义同构）
+    entry({ id: 'ft', kind: 'fact' }), // 可派生 semantic（方案 §3.1 定义同构）
+    entry({ id: 'kn1', kind: 'knowledge' }), // 五类皆可解释 ⇒ 推不出就不推
+    entry({ id: 'kn2', kind: 'knowledge' }),
+  ]
+  const r = catalogReport(entries)
+  assert.equal(r.denominator, 5)
+  assert.equal(r.effectiveSources.explicit, 1)
+  assert.equal(r.effectiveSources['derived-from-kind'], 2, 'episodic + fact 两条可派生')
+  assert.equal(r.effectiveSources.unknown, 2, 'knowledge 推不出就不推')
+  assert.equal(
+    r.effectiveSources.explicit + r.effectiveSources['derived-from-kind'] + r.effectiveSources.unknown,
+    r.denominator,
+    '三档之和必须 == 分母（不留静默残留）',
+  )
+  // 核心断言：两个口径必须不同。相等说明样本里没有可派生条目 ⇒ 这条断言空转，所以先把它卡死
+  const fieldRate = (r.denominator - r.gaps.memType.missing) / r.denominator
+  const effectiveRate = (r.denominator - r.effectiveSources.unknown) / r.denominator
+  assert.equal(fieldRate, 1 / 5, '字段存有率 = 只有 explicit 那一条')
+  assert.equal(effectiveRate, 3 / 5, '有效分类率 = explicit + 两条派生')
+  assert.ok(
+    effectiveRate > fieldRate,
+    '有效分类率必须严格大于字段存有率——线上这两个数差 13 倍（1.4% vs 17.0%），相等说明这条断言没有分辨力',
+  )
+})

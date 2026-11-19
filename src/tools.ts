@@ -4615,6 +4615,22 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
           uncovered: { type: 'integer', required: true },
           zeroTag: { type: 'integer', required: true },
           byEffectiveType: { type: 'object', additionalProperties: true, required: true },
+          // v0.43：类别来源三档。存在的理由是「字段存有率」与「有效分类率」差 13 倍
+          // （线上 1.4% vs 17.0%）——只报前者会把「维度建了但没人用」变成唯一读法。
+          effectiveSources: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              explicit: { type: 'integer', required: true, description: '我亲笔填了 memType 的条数' },
+              'derived-from-kind': {
+                type: 'integer',
+                required: true,
+                description: '按 kind 零猜测派生的条数（episodic→episodic · fact→semantic；knowledge 推不出就不推）',
+              },
+              unknown: { type: 'integer', required: true, description: '类未知（不能与「未分类」当同一类）' },
+            },
+          },
           // §5.4 四维可信度（v0.41）：与上面四维缺口**是两件事**——上面报「字段填了没有」，
           // 这里报「这些字段合起来能不能回答一个问题」。四档之和恒等于 denominator。
           credibility: {
@@ -4655,14 +4671,25 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
         const pct = (n: number, d: number) => (d === 0 ? '—' : `${((n / d) * 100).toFixed(1)}%`)
         const gapLine = (label: string, gap: { missing: number; total: number; rate: number }) =>
           `${label} 覆盖 ${pct(gap.total - gap.missing, gap.total)}（缺 ${gap.missing}）`
+        // v0.43：两个口径必须并列。`gaps.memType` 报「我亲笔填了几条」（字段存有率），
+        // `effectiveSources` 报「这个维度实际能覆盖多少」（含零猜测派生）——线上差 13 倍。
+        // 只报前者，读者唯一能得出的结论是「维度建了但没人用」；而真实边界是
+        // 「83% 的存量在语义上无法机械归类」（全是 kind='knowledge'，五类皆可解释）。
+        const es = value.effectiveSources
+        const classified = value.denominator - es.unknown
+        const effectiveLine =
+          `类别口径：字段存有 ${pct(value.denominator - value.gaps.memType.missing, value.denominator)}（${value.denominator - value.gaps.memType.missing} 条亲笔填）` +
+          ` · **有效分类 ${pct(classified, value.denominator)}**（${classified} 条 = 显式 ${es.explicit} + 按 kind 零猜测派生 ${es['derived-from-kind']}）` +
+          ` · 类未知 ${es.unknown}`
         const lines = [
           `编目工作面（只读）：应编目 **${value.denominator}** 条`,
           `分母口径：全量 **${value.excluded.considered}** − 应编目 **${value.denominator}** = 净排除 **${value.excluded.net}**`,
           // ⚠ 分项相加 ≠ 净排除：`isCatalogable` 只有三条排除，而下面四项各自在全量上独立计数，
           // 一条归档的 summary 会同时在 archived 与 summary 各计一次。2026-11-19 线上实测：
-          // 净排除 1330，四项相加 1752（重叠 422）——旧渲染把四项并列在「分母排除：」后面，
-          // 读法上诱导相加，算出的分母比真值小 422。并列四个数就必须同时给出它们不能相加的理由。
+          // 净排除 1328，四项相加 1752（重叠 424）——旧渲染把四项并列在「分母排除：」后面，
+          // 读法上诱导相加，算出的分母比真值小 424。并列四个数就必须同时给出它们不能相加的理由。
           `  分项（**各自在全量上独立计数，有交集、不可相加**）：归档 ${value.excluded.archived} · 冷存档 ${value.excluded.coldCheckpoint} · compaction ${value.excluded.compaction} · **概要 ${value.excluded.summary}**（压缩桶，不属于七类任何一类）`,
+          effectiveLine,
           `四维缺口（各自独立，不合成分数）：${gapLine('memType', value.gaps.memType)}｜${gapLine('space', value.gaps.space)}｜${gapLine('provenance', value.gaps.provenance)}｜${gapLine('sourceIds', value.gaps.sourceIds)}`,
           `未分类 **${value.unclassified}** 条：${value.clusters.length} 个簇覆盖 ${value.clustered}（${pct(value.clustered, value.unclassified)}）· 覆盖不到 **${value.uncovered}** · 其中零标签 ${value.zeroTag}`,
         ]

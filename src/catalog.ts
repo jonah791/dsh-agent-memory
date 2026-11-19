@@ -29,7 +29,7 @@
 import type { Entry, MemType } from './types.ts'
 import { COLD_CHECKPOINT_TAG } from './types.ts'
 import { MEM_TYPES, isMemType } from './memType.ts'
-import { countByEffectiveType } from './retention.ts'
+import { countByEffectiveType, countByEffectiveTypeSource, type EffectiveTypeSource } from './retention.ts'
 
 /** 压缩检查点的另一个标签（与 COLD_CHECKPOINT_TAG 并列，两者都表示「压缩产物」） */
 export const COMPACTION_TAG = 'compaction'
@@ -138,6 +138,16 @@ export interface CatalogReport {
   readonly zeroTag: number
   /** 生效类别分布（与 `memory_stats.retention` / `memory_audit.retention` 同源） */
   readonly byEffectiveType: Record<MemType | 'unknown', number>
+  /**
+   * 类别**来源**三档计数（与 `byEffectiveType` 同分母、同判据，只是按来源拆开）。
+   *
+   * 为什么要单列：`gaps.memType` 报的是**字段存有率**（我亲笔填了几条），
+   * `byEffectiveType` 报的是**有效分类率**（含零猜测派生）。2026-11-19 线上实测两者差
+   * **13 倍**（1.4% vs 17.0%）——只报前者会让「维度建了但没人用」变成唯一读法，
+   * 而真实边界是「83.0% 的存量在语义上无法机械归类」（全是 `kind='knowledge'`，
+   * 可被语义/程序/运行/项目/关系五类中的任一类解释 ⇒ 推不出就不推）。
+   */
+  readonly effectiveSources: Record<EffectiveTypeSource, number>
 }
 
 /** 是否为压缩产物（冷存档检查点或 compaction 标记） */
@@ -284,6 +294,8 @@ export function catalogReport(entries: readonly Entry[], options: ClusterOptions
     uncovered: unclassified.length - clustered,
     zeroTag,
     byEffectiveType: countByEffectiveType(denominator),
+    // 与 byEffectiveType 同分母、同判据——只按来源拆开，不另立口径
+    effectiveSources: countByEffectiveTypeSource(denominator),
   }
 }
 
