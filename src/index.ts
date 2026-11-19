@@ -232,6 +232,9 @@ export const entrySchema = zod.object({
     prevBody: zod.string(),
     mode: zod.enum(['replace', 'append', 'patch']),
     by: zod.string().optional(),
+    // v0.53（方案 §9.4）：修订原因。**必须在这里声明**——否则载入即被剥
+    // （v0.52 的 A163 就是这条：revisions 本身漏了声明，一个多月的快照没被看见）。
+    reason: zod.string().optional(),
   })).optional(),
 })
 

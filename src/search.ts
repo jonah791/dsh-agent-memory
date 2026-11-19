@@ -1236,6 +1236,7 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
             mode: rev.mode,
             prevTitle: rev.prevTitle,
             ...(rev.by !== undefined ? { by: rev.by } : {}),
+            ...(rev.reason !== undefined ? { reason: rev.reason } : {}),
           })),
         }
       : {}),

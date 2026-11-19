@@ -861,6 +861,11 @@ export interface Revision {
   mode: 'replace' | 'append' | 'patch'
   /** 修订者（会话 id），缺省不记 */
   by?: string
+  /**
+   * 修订原因（v0.53 · 方案 §9.4「含修订原因」）：**只有调用方给了才写**。
+   * 省略 = 不知道（不是「没有原因」）——与 `grounding` / `provenance` 同一条纪律。
+   */
+  reason?: string
 }
 
 /** 项目记忆配置（.dsh/memory.yml，缺省走默认） */
@@ -1319,6 +1324,8 @@ export interface RevisionBrief {
   prevTitle: string
   /** 改者（会话 id）；未记则省略——省略 = 不知道，**不是**「我改的」 */
   by?: string
+  /** 修订原因（v0.53）；未记则省略——省略 = 不知道，**不是**「没理由就改了」 */
+  reason?: string
 }
 
 /**

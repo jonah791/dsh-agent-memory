@@ -249,3 +249,55 @@ test('A163 ★ entrySchema 声明了 revisions（同一个坑第十五次，只�
   assert.equal(parsed.revisions[0].prevBody, '旧正文', 'prevBody 是「能对照 / 能恢复」的全部价值，不裁')
   assert.equal(parsed.revisions[0].mode, 'append')
 })
+
+// ---------- A164–A166 修订原因（v0.53 · 方案 §9.4「含修订原因」） ----------
+
+test('A164 update 的原因写进改前快照，并活过 entrySchema（载入边界）', async () => {
+  const { store, byName } = setup(ROLE_CONFIG)
+  const entry = await seed(store, { kind: 'knowledge', title: '旧标题' })
+  await byName.get('update').execute({ id: entry.id, mode: 'append', text: '追加一行', reason: '补上遗漏的读数口径' }, MAIN_EXEC)
+
+  const stored = store.get(WID, entry.id)
+  assert.equal(stored.revisions.length, 1)
+  assert.equal(stored.revisions[0].reason, '补上遗漏的读数口径', '原因写在这次改前快照上')
+
+  // ⚠ 同一坑：v0.52 的 A163 证明 revisions 漏声明会被载入边界剥掉；原因字段同理
+  const parsed = entrySchema.parse(stored)
+  assert.equal(parsed.revisions[0].reason, '补上遗漏的读数口径', '载入边界不得剥掉 reason')
+})
+
+test('A165 渲染：有原因印「因为「…」」，没原因不印（挑着打）', async () => {
+  const { store, byName } = setup(ROLE_CONFIG)
+  const withReason = await seed(store, { kind: 'knowledge', title: '带原因' })
+  const withoutReason = await seed(store, { kind: 'knowledge', title: '不带原因' })
+  await byName.get('update').execute({ id: withReason.id, mode: 'append', text: 'x', reason: '主人纠正了口径' }, MAIN_EXEC)
+  await byName.get('update').execute({ id: withoutReason.id, mode: 'append', text: 'y' }, MAIN_EXEC)
+
+  const recall = byName.get('recall')
+  const text = recall.output.render({}, await recall.execute({}, MAIN_EXEC)).map((p) => p.text).join(NL)
+  const lines = text.split(NL).filter((line) => line.startsWith('- ['))
+  // ⚠ 第三次同形：相关链后缀 `→ 关联: XX(id=…)` 会把另一条也带进同一行，
+  // 不切掉就只能命中先出现的那行。判据要落在**自己的段**上。
+  const ownPart = (line) => line.split('→ 关联')[0]
+  const withLine = lines.find((line) => ownPart(line).includes('带原因(id='))
+  const withoutLine = lines.find((line) => ownPart(line).includes('不带原因(id='))
+  assert.ok(withLine.includes('因为「主人纠正了口径」'), '有原因必须印出来')
+  assert.equal(withoutLine.includes('因为'), false, '没原因留空——缺省 = 不知道，不是「无理由」')
+  assert.ok(withoutLine.includes('⟲修订1次'), '修订本身仍要印（与原因无关）')
+})
+
+test('A166 原因的两条边界：省略不写键 · 超 200 字在写入侧裁掉', async () => {
+  const { store, byName } = setup(ROLE_CONFIG)
+  const a = await seed(store, { kind: 'knowledge', title: '省略原因' })
+  const b = await seed(store, { kind: 'knowledge', title: '超长原因' })
+  await byName.get('update').execute({ id: a.id, mode: 'append', text: 'p' }, MAIN_EXEC)
+  await byName.get('update').execute({ id: a.id, mode: 'append', text: 'q', reason: '   ' }, MAIN_EXEC)
+  const long = '很长的理由'.repeat(80)
+  await byName.get('update').execute({ id: b.id, mode: 'append', text: 'r', reason: long }, MAIN_EXEC)
+
+  for (const rev of store.get(WID, a.id).revisions) {
+    assert.equal('reason' in rev, false, '省略与纯空白都不得写键（省略 = 不知道）')
+  }
+  const longRev = store.get(WID, b.id).revisions.at(-1)
+  assert.equal(longRev.reason.length, 200, '写入侧唯一裁点：裁到 200 字')
+})

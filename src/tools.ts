@@ -900,6 +900,7 @@ export const AUDIT_ITEM_FIELDS = {
         mode: { type: 'string', enum: ['replace', 'append', 'patch'], required: true, description: '改法：整文替换 / 追加 / 局部替换' },
         prevTitle: { type: 'string', required: true, description: '改前标题（「改了什么」的第一手对照）' },
         by: { type: 'string', description: '改者（会话 id）；未记则省略——省略 = 不知道，不是「我改的」' },
+        reason: { type: 'string', description: '修订原因（v0.53 · 方案 §9.4）：**为什么改**。未给则省略该键——省略 = 不知道，不是「没理由就改了」。上限 200 字。' },
       },
     },
     description: '修订留痕（v0.52 · 方案 §12.1）：最近 3 条「改前快照」——答「何时改 / 怎么改 / 谁改 / 改前标题」。**仅当有记录时出现**；无记录时渲染层说「无修订记录」而不是留空。⚠ 不透出 `prevBody`（改前正文可到 8 万字符，3 条 × 20 结果会撑爆一次检索；要回改前全文去看存储）。',
@@ -935,7 +936,10 @@ export function revisionsTag(revisions: RevisionBrief[] | undefined, currentTitl
   const when = last.at.slice(5, 16).replace('T', ' ')
   const by = last.by !== undefined && last.by.length > 0 ? ` by ${shortId(last.by)}` : ''
   const prevTitleNote = currentTitle !== undefined && last.prevTitle !== currentTitle ? `，标题曾为「${last.prevTitle}」` : ''
-  return ` ⟲修订${revisions.length}次（最近 ${when} ${last.mode}${by}${prevTitleNote}）`
+  // 原因（v0.53 · 方案 §9.4）：答「为什么改」。**没有就留空**——同 A3/A119b 的尸体样本纪律
+  // （无该字段的条目，行形状必须不变）；「为什么」缺省 = 不知道，不是「无理由」。
+  const reasonNote = last.reason !== undefined && last.reason.length > 0 ? `，因为「${last.reason}」` : ''
+  return ` ⟲修订${revisions.length}次（最近 ${when} ${last.mode}${by}${prevTitleNote}${reasonNote}）`
 }
 
 /**
@@ -1340,6 +1344,8 @@ export const MAX_BULK_FORGET = 500
 export const DEFAULT_BULK_FORGET = 100
 /** 每条例目保留的修订快照数（旧→新，超出丢最旧） */
 export const MAX_REVISIONS = 3
+/** 修订原因的长度上限（写入侧唯一裁点；200 字够说清「为什么改」而不会变成第二个正文） */
+export const MAX_REVISION_REASON = 200
 
 /** 子串出现次数（patch 唯一性判据） */
 export function countOccurrences(haystack: string, needle: string): number {
@@ -1398,14 +1404,19 @@ export function pushRevision(
   existing: { title: string; body: string; revisions?: Revision[] },
   mode: 'replace' | 'append' | 'patch',
   by?: string,
+  reason?: string,
 ): Revision[] {
   const prev = existing.revisions ?? []
+  // 原因在这里**一次**裁剪到 200 字：写入侧是唯一裁点（读取侧再裁就成了两个真相，
+  // 同 revisions 的条数纪律）。空串/纯空白视同未给——「给了个空理由」不是理由。
+  const trimmed = reason?.trim() ?? ''
   const snapshot: Revision = {
     at: new Date().toISOString(),
     prevTitle: existing.title,
     prevBody: existing.body,
     mode,
     ...(by !== undefined ? { by } : {}),
+    ...(trimmed.length > 0 ? { reason: trimmed.slice(0, MAX_REVISION_REASON) } : {}),
   }
   return [...prev, snapshot].slice(-MAX_REVISIONS)
 }
@@ -1472,6 +1483,7 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       text: { type: 'string', description: 'replace 模式：新内容（首行作标题，其余作正文）；append 模式：要追加的片段。' },
       find: { type: 'string', description: 'patch 模式：要被替换的原文片段（须唯一命中）。' },
       replace: { type: 'string', description: 'patch 模式：替换成的文本（缺省空串 = 删除该片段）。' },
+      reason: { type: 'string', description: '修订原因（v0.53 · 方案 §9.4「含修订原因」）：写进本次改前快照的 `reason`，随 `recall` 的 `⟲修订` 印出来。**省略 = 不知道**（不是「没理由」），给空串视同未给。上限 200 字（写入侧唯一裁点）。⚠ 它答「为什么改」——与 `tags`/`cue` 等**内容字段**无关，纯粹是给未来的我看的意图留痕。' },
       tags: { type: 'array', items: { type: 'string' }, description: '替换后的标签；缺省不动。' },
       aliases: { type: 'array', items: { type: 'string' }, description: '替换后的**检索别名**（整体替换，与 tags 同语义）；缺省不动。用途：给已存在的记忆补「它可能被怎么问」的同义表述——实测补后可从 #5 升到 #1。' },
       cue: { type: 'array', items: { type: 'string' }, description: '替换后的**情境形状**（整体替换，v0.16.0；留空数组即清空）；缺省不动。用途：给已存在的经验补「什么形状的处境该用它」——与 aliases 的区别是它防**场景失配**而非词面失配。' },
@@ -1530,7 +1542,7 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
           patch.title = next.title
           patch.body = next.body
           // 只有内容真的变了才记快照——空改写不产生噪音历史
-          patch.revisions = pushRevision(entry, mode, sessionIdOf(exec as unknown as RoleCarrierLike))
+          patch.revisions = pushRevision(entry, mode, sessionIdOf(exec as unknown as RoleCarrierLike), args.reason)
         }
       }
       if (args.tags !== undefined) patch.tags = args.tags
