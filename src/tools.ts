@@ -48,6 +48,7 @@ import { auditMemory } from './audit.ts'
 import { retentionSummary } from './retention.ts'
 import { catalogReport } from './catalog.ts'
 import { mapReport } from './map.ts'
+import { CONSOLIDATION_DEFAULTS, findConsolidationCandidates } from './consolidate.ts'
 import {
   misuseReport,
   R7_BASELINE_AT,
@@ -4891,6 +4892,144 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
  *
  * **不写库、不自动建边**：共现候选只是提问（判断型字段禁默认值）。
  */
+/**
+ * 构建 `memory_consolidate`：知识提炼候选（v0.49 · 方案 §16.1「记忆知识化」）——**只读**。
+ *
+ * 只回答「哪些主题攒够了证据」，**不生成任何条目**：方案要的「这些信息意味着什么 / 该归纳成
+ * 哪条高层结论」是判断，归主体。回执给的是三要素（条目数 / 时间跨度 / 已有 summary 覆盖）
+ * 与最新 3 条标题，不给分数、不给排名结论——机制只送信号。
+ */
+function buildConsolidate(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_consolidate',
+    deferLoading: true,
+    description:
+      '知识提炼候选（只读）：回答「哪些主题已经攒够了成为一条高层知识的证据」。按方案 §16.1 报候选簇，每簇给**证据量三要素**——条目数 / 时间跨度 / 其中已有几条 summary（被时间桶压缩顺手归纳过的迹象），外加最新 3 条标题供人眼判断这是不是真主题。**本工具不生成任何知识条目、不改任何条目**：方案明写要「避免模型仅凭几次表达就断言稳定长期方向」，所以归纳这一步归人。默认阈值 20 条 × 30 天（阈值曲线的依据见 `src/consolidate.ts` 头注）；日期形态的标签（`2026-09-16` / `2026-W45` / `2026-09`）不是主题，已排除。⚠ 方案要的「跨项目」维度本库量不出来（`project` 字段覆盖 6.0%），本工具只报两维。⚠ 本工具不改任何条目、不刷新 accessedAt。',
+    parameters: {
+      minEntries: {
+        type: 'integer',
+        description: '一个标签至少多少条活跃条目（缺省 20）。调紧必须让候选数单调减少——那是判据 K2。',
+      },
+      minDays: {
+        type: 'integer',
+        description: '首末条目至少相隔多少天（缺省 30）。设 0 会让单日批量写入冒充长期主题。',
+      },
+      limit: { type: 'integer', description: '最多返回多少候选（缺省 12），按条目数降序。' },
+      scope: { type: 'string', description: '作用域覆盖（缺省当前 workspace + global；受调用者角色视野约束）。' },
+      role: { type: 'string', description: '角色视角覆盖（缺省按调用者会话身份推导）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          thresholds: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              minEntries: { type: 'integer', required: true, description: '本次生效的条目数下限' },
+              minDays: { type: 'integer', required: true, description: '本次生效的跨度下限' },
+              limit: { type: 'integer', required: true, description: '本次生效的返回上限' },
+            },
+          },
+          considered: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              active: { type: 'integer', required: true, description: '活跃条目数（候选只在这些里找）' },
+              distinctTags: { type: 'integer', required: true, description: '出现过的不同标签数（含被排除的时间坐标标签）' },
+            },
+          },
+          candidates: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                tag: { type: 'string', required: true, description: '标签名（不含 #）' },
+                entries: { type: 'integer', required: true },
+                spanDays: { type: 'integer', required: true, description: '首末条目相隔天数（单日批量写入为 0）' },
+                firstAt: { type: 'string', required: true, description: '最老条目日期 YYYY-MM-DD' },
+                lastAt: { type: 'string', required: true, description: '最新条目日期 YYYY-MM-DD' },
+                kinds: {
+                  type: 'object',
+                  required: true,
+                  additionalProperties: false,
+                  properties: {
+                    fact: { type: 'integer', required: true },
+                    knowledge: { type: 'integer', required: true },
+                    episodic: { type: 'integer', required: true },
+                    summary: { type: 'integer', required: true },
+                    other: { type: 'integer', required: true },
+                  },
+                },
+                summaryCovered: { type: 'integer', required: true, description: '其中已是 summary 的条数' },
+                recentTitles: {
+                  type: 'array',
+                  required: true,
+                  items: { type: 'string' },
+                  description: '最新 3 条标题（证据样本，供人眼判断这簇是不是真主题）',
+                },
+              },
+            },
+          },
+          note: { type: 'string', required: true, description: '这一次读数的边界：空结果是什么意思、哪一维量不出来' },
+        },
+      },
+      render: (_args, value) => {
+        const lines: string[] = []
+        lines.push(`知识提炼候选（阈值 ≥${value.thresholds.minEntries} 条 × ≥${value.thresholds.minDays} 天）`)
+        lines.push(`分母：活跃 ${value.considered.active} 条 · 不同标签 ${value.considered.distinctTags} 个`)
+        if (value.candidates.length === 0) {
+          lines.push('（没有达标的簇——不等于没有主题，见下）')
+        } else {
+          for (const c of value.candidates) {
+            lines.push(
+              `- #${c.tag}：${c.entries} 条 · 跨度 ${c.spanDays} 天（${c.firstAt} → ${c.lastAt}）· 其中 summary ${c.summaryCovered} 条`,
+            )
+            lines.push(`  最新样本：${c.recentTitles.join(' ／ ')}`)
+          }
+        }
+        lines.push('')
+        lines.push(value.note)
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      // 只取活跃：归档条目是「我决定不再用」的，不该充当「当前稳定认知」的证据
+      const { entries } = gatherReadable(deps, {
+        readScopes,
+        includeArchive: false,
+        view,
+        explicitScope: args.scope,
+      })
+      const cfg = {
+        minEntries: args.minEntries ?? CONSOLIDATION_DEFAULTS.minEntries,
+        minDays: args.minDays ?? CONSOLIDATION_DEFAULTS.minDays,
+        limit: args.limit ?? CONSOLIDATION_DEFAULTS.limit,
+      }
+      const candidates = findConsolidationCandidates(entries, cfg)
+      const tagSet = new Set<string>()
+      for (const e of entries) for (const t of e.tags ?? []) tagSet.add(t)
+      const note =
+        candidates.length === 0
+          ? `没有簇同时满足「≥${cfg.minEntries} 条」与「跨度 ≥${cfg.minDays} 天」。这**不等于库里没有主题**——只等于没有达标的簇；把两个阈值调小可看到更松的候选。`
+          : `候选按条目数降序。跨度 = 首末条目相隔天数（单日批量写入为 0）。summary 覆盖 > 0 说明该主题已被时间桶压缩顺手归纳过一部分。**这些条目意味着什么、该不该归纳成一条高层知识，由你判断**——本工具不生成条目。方案要的「跨项目」维度本库量不出来（project 覆盖 6.0%），本读数只含两维。`
+      return {
+        thresholds: cfg,
+        considered: { active: entries.length, distinctTags: tagSet.size },
+        candidates,
+        note,
+      }
+    },
+  })
+}
+
 function buildMap(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_map',
@@ -5693,6 +5832,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildAudit(deps),
     buildCatalog(deps),
     buildMap(deps),
+    buildConsolidate(deps),
     buildMisuse(deps),
     buildReviewMark(deps),
     buildTrail(deps),
