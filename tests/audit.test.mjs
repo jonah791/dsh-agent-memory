@@ -128,13 +128,15 @@ test('A42 工具面：memory_audit 已注册（共 30 个工具）', () => {
   // v0.40 加 memory_catalog（编目工作面 · 方案 §7 第 07 步）**第八次如期变红**；
   // v0.45 加 memory_map（知识地图 · 方案 §4.5）**第九次如期变红**；
   // v0.46 加 memory_misuse（R7 严格上限 · 方案 §13.3）**第十次如期变红**；
-  // v0.49 加 memory_consolidate（知识提炼候选 · 方案 §16.1）**第十一次如期变红**）。
-  assert.equal(byName.size, 30)
+  // v0.49 加 memory_consolidate（知识提炼候选 · 方案 §16.1）**第十一次如期变红**；
+  // v0.56 加 memory_export（用户控制的「导出」· 方案 §1 第十项）**第十二次如期变红**）。
+  assert.equal(byName.size, 31)
   assert.ok(byName.has('memory_audit'))
   assert.ok(byName.has('memory_catalog'))
   assert.ok(byName.has('memory_map'))
   assert.ok(byName.has('memory_misuse'))
   assert.ok(byName.has('memory_consolidate'))
+  assert.ok(byName.has('memory_export'))
   assert.ok(byName.get('memory_audit').description.includes('只读'))
   // v0.9：合并原语进工具面（近重复簇从「只标记」到「可执行」）
   assert.ok(byName.has('memory_merge'))

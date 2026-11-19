@@ -6,6 +6,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import type { ToolRunContext } from '@deepseek-ai/dsh-tools'
 import type { Entry, EntryKind } from '../lib/types.js'
@@ -15,6 +16,32 @@ import { MemoryStore } from '../lib/store.js'
 import { createMemoryTools } from '../lib/tools.js'
 
 // ---------- 测试基建 ----------
+
+/**
+ * 从 README 的**对外契约表**解析工具名——判据的真源不再是手抄名单。
+ *
+ * 为什么改：这份名单在 2026-10-14 / 11-12 / 11-18 / 11-19 / 11-20 漂了五次，每次都是
+ * 「新增工具时忘了同步」。手抄清单本身就是第二个真源，改一处漏一处；而 README 的工具有
+ * 两个方向的互锁价值：实现多了一个没写进契约的工具会红（对外承诺不全），契约多写了一个
+ * 不存在的工具也会红（承诺了做不到的事）。
+ *
+ * @returns 工具表内声明的工具名（表内顺序）
+ * @throws 表头缺失或解析出 0 个名字时抛错——「解析不到」不等于「零工具」
+ */
+function readmeToolNames(): string[] {
+  const text = readFileSync(new URL('../README.md', import.meta.url), 'utf8')
+  const lines = text.split(/\r?\n/)
+  const start = lines.findIndex((line) => line.trim() === '| 工具 | 用途 |')
+  if (start < 0) throw new Error('README 缺工具表（表头应为 | 工具 | 用途 |）')
+  const names: string[] = []
+  for (let index = start + 2; index < lines.length; index += 1) {
+    const match = /^\| `([a-z_]+)` \|/.exec(lines[index] ?? '')
+    if (match === null) break
+    names.push(match[1] as string)
+  }
+  if (names.length === 0) throw new Error('README 工具表解析出 0 个名字——表头或行格式变了')
+  return names
+}
 
 /** 内存 kv mock（同官方 storage-domain 测试模式） */
 class MemoryKv implements KvLike {
@@ -98,7 +125,16 @@ test('工具齐备，名称与契约一致', () => {
   //   **那个数字是抄的，不是跑出来的**。教训不是「记得同步」（这份手抄清单本身就是
   //   第二个真源，迟早再漂），而是：**跑测试要看 `pass + fail + skip` 三项，不看 pass 单项**——只看 pass 时，
   //   一个 fail 与一个新增测试在数字上可能互相抵消。
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_catalog', 'memory_check', 'memory_concept', 'memory_consolidate', 'memory_dispose', 'memory_entities', 'memory_entity', 'memory_health', 'memory_link', 'memory_map', 'memory_merge', 'memory_misuse', 'memory_recompress', 'memory_relate', 'memory_relations', 'memory_review_mark', 'memory_source', 'memory_sources', 'memory_stats', 'memory_supersede', 'memory_thesaurus', 'memory_trail', 'memory_unlink', 'memory_version', 'recall', 'remember', 'update'])
+  // 2026-11-20（v0.56）：**这条预言又一次应验**（`memory_export` 上线时清单没跟上）。
+  //   ⇒ 不再手抄：工具名从 README 的对外契约表解析，与工具面做**双向互锁**——
+  //   README 多写一个不存在的工具会红，实现多加一个没写进契约的工具也会红，
+  //   而「加工具」这件事从此只需要改一处（README）就必然带动这里。
+  const declared = readmeToolNames()
+  assert.deepEqual(
+    [...byName.keys()].sort(),
+    [...declared].sort(),
+    '工具面必须与 README 对外契约逐名相等（本判据从契约派生，不再手抄清单）',
+  )
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
 })

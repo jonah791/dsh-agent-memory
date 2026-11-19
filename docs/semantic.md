@@ -14,8 +14,8 @@
 |------|-----|
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
-| 状态 | **implemented**（验收 **231 行**；解析器现算 `total=231 / proven=228 / pending=3`（显式标「待线上验收」2 · 未标未证 1）——2026-11-19 23:51 由 `check-doc.mjs` 现读（v0.52 +4 行 A215–A217 + A163，v0.53 +3 行 A218–A220，v0.54 +3 行 A221–A223 + v0.55 +3 行 A224–A226，全部「已实测」⇒ pending 不变）；19:50 同器读数是 217/214/3；**2026-10-14 的同一读数是 117 / 115 / 2**，一个多月 +98 行，本节文字长期未回填是本文件已知的漂移形态。⚠ **判据以解析器的实际行数为准，不以本节文字为准**：编号若有重复或不连续，解析器仍按**行数**计数 ⇒ 本行只复述读数，不自算。历史：2026-10-14 早些时候该行停留在「A1–A78 / total=78」，属**文档漂移**（DREAM 那批加了 A79–A84 未回填），本次一并修正；2026-09-22 曾报 77，真因是解析器吞掉续块首行，已修 `dsh-semantic-docs` `7f9def6`，详见 §7 汇总行；`pending=2 > 0` 故**不得**标 verified） |
-| 版本 | **能力编号 v0.55**（2026-11-20；⚠ 与 `package.json` 的包语义版本**不相等**，见 `lh-6009c216`）· **逐版变更史的正本在 §9 实践修订记录**（v0.5–v0.55 共 48 条），本格只保留早期摘要。v0.7（文档）· 对应插件 v0.24.0 —— v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；v0.8 压缩流水线证据层；**v0.8.1/v0.8.2 修 U10 真因**（总结调用补会话 id；输出预算与可归因证据）<br>**v0.12 检索别名**（2026-10-13 重做第一步；⚠ **契约节缺**——原引用的「§5.14」编号已被 v0.15 占用，正本暂在 `src/types.ts` 的 `Entry.aliases` 与 `tests/aliases.test.mjs`，已记入 §10）<br>**v0.13 主体层**（2026-10-14：`subject` = 条目「**关于谁**」——`self` / `master` / 缺省通用；与 `role` 正交；语义见 §9 第 19 条、判据见 §7 A85–A94）<br>**v0.14 约定状态**（2026-10-14：`grounding` = 「**是否已被共同建立**」——`established` / `proposed`（我提的、主人未回应）/ `scoped` / `rejected` / 缺省未标注；与 `subject` 正交；语义见 §9 第 20 条、判据见 §7 A95–A104）<br>**v0.15 时效维**（2026-10-14：`reviewAfter` = **复查死线** + `watchFor` = **观察条件**；论文 *Fresh at Decision, Stale at Action* 移植；契约见 **§5.14**、语义见 §9 第 21 条、判据见 §7 A105–A116）<br>**v0.23 执行位置**（2026-11-15：`project` = 哪个项目 + `taskId` = 哪个任务；**两级不可拆**；与 `scope` 正交（后者是准入且值是路径）；`project` 写入时按会话 cwd **自动盖章**（经 `dsh-project-state` **软依赖**，缺该插件则不盖）；依据 = 主人 2026-11-15 架构定调「Project 不属于 Agent 也不属于 Session」 + MAGE/EMNLP 2026（记忆组织轴该是执行路径而非语义相似度）；语义见 `src/execution.ts` 文件头、不变量见 §9 第 16 条 I16、判据见 `tests/execution.test.mjs`）<br>**v0.24 事实生命周期**（2026-11-17：`validAfter` = 这条结论**从何时开始成立**（≠ `createdAt`）+ `supersededBy` / `supersedes` = **谁替代了谁**（只留一层）；**唯一写入口** `memory_supersede`（两侧同写），`update` 刻意不暴露这两个字段；旧条目**绝不删除**，recall 默认仍返回并打「⚠ 已过时」标记；契约见 **§5.16**、语义见 `src/succession.ts` 文件头、判据见 `tests/succession.test.mjs`）<br>**v0.52 详情出口**（2026-11-19：`revisions` 投影 + 「谁能读这条」逐角色现算，两项都进 `recall`/`memory_browse` 同一处返回；契约见 **§5.43**、判据 A215–A217、正本 `docs/design/aml-ui.md`） |
+| 状态 | **implemented**（验收 **234 行**；解析器现算 `total=234 / proven=231 / pending=3`（显式标「待线上验收」2 · 未标未证 1）——2026-11-20 00:21 由 `check-doc.mjs` 现读（v0.52 +4 行 A215–A217 + A163，v0.53 +3 行 A218–A220，v0.54 +3 行 A221–A223 + v0.55 +3 行 A224–A226，v0.56 +3 行 A227–A229，全部「已实测」⇒ pending 不变）；19:50 同器读数是 217/214/3；**2026-10-14 的同一读数是 117 / 115 / 2**，一个多月 +98 行，本节文字长期未回填是本文件已知的漂移形态。⚠ **判据以解析器的实际行数为准，不以本节文字为准**：编号若有重复或不连续，解析器仍按**行数**计数 ⇒ 本行只复述读数，不自算。历史：2026-10-14 早些时候该行停留在「A1–A78 / total=78」，属**文档漂移**（DREAM 那批加了 A79–A84 未回填），本次一并修正；2026-09-22 曾报 77，真因是解析器吞掉续块首行，已修 `dsh-semantic-docs` `7f9def6`，详见 §7 汇总行；`pending=2 > 0` 故**不得**标 verified） |
+| 版本 | **能力编号 v0.56**（2026-11-20；⚠ 与 `package.json` 的包语义版本**不相等**，见 `lh-6009c216`）· **逐版变更史的正本在 §9 实践修订记录**（v0.5–v0.55 共 48 条），本格只保留早期摘要。v0.7（文档）· 对应插件 v0.24.0 —— v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；v0.8 压缩流水线证据层；**v0.8.1/v0.8.2 修 U10 真因**（总结调用补会话 id；输出预算与可归因证据）<br>**v0.12 检索别名**（2026-10-13 重做第一步；⚠ **契约节缺**——原引用的「§5.14」编号已被 v0.15 占用，正本暂在 `src/types.ts` 的 `Entry.aliases` 与 `tests/aliases.test.mjs`，已记入 §10）<br>**v0.13 主体层**（2026-10-14：`subject` = 条目「**关于谁**」——`self` / `master` / 缺省通用；与 `role` 正交；语义见 §9 第 19 条、判据见 §7 A85–A94）<br>**v0.14 约定状态**（2026-10-14：`grounding` = 「**是否已被共同建立**」——`established` / `proposed`（我提的、主人未回应）/ `scoped` / `rejected` / 缺省未标注；与 `subject` 正交；语义见 §9 第 20 条、判据见 §7 A95–A104）<br>**v0.15 时效维**（2026-10-14：`reviewAfter` = **复查死线** + `watchFor` = **观察条件**；论文 *Fresh at Decision, Stale at Action* 移植；契约见 **§5.14**、语义见 §9 第 21 条、判据见 §7 A105–A116）<br>**v0.23 执行位置**（2026-11-15：`project` = 哪个项目 + `taskId` = 哪个任务；**两级不可拆**；与 `scope` 正交（后者是准入且值是路径）；`project` 写入时按会话 cwd **自动盖章**（经 `dsh-project-state` **软依赖**，缺该插件则不盖）；依据 = 主人 2026-11-15 架构定调「Project 不属于 Agent 也不属于 Session」 + MAGE/EMNLP 2026（记忆组织轴该是执行路径而非语义相似度）；语义见 `src/execution.ts` 文件头、不变量见 §9 第 16 条 I16、判据见 `tests/execution.test.mjs`）<br>**v0.24 事实生命周期**（2026-11-17：`validAfter` = 这条结论**从何时开始成立**（≠ `createdAt`）+ `supersededBy` / `supersedes` = **谁替代了谁**（只留一层）；**唯一写入口** `memory_supersede`（两侧同写），`update` 刻意不暴露这两个字段；旧条目**绝不删除**，recall 默认仍返回并打「⚠ 已过时」标记；契约见 **§5.16**、语义见 `src/succession.ts` 文件头、判据见 `tests/succession.test.mjs`）<br>**v0.52 详情出口**（2026-11-19：`revisions` 投影 + 「谁能读这条」逐角色现算，两项都进 `recall`/`memory_browse` 同一处返回；契约见 **§5.43**、判据 A215–A217、正本 `docs/design/aml-ui.md`）<br>**v0.56 导出**（2026-11-20：`memory_export` 把**可见**记忆面导出成可移植 JSON 快照——落盘不回灌上下文 / `L2`·`L3` 缺省不导 / 目标已存在即拒 / 侧车不导且点名；契约见 **§5.45**、判据 A227–A229、正本 `src/export.ts` 头注） |
 | 实现落点 | `self-plugins/dsh-agent-memory/src/`（21 个模块，见 §8） |
 | 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>侧车：`${DSH_HOME}/memory-access-trace.jsonl`（v0.6 用量）、`${DSH_HOME}/memory-audit-proposals.jsonl`（v0.7 提案）、`${DSH_HOME}/memory-compress-trace.jsonl`（v0.8 压缩流水线）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（**`config.maxTokens: 32000`**——2026-09-15 由 16000 抬高，见 §7 A64–A67 旁注） |
 | 作者 / 日期 | 爱丽丝 · 2026-09-13 |
@@ -1518,6 +1518,33 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 
 **判据**：A221–A223（闭包与发现/处置分离）+ A224–A226（归档条目可选、幂等、护栏不放宽），`tests/forget-propagation.test.mjs` 20 条。
 
+### 5.45 导出契约（v0.56 · 方案 §1 第十项「用户控制：可查看、纠正、导出、删除」）
+
+**定位**：把**可见**记忆面导出成可移植 JSON 快照（一个文件），给「拿不走」这个所有权缺口一个出口。**反定位**：不是备份系统（备份的过期策略归仓库与快照层，见 §10.4 的未覆盖面）、不是迁移工具（**不做导入**）、不是审计出口（审计走 `memory_trail`）。
+
+**调用点清单**（改这里要同步的那几处）：
+1. `src/export.ts`——纯函数层、无 IO：`buildExportBundle` / `serializeExportBundle` / `sha256Of` / `isSensitiveEntry` + 常量 `EXPORT_FORMAT` / `EXPORT_FORMAT_VERSION` / `EXPORT_NOT_EXPORTED` / `DEFAULT_PREVIEW_CHARS`
+2. `src/tools.ts::buildExport`——落盘、路径解析、覆盖拒绝、回执组装
+3. `createMemoryTools` 列表（工具面 30 → 31）
+4. `README.md` 工具表——**判据真源**：`tests/tools.test.ts` 从该表解析工具名并与工具面双向比对
+5. `tests/audit.test.mjs` A42 的硬编码计数（每加一个工具必须显式确认一次）
+
+**不变量**：
+- **I1 可见即边界**：条目走 `gatherReadable`（scope 合并 → 视野收窄 → 角色准入），与 `recall` 同一处过滤；概念 / 实体 / 来源 / 关系四表按同一 `scopes` 收窄——它们没有 `role` 字段，故**不按角色**
+- **I2 敏感缺省不导**：`L2` / `L3` 不进缺省面，`includeSensitive:true` 才含；未标注照常导出（「没判断过」≠「敏感」）。被排除条数进 `omitted.sensitive`——**缺席必须可辨**
+- **I3 归档恒在**：`archived` 条目**恒在**导出体内（`counts.archivedEntries` 报内部条数）。**刻意不提供「只导活跃」开关**——归档是「我决定不再用」，不是「不存在」；剔掉会让拿走的库看起来比真实的干净
+- **I4 只读**：不调 `store.forget`、不改 `accessedAt`、不写审计与用量轨迹。导出不是「使用」，把它记成检索命中会让两份读数同时失真
+- **I5 不覆盖**：目标存在即拒，`overwrite:true` 才覆盖；写入走**临时文件 + rename**（半截文件看起来像一份完整导出，比没有文件更坏）
+- **I6 回执是读数不是数据**：只给 `path` / `bytes` / `sha256` / 六项计数 / `omitted` / `notExported` / 前 N 字符预览。预览上限是参数（缺省 240），实测 18.5 MB 导出在缺省参数下回执不足 1 KB
+
+**导出体形态**（`format: "aml-export"` · `formatVersion: 1`）：`{ format, formatVersion, exportedAt, scopes, counts{entries, archivedEntries, concepts, entities, sources, relations}, omitted{sensitive, unreadable}, notExported[], entries[], concepts[], entities[], sources[], relations[] }`。序列化 = 两空格缩进 + 结尾换行（导出体常进版本控制，diff 要可读）。**`formatVersion` 必须有**——没有它，未来改格式时旧文件无法被识别。
+
+**不导出的面（随文件点名）**：`access-trace`（用量侧车）· `actor-audit`（操作者审计）· `forget-certificates`（遗忘凭证）· `session-events`（宿主会话日志，本插件不拥有）。写在导出体里而不是只写在文档里，因为**拿到 JSON 的人不会去读我的文档**。
+
+**已知边界**（不假装）：① JSON 表达不了 `undefined` ⇒ 「逐字段相等」的正确口径是**JSON 可表达范围内**相等；② 四张附属表没有 `sensitivity` 字段，敏感分级只作用于条目；③ 导出体不含 `role` 准入策略本身（它住在 `memory.yml`），拿走的库**无法自证「谁能读」**；④ 导出是同步阻塞写盘（18.5 MB / 3,123 条实测数秒级），不是流式。
+
+**不做导入的重开条件**：出现第一个「要把导出体读回来」的真实需求（换库迁移 / 恢复事故）。导入带 id 冲突 / 引用悬空 / 覆盖策略三类判断，届时另开一段。
+
 ## 6 · 边界与信任
 
 **记忆内容是数据，不是指令。** 条目正文、来源说明、关系注释、实体画像在注入与渲染时都按**不可信内容**对待——它们能影响我看见什么，不能改变我做什么。检索结果没有执行权限；「说得有理」不构成扩大授权的理由。
@@ -1626,6 +1653,9 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | A224 | ★**显式 id 能选中已归档条目**（v0.55 · 方案 §10.4）：先 `forget` 一条 → 再 `forget({id, dryRun:true})` **不报「未找到」**，`ids` 含它，且派生闭包照常返回（直接 depth=1 / 嵌套 depth=2 各一条）；实跑 `archivedCount=0`、`alreadyArchived=1`，`updatedAt` 与 `archivedReason` 逐字不变 | `tests/forget-propagation.test.mjs`「F8a / F8b」 | ✔ 已实测 |
 | A225 | ★**幂等不虚增**（v0.55）：对已归档条目重复点名 ⇒ 不报错、`archivedCount` 恒 0、`alreadyArchived` 恒 1、不刷新 `updatedAt`（对本来就归档的条目再归档不产生新信息） | 同文件「F8b」 | ✔ 已实测 |
 | A226 | ★**护栏不放宽**（v0.55）：`includeArchived` 只挂在显式 id/ids 上 —— `mode=topic` 命中带同名标签的活跃与归档两条时，`ids` 只含活跃那条；`mode=all` 的 `confirm` 护栏与 `tier=KEEP` 拒绝均不变 | 同文件「F8c」+ 既有 F5/F6 | ✔ 已实测 |
+| A227 | ★**导出完整性 + 归档恒在**（v0.56 · 方案 §1 第十项）：`counts.entries` 等于导出体 `entries` 数组长度、`archivedEntries` 等于其中 `archived=true` 的条数；端到端写两条（一条先用 `forget` 归档）⇒ 缺省导出的 `entries` 含**两条**（归档不被剔），且导出后该条仍为归档态（只读） | `tests/export.test.mjs`「E2」 | ✔ 已实测（单测 + 线上 18.5 MB / 3,123 条 / 归档 1,311） |
+| A228 | ★**敏感缺省不外泄（成对判据）**：库里有 `L2` 一条 ⇒ 缺省导出的文件里既无其标题片段也无其正文片段、`omitted.sensitive=1`、`counts.entries` 少 1；`includeSensitive:true` ⇒ 该条在文件里、`omitted.sensitive=0`、条数 +1。⚠ 线上双跑：库内 1 条 `L2`（v0.47 遗留探针），18.5 MB 缺省导出中其标题与正文 40 字片段**均不命中**，`includeSensitive` 导出体增大 1,192 字节且该条出现 | 同文件「E4」+ 2026-11-20 00:19 线上双跑 | ✔ 已实测（单测 + 线上双跑） |
+| A229 | ★**不覆盖 + 回执可核**（v0.56）：目标已存在且未给 `overwrite` ⇒ 抛错且**文件内容逐字节不变**（尸体验证）、无 `.tmp-*` 残留；回执 `bytes` == 磁盘 `stat` 大小、`sha256` == 文件内容重算、渲染文本 < 2000 字符；缺省路径落在 `<cwd>/.dsh/memory-exports/aml-export-<时间戳>.json` | 同文件「E6」「E7」「E10」+ 线上同路径再导被拒 | ✔ 已实测（单测 + 线上） |
 | A223 | ★**批量合并去重取最短深度**（v0.54）：两个目标共享同一后代 ⇒ 清单按 id 去重、`depth` 取小、`derived` 面计数等于去重后条数（不是各目标计数之和） | 同文件「F5」 | ✔ 已实测 |
 | A163 | ★**载入边界不得剥掉 `revisions`**（v0.52 · 线上实调抓到的 v0.9 遗留缺陷）：`entrySchema.parse()` 后 `revisions`（含 `prevBody`）全部存活；同一条同时验证「未声明字段确实会被剥」这一机制仍在 ⇒ 判据不是假想。**为什么单测长期全绿**：它们直接调 `execute()`，绕过了写入/载入边界的 schema 校验这一跳 | 同文件「A163」 | ✔ 已实测（线上复验：补声明并重启后，老条目 `dca260c2` 从「不印」变为「印 `⟲修订1次`」） |
 | A205 | ★**分项相加 ≠ 净排除**：`excluded` 新增 `considered` 与 `net`；`net` 必须由「全量 − 分母」算，**不能**用四项相加——一条已归档的 summary 会同时进 `archived` 与 `summary`（线上实测重叠 **424** 条：净排除 1328 vs 四项相加 1752）。渲染并列四个分项时必须同时出现「不可相加」与「交集」 | `tests/catalog.test.mjs`「C1c」「C12」 | ✔ 已实测（单测；尸体：把 `net` 改成四项相加 ⇒ **只有 C1c 红**，C12 因样本无排除项而恒成立、不红——这条边界已写进判据注释，防止未来的我把它当成覆盖了自洽性） |
@@ -2178,6 +2208,15 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
     - **裁决「只放开显式点名」**：`topic` / `all` / `tier` 靠「只挑活跃」控制爆炸半径——给它们也加 `includeArchived`，等于把三个批量选择器变成第二种全删。唯一的放宽留给「我点着 id 说这一条」。
     - **裁决「不重复归档」**：对本来就归档的条目再归档一次不产生新信息，却会把 `updatedAt` 推前、把原 `archivedReason` 覆盖掉——两条都在污染历史读数。幂等因此是**不写**，而不是「写一样的东西」。
     - **未验证风险**：① 归档区条目一旦被点名，`manage` 闸会对它做一次准入判定——生产配置里 `manage` 缺省不设限，但一旦有人收窄，归档区会出现「活跃能删、归档不能删」的不对称，需按 `M2-role` 再判一次是否合理；② 「重复点名」现在没有任何落盘痕迹（不写审计也不写凭证），若将来需要「谁在反复点已归档条目」这类信号，得另加声道。
+
+47. **2026-11-20 · 导出（v0.56 · 方案 §1 第十项「用户控制」· 差距表 §1 第十项整件缺失）**
+    - **缺口**：方案 §1 第十项要四件「可查看、纠正、**导出**、删除」，前三件齐、**导出整件无载体**——记忆库只有「留在系统里」这一种存在方式。这不是功能缺口而是**所有权缺口**：换工具、离线审计、冷备份都做不到。核实手段：`grep "name: 'memory_"` 得 26 个工具（无 export）+ README 工具表逐行比对。
+    - **改动**：新增 `src/export.ts`（纯函数：`buildExportBundle` / `serializeExportBundle` / `sha256Of` / `isSensitiveEntry` + 四常量）与 `tools.ts::buildExport`（落盘、临时文件 + rename、覆盖拒绝、回执）；`memory_export` 进工具面（30 → 31）。能力编号 v0.55 → **v0.56**。测试 813/813 + 88 pass / 1 skip（`export.test.mjs` 新增 12 条）。
+    - **裁决「落盘不回灌」**：全库 18.5 MB（线上实测 3,123 条），任何把内容塞进工具返回的实现在真实库上都会撑爆一轮上下文 ⇒ 回执只给路径 / 字节 / 计数 / 指纹 / 前 240 字符预览。
+    - **裁决「敏感缺省不导」**：导出**离开系统**，此后 `role` 与 `includeSensitive` 都不再生效 ⇒ 这条比 `recall` 更紧，不能用「等价于检索面」来论证。
+    - **裁决「不覆盖」「不做导入」**：导出文件常是唯一备份，静默覆盖等于销毁一份备份且不留痕；而方案要的是「能拿走」，导入带 id 冲突 / 引用悬空 / 覆盖策略三类判断 ⇒ 判据换成正向等价（导出条目与库内条目**逐字段深比较**）。
+    - **顺带修掉一处结构性漂移**：`tests/tools.test.ts` 的手抄工具清单在 v0.56 **第三次漂了**（`memory_export` 未补；此前 v0.49 `memory_consolidate` 等亦同），而注释里自己预言过「迟早再漂」。本次改为**从 README 对外契约表解析**并与工具面双向互锁（实现多一个会红、契约多一个不存在的也会红），同一次把 README 缺列的 5 个工具（`memory_dispose` / `memory_catalog` / `memory_map` / `memory_misuse` / `memory_consolidate`）补齐——对外契约此前也少列，读者按 README 找工具会找不到。
+    - **未验证风险**：① 导出是同步阻塞写盘（18.5 MB 数秒级），更大的库会顶到工具超时，届时需分片或流式；② 四张附属表按 `scope` 收窄但不按角色（它们没有 `role` 字段），若将来给它们加归属，本契约要同步；③ 导出体不含 `role` 策略本身，拿走的库无法自证「谁能读」；④ 侧车四类不导，且**没有做「导出后再导入」的往返验证**（不建导入 ⇒ 结构上不存在该判据）；⑤ 「导出」目前**没有调度**——它是我或主人主动调用才发生，不构成周期备份。
 
 ## 10 · 未决问题
 

@@ -25,7 +25,7 @@
 
 26 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
 
-> ⚠ 2026-11-17：本节曾写「14 个」而实测 15 个（`memory_dispose` 上线时未回填，**文档漂移**）；v0.24.0 加 `memory_supersede` ⇒ **16 个**；v0.28.0 加 `memory_link` / `memory_unlink` / `memory_relations` ⇒ 19；v0.29.0 加 `memory_concept` / `memory_thesaurus` ⇒ 21；v0.30.0 加 `memory_entity` / `memory_entities` ⇒ 23；v0.35.0 加 `memory_source` / `memory_sources` ⇒ 25；v0.37 加 `memory_trail` ⇒ **26 个**。工具数由 `tests/audit.test.mjs` A42 硬编码锁定（每变一次必须显式确认）。
+> ⚠ 2026-11-17：本节曾写「14 个」而实测 15 个（`memory_dispose` 上线时未回填，**文档漂移**）；v0.24.0 加 `memory_supersede` ⇒ **16 个**；v0.28.0 加 `memory_link` / `memory_unlink` / `memory_relations` ⇒ 19；v0.29.0 加 `memory_concept` / `memory_thesaurus` ⇒ 21；v0.30.0 加 `memory_entity` / `memory_entities` ⇒ 23；v0.35.0 加 `memory_source` / `memory_sources` ⇒ 25；v0.37 加 `memory_trail` ⇒ 26；v0.40 `memory_catalog` ⇒ 27；v0.45 `memory_map` ⇒ 28；v0.46 `memory_misuse` ⇒ 29；v0.49 `memory_consolidate` ⇒ 30；v0.56 `memory_export` ⇒ **31 个**。⚠ **`memory_dispose`（v0.22）此前一直在表外**，本次补入 ⇒ 表内行数与工具面**逐名相等**。⚠ 别在这里手抄名单：工具名由 `tests/tools.test.ts` **从本表解析**后与工具面比对（双向互锁），`tests/audit.test.mjs` A42 另锁计数——加工具必须同一次改本表，否则两处同时红。
 
 | 工具 | 用途 |
 |------|------|
@@ -54,6 +54,12 @@
 | `memory_source` | **v0.35 维护来源实体**（方案 §5.2）：新建 / 修改 / 停用。`SOURCE-0001` 每 scope 递增；七项字段里 `type` 与 `location` 必填，`reliability` / `confidence` / `permissions` **无默认值**（不知道就是不知道）。`permissions` **只存不判**（本层不发明第二套授权语义）。停用不删除；变更记录只留 5 条。与 `provenance` **正交**：那个答「这条归属谁」，来源答「能去哪核」（v0.35.1 裁决，见 `docs/semantic.md §5.28`） |
 | `memory_sources` | **v0.35 查来源**：看详情 / 列表 / **按条目反查引用方**（`memory_sources({entryId})`）；未接线时 `memory_stats.sources.wired=false`（「没接线」与「库是空的」必须可区分） |
 | `memory_trail` | **v0.37 操作者审计流的读入口**（方案 §11.4）：谁写了什么 / 谁改了什么 / 谁删了什么 / 哪条读准入判据拒了多少条 / 有没有高密度动作簇。与 `memory_audit` 的分工是**对象不同**——那个审**条目**（该不该降级），本工具审**动作**（谁干的、有没有越权）。⚠ 三种空必须分清：`wired=false`（没接线）· `total=0`（接了线但还没有任何事件，**不是零违规**）· `rejected=0 且 total>0`（有动作、无拒绝）。动作簇只给信号、不贴「异常」标签（判据见 `docs/semantic.md §5.30`） |
+| `memory_dispose` | **v0.22 近重复欠账销账**：把 `memory_check` 列出的候选标「已处置」（`merged` / `updated` / `unrelated`）。⚠ **它只写销账记录、不执行实际处置**（合流用 `memory_merge`、补写用 `update`）；`disposition=unrelated` 是「判过无关」，不是「没判」；同一批只能给同一种处置，且全部候选必须**真的撞过**（fail-closed，防 id 拼错被静默吞掉） |
+| `memory_catalog` | **v0.40 编目工作面（只读 · 方案 §7 第 07 步 + §5.4）**：应编目分母（排除归档 / 冷存档 / compaction 产物 / summary）+ 四维缺口**各自独立**报（`memType` / `space` / `provenance` / `sourceIds`，不合成完整度分数）+ 可机械覆盖上限 + `credibility` 四维可信度读数（四档之和恒等于分母）。**不改任何条目、不刷新 `accessedAt`**；聚簇给的是建议，永不落库 |
+| `memory_map` | **v0.45 知识地图（只读派生 · 方案 §4.5）**：领域 / 主题 / 联系 / 活跃度 / 项目 / 空白 / 过期七项，**每项自报可读性**（`measured` 填充率够 / `starved` 只报分母不报排名 / `absent` 报缺什么）——没有这一层，读不出的三项会输出 0 而看起来健康。空白是四个数、**不可相加**；候选关联只给线索，**永不落库** |
+| `memory_misuse` | **v0.46 失效误用的严格上限（只读 · 方案 §13.3）**：A 档（返回那一刻结论已不能用）/ B 档（已过复查死线，「到期≠作废」单列不算误用）/ 显式要求看归档（正常用法不计入分子）分开；三档上限 C1 自动注入通道**零容忍** · C2 累计率 ≤ 0.40% · C3 滑窗泊松（`λ<3` 不判）。⚠ **可分辨度**：只有 v0.46 起的记录带 `includeArchive` 标志，历史记录分不清「要求看归档」与「真误用」 |
+| `memory_consolidate` | **v0.49 知识提炼候选（只读 · 方案 §16.1）**：按标签聚簇报「证据量三要素」（条目数 / 时间跨度 / 已有 summary）+ 最新 3 条标题；默认阈值 20 条 × 30 天，日期形态的标签按形态排除。**不生成知识**（归纳是判断，归主体）、不改条目、不落库 |
+| `memory_export` | **v0.56 导出（方案 §1 第十项「用户控制」）**：把**可见**记忆面导出成可移植 JSON 快照并写文件——回执只给路径 / 字节 / 计数 / sha256 / 预览，**不回灌内容**（全库 MB 级，塞进返回会撑爆一轮上下文）。恒含归档条目（归档是「我决定不再用」，不是「不存在」）；`L2`/`L3` 敏感**缺省不导**（导出离开系统、此后准入不再生效 ⇒ 比 `recall` 更紧）；目标已存在即拒（导出常是唯一备份）。五张表全导（条目 / 概念 / 实体 / 来源 / 关系），侧车**不导**且在 `notExported` 里逐条点名。**不做导入** |
 
 行为侧（无工具面，自动发生）：
 

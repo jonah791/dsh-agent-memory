@@ -14,6 +14,8 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { readFileSync, statSync } from 'node:fs'
+import { mkdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { dirname, isAbsolute, resolve as resolvePath } from 'node:path'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
@@ -60,6 +62,7 @@ import {
 import { credibilityReport } from './credibility.ts'
 import { archiveRefDescendants, mergeForgetPlans, planForget } from './forget.ts'
 import type { ForgetCertificate } from './forget.ts'
+import { DEFAULT_PREVIEW_CHARS, EXPORT_FORMAT, EXPORT_FORMAT_VERSION, EXPORT_NOT_EXPORTED, buildExportBundle, isSensitiveEntry, serializeExportBundle, sha256Of } from './export.ts'
 import { randomUUID } from 'node:crypto'
 import {
   RELATION_TYPE_SPECS,
@@ -6069,6 +6072,151 @@ function buildRecompress(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
+/** 字节数 → 人读（回执用；3 位有效数字足够——回执不是仪器读数面，`bytes` 字段才是） */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * 构建 memory_export 工具（v0.56 · 方案 §1 第十项「用户控制：可查看、纠正、导出、删除」）。
+ *
+ * 形态三条（判据见 `tests/export.test.mjs` E1–E10）：**落盘不回灌上下文**（全库 4.7MB，
+ * 塞进返回实现在真实库上会撑爆一轮）/ **敏感默认不导**（导出离开系统，此后准入不再生效
+ * ⇒ 比 recall 更紧）/ **不覆盖**（导出常是唯一备份）。
+ *
+ * 不记审计、不记用量：导出不改变状态；把它记成「动作」或「检索命中」都会让两份读数失真
+ * （`actor-audit` 五类动作与 access-trace 的 hit 语义都不含「导出」）。
+ */
+function buildExport(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_export',
+    deferLoading: true,
+    description: '把**可见**记忆面导出成可移植 JSON 快照并写进一个文件——回执只给路径 / 字节 / 计数 / sha256 / 预览，**不回灌内容**。「能查能改能删但拿不走」是所有权缺口，这是它的出口。恒含归档条目（归档是「我决定不再用」，不是「不存在」）。`L2`/`L3` 敏感条目**缺省不导**（`includeSensitive:true` 才含：导出会离开系统，此后一切准入都不再生效，所以这条比 recall 更紧）。目标文件已存在即拒——导出常是唯一备份，静默覆盖等于销毁一份备份，要覆盖传 `overwrite:true`。**不含**用量轨迹 / 操作者审计 / 遗忘凭证 / 宿主会话日志（每次在导出体的 `notExported` 里点名：「没导」与「没有」必须可区分）。**不做导入**（写路径的 id 冲突 / 引用悬空 / 覆盖策略三类判断另开）。',
+    parameters: {
+      path: { type: 'string', description: '输出文件路径（绝对路径，或相对会话 cwd）。缺省 `<cwd>/.dsh/memory-exports/aml-export-<时间戳>.json`' },
+      scope: { type: 'string', description: '只导该 scope（受调用者视野约束——看不见的 scope 不许指定；概念 / 实体 / 来源 / 关系四张表同样按 scope 收窄）' },
+      includeSensitive: { type: 'boolean', description: '为 true 时含 `L2`/`L3` 条目（缺省不含）。未标注敏感级的条目**照常导出**（「没判断过」不等于「敏感」）' },
+      overwrite: { type: 'boolean', description: '为 true 才允许覆盖已存在的目标文件（缺省拒绝）' },
+      previewChars: { type: 'integer', description: `回执里附带的导出体前缀字符数（缺省 ${DEFAULT_PREVIEW_CHARS}；0 = 不附预览）` },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          path: { type: 'string', required: true },
+          bytes: { type: 'integer', required: true },
+          sha256: { type: 'string', required: true },
+          format: { type: 'string', required: true },
+          formatVersion: { type: 'integer', required: true },
+          exportedAt: { type: 'string', required: true },
+          counts: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              entries: { type: 'integer', required: true },
+              archivedEntries: { type: 'integer', required: true },
+              concepts: { type: 'integer', required: true },
+              entities: { type: 'integer', required: true },
+              sources: { type: 'integer', required: true },
+              relations: { type: 'integer', required: true },
+            },
+          },
+          omitted: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              sensitive: { type: 'integer', required: true },
+              unreadable: { type: 'integer', required: true },
+            },
+          },
+          notExported: { type: 'array', required: true, items: { type: 'string' } },
+          preview: { type: 'string', required: true },
+        },
+      },
+      render: (_args, value) => {
+        const lines = [
+          `已导出：${value.path}（${formatBytes(value.bytes)}）`,
+          `格式 ${value.format} v${value.formatVersion} · sha256 ${value.sha256.slice(0, 16)}…（完整 64 位在回执字段）`,
+          `条目 ${value.counts.entries}（其中已归档 ${value.counts.archivedEntries}）· 概念 ${value.counts.concepts} · 实体 ${value.counts.entities} · 来源 ${value.counts.sources} · 关系 ${value.counts.relations}`,
+          `未导出：敏感 ${value.omitted.sensitive} 条（\`L2\`/\`L3\` 缺省不含，要含传 includeSensitive:true）· 不可读 ${value.omitted.unreadable} 条（角色准入）`,
+          `不含侧车：${value.notExported.join(' / ')}`,
+        ]
+        if (value.preview.length > 0) lines.push(`预览（前 ${value.preview.length} 字符）：${value.preview}`)
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const { config, cwd, view } = await resolveRuntime(exec, deps)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
+      const explicitScope = typeof args.scope === 'string' && args.scope.trim().length > 0 ? args.scope.trim() : undefined
+      // 恒含归档：v0.56 刻意不提供「只导活跃」的开关（见 export.ts 的 ExportOmission 注释）
+      const gathered = gatherReadable(deps, { readScopes, includeArchive: true, view, explicitScope })
+      const includeSensitive = args.includeSensitive === true
+      const allEntries = gathered.entries
+      const entries = includeSensitive ? allEntries : allEntries.filter((entry) => !isSensitiveEntry(entry))
+      const inScopes = (scope: string): boolean => gathered.scopes.includes(scope)
+      const bundle = buildExportBundle({
+        entries,
+        concepts: deps.concepts === undefined ? [] : deps.concepts.all().filter((row) => inScopes(row.scope)),
+        entities: deps.entities === undefined ? [] : deps.entities.all().filter((row) => inScopes(row.scope)),
+        sources: deps.sources === undefined ? [] : deps.sources.all().filter((row) => inScopes(row.scope)),
+        relations: deps.relations === undefined ? [] : deps.relations.all().filter((row) => inScopes(row.scope)),
+        scopes: gathered.scopes,
+        omitted: { sensitive: allEntries.length - entries.length, unreadable: gathered.rejected },
+        exportedAt: new Date().toISOString(),
+      })
+      const text = serializeExportBundle(bundle)
+      const baseDir = cwd ?? process.cwd()
+      const rawPath = typeof args.path === 'string' ? args.path.trim() : ''
+      const target = rawPath.length > 0
+        ? (isAbsolute(rawPath) ? rawPath : resolvePath(baseDir, rawPath))
+        : resolvePath(baseDir, '.dsh', 'memory-exports', `aml-export-${bundle.exportedAt.replace(/[:.]/g, '-')}.json`)
+      const overwrite = args.overwrite === true
+      let targetExists = false
+      try {
+        await stat(target)
+        targetExists = true
+      } catch {
+        // 文件不存在 = 正常首次导出路径（不吞其它错：stat 的其它失败会在下面 writeFile 处响亮报出）
+      }
+      if (targetExists && !overwrite) {
+        throw new Error(`memory_export: 目标已存在（${target}）——不覆盖是刻意的：导出文件常是唯一备份，静默覆盖等于销毁一份备份且不留痕。确认要覆盖传 overwrite: true，或换一个 path。`)
+      }
+      await mkdir(dirname(target), { recursive: true })
+      const tmp = `${target}.tmp-${process.pid}-${Date.now()}`
+      try {
+        // 临时文件 + rename：半截文件比没有文件更坏——它看起来像一份完整导出
+        await writeFile(tmp, text, 'utf8')
+        await rename(tmp, target)
+      } catch (err) {
+        await unlink(tmp).catch(() => undefined)
+        throw new Error(`memory_export: 写盘失败（${target}）——${err instanceof Error ? err.message : String(err)}`)
+      }
+      const bytes = (await stat(target)).size
+      const previewChars = typeof args.previewChars === 'number' && args.previewChars >= 0 ? args.previewChars : DEFAULT_PREVIEW_CHARS
+      return {
+        ok: true,
+        path: target,
+        bytes,
+        sha256: sha256Of(text),
+        format: EXPORT_FORMAT,
+        formatVersion: EXPORT_FORMAT_VERSION,
+        exportedAt: bundle.exportedAt,
+        counts: bundle.counts,
+        omitted: bundle.omitted,
+        notExported: EXPORT_NOT_EXPORTED.map((row) => row.surface),
+        preview: previewChars === 0 ? '' : text.slice(0, previewChars),
+      }
+    },
+  })
+}
+
 /**
  * 构建记忆工具定义（纯函数，单测可直接取 execute 跑行为）。
  * @param deps - 存储 + 配置加载依赖
@@ -6105,6 +6253,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildCheck(deps),
     buildDispose(deps),
     buildHealth(deps),
+    buildExport(deps),
     buildVersion(),
   ]
 }
