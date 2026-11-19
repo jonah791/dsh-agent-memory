@@ -213,6 +213,26 @@ export const entrySchema = zod.object({
    * 装了却什么都没拦住。
    */
   sensitivity: zod.enum(['L0', 'L1', 'L2', 'L3']).optional(),
+  /**
+   * 修订留痕（v0.9 就有这个字段，**直到 v0.52 才在这里声明**）。
+   *
+   * ⚠ **同一个坑第十五次**，而这一次的代价最高：字段在磁盘上一直存在（`update` 走
+   * `store.patch` 直接写行，绕过了本 schema），但**每次重新载入都被 storage-domain 按本
+   * schema 剥掉** ⇒ 进程内新写的快照看得见，**重启后全部消失**；下一次 `update` 还以
+   * 空 prev 覆盖，于是快照永远只剩 1 条。v0.52 的实测证据：线上 463 条带快照的条目里
+   * **369 条只有 1 条**（2 条 62 / 3 条 32），且重启后 `recall` 对老条目印不出 `⟲`。
+   *
+   * ⇒ 判据（第五次重申，前四次都没拦住）：**任何新字段加进 `Entry`，必须同时来这里
+   * 声明一次**——类型层不报错、单测不报错（它们直接调 `execute()`，绕过写入/载入边界），
+   * 只有**线上实调**会报错。
+   */
+  revisions: zod.array(zod.object({
+    at: zod.string(),
+    prevTitle: zod.string(),
+    prevBody: zod.string(),
+    mode: zod.enum(['replace', 'append', 'patch']),
+    by: zod.string().optional(),
+  })).optional(),
 })
 
 /**

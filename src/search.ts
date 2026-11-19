@@ -1225,6 +1225,20 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     // 只支持字段级（嵌套对象归一化后会被改形 ⇒ A118 红 + 泛型推断退化）。
     ...(archival !== undefined ? { archivedReasonType: archival.reasonType } : {}),
     ...(archival?.reason !== undefined ? { archivedReason: archival.reason } : {}),
+    // 修订留痕（v0.52 · 方案 §12.1）——**同一投影点、同一教训**（第九次在这里补字段）。
+    // 只做**形状裁剪**（`Revision` → `RevisionBrief`，丢掉可到 8 万字符的 `prevBody`），
+    // 不做条数裁剪（写入侧 `MAX_REVISIONS=3` 已封顶，读取侧再裁一次就成了两个真相）。
+    // 无记录不写键：空数组会被读成「修订过 0 次」，而事实是「没有留痕」——渲染层必须说出来。
+    ...(entry.revisions !== undefined && entry.revisions.length > 0
+      ? {
+          revisions: entry.revisions.map((rev) => ({
+            at: rev.at,
+            mode: rev.mode,
+            prevTitle: rev.prevTitle,
+            ...(rev.by !== undefined ? { by: rev.by } : {}),
+          })),
+        }
+      : {}),
     // 转述型·无出处（2026-11-03 · lh-d5e409bf；v0.21.0 起由 provenance 接管）——
     // **同一投影点、同一教训**（v0.13/v0.14/v0.15 连续三版都栽在漏这一行）。
     // 判据在 origin.ts（纯函数，单测直接测）；这里只**透出布尔**，文案归渲染层。

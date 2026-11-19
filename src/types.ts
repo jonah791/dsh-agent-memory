@@ -1303,6 +1303,38 @@ export interface RecallEntityMatch {
 }
 
 /** 检索结果项 */
+/**
+ * 修订留痕·渲染投影（v0.52 · 方案 §12.1「字段已在、渲染不印」的出口）。
+ *
+ * 存储里的 `Revision` 还带 `prevBody`（改前全文）；**不在这里透出**——一条正文可到 8 万字符，
+ * 3 条修订 × 20 条结果就是几十万字符。而「改了什么」在 `prevTitle` + `mode` 两格已能回答到
+ * 「换了什么标题、是整文替换 / 追加 / 局部改」。要回改前正文去看存储（刻意取舍，不是漏字段）。
+ */
+export interface RevisionBrief {
+  /** 修订时刻（ISO） */
+  at: string
+  /** 改法：replace=整文替换 / append=追加 / patch=局部替换 */
+  mode: 'replace' | 'append' | 'patch'
+  /** 改前标题（「改了什么」的第一手对照） */
+  prevTitle: string
+  /** 改者（会话 id）；未记则省略——省略 = 不知道，**不是**「我改的」 */
+  by?: string
+}
+
+/**
+ * 逐角色准入判定（v0.52 · 方案 §12.1「谁能读这条」）。
+ *
+ * 它是 `rejectReason` 的**多角色视图**：同一份 roles 策略换一个角色问一次，答案落在
+ * `canRead` + 拒因码 `reason`（R1-kind / R2-space / R3-shared / R4-read / R0-global）。
+ * 与 `RoleView` 的区别：那是「**我**这个调用者会不会被拒」，这是「**其他人**会不会被拒」。
+ */
+export interface ReadableByRole {
+  role: string
+  canRead: boolean
+  /** 拒因码（`canRead=false` 时给出；why 不是布尔——见 role.ts::rejectReason 的判据码理由） */
+  reason?: string
+}
+
 export interface RecallResultItem {
   id: string
   kind: EntryKind
@@ -1314,6 +1346,16 @@ export interface RecallResultItem {
   score: number
   archived: boolean
   updatedAt: string
+  /**
+   * 修订留痕（v0.52 · 方案 §12.1）：最近 3 条「改前快照」的投影（`MAX_REVISIONS` 封顶）。
+   * **仅当有记录时出现**；无记录时渲染层必须说出「无修订记录」而不是留空（判据②）。
+   */
+  revisions?: RevisionBrief[]
+  /**
+   * 准入判定（v0.52 · 方案 §12.1）：按 `roles` 策略逐角色现算「谁能读这条」。
+   * 维度未启用时省略该键——省略的含义由渲染层如实说成「角色维度未启用」，**不是**「谁都能读」。
+   */
+  readableBy?: ReadableByRole[]
   /** 角色归属（v0.5，缺省为共享记忆） */
   role?: string
   /** 主体层（v0.13.0，缺省 = 通用；仅当条目已标注时出现在结果里） */

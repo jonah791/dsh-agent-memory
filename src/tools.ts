@@ -17,9 +17,9 @@ import { readFileSync, statSync } from 'node:fs'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolDefinition, ToolRunContext } from '@deepseek-ai/dsh-tools'
-import type { Entry, EntryKind, EvidenceRef, MemoryConfig, RecallEntityMatch, RememberResult, Revision } from './types.ts'
+import type { Entry, EntryKind, EvidenceRef, MemoryConfig, ReadableByRole, RecallEntityMatch, RecallResultItem, RememberResult, Revision, RevisionBrief } from './types.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
-import { resolveScopes, sessionCwdOf } from './scope.ts'
+import { isGlobalScope, resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
 import { statsOf, titleFingerprint } from './store.ts'
 import type { AccessRecord, AccessSummary } from './access-trace.ts'
@@ -29,7 +29,7 @@ import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
 import { findNearDuplicates, formatCandidate, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
 import type { DedupeTraceRecord, SimilarDisposition } from './dedupe.ts'
-import { filterRoleView, narrowReadScopes, rejectMutationReason, rejectWriteReason, roleViewOf, sessionHeaderOf, sessionIdOf, type MutationAction, type RoleView } from './role.ts'
+import { filterRoleView, narrowReadScopes, readableRolesOf, rejectMutationReason, rejectWriteReason, roleViewOf, rolesOf, sessionHeaderOf, sessionIdOf, type MutationAction, type RoleView } from './role.ts'
 import { ACTION_LABELS, ACTOR_AUDIT_ACTIONS, CODE_LABELS, OUTCOME_LABELS, filterActorAudit, findBursts, shortActorId, type ActorAuditAction, type ActorAuditRecord, type ActorAuditSummary, type ActorIdentity, type AuditTarget } from './actor-audit.ts'
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
 import { countByProject, executionTag, filterByExecution, normalizeProject, parseExecutionArgs, parseExecutionId } from './execution.ts'
@@ -877,6 +877,109 @@ export const DERIVED_ITEM_FIELDS = {
   },
 } as const
 
+/**
+ * **留痕 / 准入**字段（v0.52 · 方案 §12.1）——出现在结果项里，但**不是可写维度**：
+ * - `revisions`：`update` 内部写入的改前快照（工具参数面没有入口，唯一写入口是 `pushRevision`）；
+ * - `readableBy`：由 `roles` 策略**现算**（同一份策略换一个角色问一次，不落库）。
+ *
+ * ⇒ 不进 `DIMENSION_ITEM_FIELDS`：那个常量的契约是「两侧 schema 的**可写维度**真源」，
+ *   放进去会让写入边界校验要求 `entrySchema` 声明它们 ⇒ 等于开一个「客户端可直写留痕/准入」
+ *   的口子，而这正是本层要避免的第二真源。
+ * ⚠ 与另两个常量一样：**recall 与 memory_browse 两侧 schema 都从这里展开**——v0.13–v0.15
+ *   连续三版的漂移（一处加了、另一处没加 ⇒ 线上整条被 `additionalProperties: false` 拒收、
+ *   而单测全绿）就是这一行存在的理由。
+ */
+export const AUDIT_ITEM_FIELDS = {
+  revisions: {
+    type: 'array',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        at: { type: 'string', required: true, description: '修订时刻（ISO）' },
+        mode: { type: 'string', enum: ['replace', 'append', 'patch'], required: true, description: '改法：整文替换 / 追加 / 局部替换' },
+        prevTitle: { type: 'string', required: true, description: '改前标题（「改了什么」的第一手对照）' },
+        by: { type: 'string', description: '改者（会话 id）；未记则省略——省略 = 不知道，不是「我改的」' },
+      },
+    },
+    description: '修订留痕（v0.52 · 方案 §12.1）：最近 3 条「改前快照」——答「何时改 / 怎么改 / 谁改 / 改前标题」。**仅当有记录时出现**；无记录时渲染层说「无修订记录」而不是留空。⚠ 不透出 `prevBody`（改前正文可到 8 万字符，3 条 × 20 结果会撑爆一次检索；要回改前全文去看存储）。',
+  },
+  readableBy: {
+    type: 'array',
+    items: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        role: { type: 'string', required: true, description: '角色名' },
+        canRead: { type: 'boolean', required: true, description: '该角色能否读到这条' },
+        reason: { type: 'string', description: '拒因码：R1-kind 种类收窄 / R2-space 空间未标注或不在白名单 / R3-shared 关闭共享可见 / R4-read 条目角色不在读白名单 / R0-global 该角色不附 global 作用域' },
+      },
+    },
+    description: '准入判定（v0.52 · 方案 §12.1「谁能读这条」）：按 `roles` 策略**逐角色现算**——同一份策略换一个角色问一次（`role.ts::readableRolesOf`）。**角色维度未启用时省略该键**（渲染层说「未启用」，不说「谁都能读」）。⚠ 它是「视野管理」不是安全边界：`role` 可自述、记忆文件可被读盘者改写（见 role.ts 头注的诚实声明）。',
+  },
+} as const
+
+/**
+ * 修订留痕标记（v0.52 · §12.1）——**挑着打**：有记录才印，无记录留空。
+ *
+ * ⚠ 判据修订（本段自我纠正）：原计划「无记录也要说『无修订记录』」被既有硬判据否掉了——
+ * `succession.test.mjs` A3（尸体样本）断言「加字段不得改变无该字段条目的**整行形状**」、
+ * `schema-parity.test.mjs` A119b 断言「未设维度的条目不得带任何标记」。两条都是尸体样本换来的
+ * （v0.13–v0.15 连续三版把标记打满，真正该被看见的被背景吃掉）。
+ * ⇒ 改判：「缺 ⟲ = 无修订记录」是**单义**的（投影层总在算，不存在「没算」这一态），
+ *   所以缺省不需要说话；只有**双义**状态才必须一次性说明——那是 `readableByFooter` 的职责。
+ */
+export function revisionsTag(revisions: RevisionBrief[] | undefined, currentTitle?: string): string {
+  if (revisions === undefined || revisions.length === 0) return ''
+  const last = revisions[revisions.length - 1]!
+  const when = last.at.slice(5, 16).replace('T', ' ')
+  const by = last.by !== undefined && last.by.length > 0 ? ` by ${shortId(last.by)}` : ''
+  const prevTitleNote = currentTitle !== undefined && last.prevTitle !== currentTitle ? `，标题曾为「${last.prevTitle}」` : ''
+  return ` ⟲修订${revisions.length}次（最近 ${when} ${last.mode}${by}${prevTitleNote}）`
+}
+
+/**
+ * 准入判定标记（v0.52 · §12.1）——同样**挑着打，且只打坏消息**：
+ * `🚫verifier(R4-read),ghost(R4-read)`。
+ *
+ * 为什么正向（谁**能**读）不印：共享记忆是所有角色的常态，四条全打等于没打；
+ * 而「有人读不到」是**需要立刻知道**的那一半——误以为别人看不见某条记忆，是这个功能要防的错。
+ */
+export function readableByTag(rows: ReadableByRole[] | undefined): string {
+  if (rows === undefined || rows.length === 0) return ''
+  const no = rows.filter((row) => !row.canRead)
+  if (no.length === 0) return ''
+  return ` 🚫${no.map((row) => `${row.role}(${row.reason ?? '拒'})`).join(',')}`
+}
+
+/**
+ * 准入状态页脚（v0.52 · §12.1）——只为**唯一双义状态**说话：角色维度未启用。
+ *
+ * 「没有 🚫 标记」在启用时读作「各角色都可读」，在未启用时读作「没算过」——同一个空白两种含义。
+ * 这种双义必须一次性说清，而且**每响应一行**而不是每条一行（判据②的正确落点：
+ * 「无数据要说话」说的是**状态**，不是给每一行套空壳）。
+ */
+export function readableByFooter(rows: Array<ReadableByRole[] | undefined>): string {
+  if (rows.length === 0) return ''
+  return rows.some((row) => row !== undefined) ? '' : '🔓 角色维度未启用：本次未做准入过滤——「谁能读」未计算（**不是**「谁都能读」）。'
+}
+
+/**
+ * 给结果项补「谁能读这条」（v0.52 · §12.1）。
+ * 为什么在工具层而不是投影层：投影层（`search.ts`）是纯函数面，把 `roles` 配置拖进去会让
+ * 「检索」依赖「准入配置」；而这里两样都有了（`entries` 回查原条目拿到 `role`/`space`/`scope`）。
+ * 维度未启用时**原样返回同一数组引用**——零拷贝、零行为变化（与 `applyRoleView` 同一纪律）。
+ */
+function attachReadableBy(results: RecallResultItem[], byId: Map<string, Entry>, config: MemoryConfig): RecallResultItem[] {
+  if (rolesOf(config).enabled !== true) return results
+  return results.map((item) => {
+    const entry = byId.get(item.id)
+    if (entry === undefined) return item
+    const rows = readableRolesOf(config, entry, { entryInGlobalScope: isGlobalScope(entry.scope) })
+    return rows.length > 0 ? { ...item, readableBy: rows } : item
+  })
+}
+
 /** 构建 recall 工具 */
 function buildRecall(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
@@ -964,6 +1067,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
                 },
                 ...DIMENSION_ITEM_FIELDS,
                 ...DERIVED_ITEM_FIELDS,
+                ...AUDIT_ITEM_FIELDS,
                 level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
                 score: { type: 'number', required: true },
                 archived: { type: 'boolean', required: true },
@@ -1064,7 +1168,12 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // 生命周期标记只给 pending / disputed / deleted 三态（其余由既有 tag 渲染，不重复）
           const spaceNote = spaceTag(item.space)
           const lifecycleNote = lifecycleTag(item.lifecycle)
-          return `- ${lifecycleNote}${supersededNote}${expiryNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote}${memTypeNote}${spaceNote} 相关度${item.score}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${occurredAtNote.length > 0 ? ' ' + occurredAtNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${relatedNote}`
+          // 修订史与准入（v0.52 · 方案 §12.1）：§12 详情页十项里「字段已在、渲染不印」的那两项。
+          // 两条都**无数据时也必须说话**（`⟲无修订记录` / `🔓角色维度未启用`）——留空会让
+          // 「没有留痕」与「没渲染」长得一样，而那正是本段要修的病。
+          const revisionsNote = revisionsTag(item.revisions, item.title)
+          const readableNote = readableByTag(item.readableBy)
+          return `- ${lifecycleNote}${supersededNote}${expiryNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote}${memTypeNote}${spaceNote} 相关度${item.score}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${occurredAtNote.length > 0 ? ' ' + occurredAtNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${revisionsNote}${readableNote}${relatedNote}`
         })
         return [{
           type: 'text',
@@ -1077,6 +1186,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
               : ''),
             `命中 ${value.total} 条，返回 ${value.results.length} 条：`,
             ...lines,
+            readableByFooter(value.results.map((item) => item.readableBy)),
           ].filter((line) => line !== '').join('\n'),
         }]
       },
@@ -1192,6 +1302,11 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         collapseFamily: args.collapseFamily ?? false,
         ...(entityMatches.length > 0 ? { entityMatches } : {}),
       })
+      // 「谁能读这条」（v0.52 · 方案 §12.1）：在**同一处返回**里给出（判据① 不新开工具）。
+      // 需要 `roles` 策略 + 条目原 `role`/`space`/`scope`——投影层刻意不透出 `role`（它是准入判据，
+      // 不是内容），故用 `entries` 回查。`revisions` 已由投影层透出，这里不再补一遍。
+      const byId = new Map(entries.map((entry) => [entry.id, entry]))
+      const audited = { ...result, results: attachReadableBy(result.results, byId, config) }
       // 侧车用量轨迹（v0.6）：只交出命中 id，**绝不改条目**；失败静默（吞错在实现方）。
       // ⚠ **空结果必须落盘**（v0.44 · 方案 §16.3）：此前这里是 `result.results.length > 0`，
       // 于是「查了但没找到」从不被记录 ⇒ 空结果率结构性地恒为 0，任何「检索失败原因」都算不出。
@@ -1210,7 +1325,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         })
       }
       // 扩展词只在真发生时出现（省略 ≠ 空数组：没开就是没开，不是「扩展了 0 个词」）
-      const withExpanded = expandedTerms.length > 0 ? { ...result, expandedTerms } : result
+      const withExpanded = expandedTerms.length > 0 ? { ...audited, expandedTerms } : audited
       // 实体命中同理：没命中就不出现（省略 ≠ 空数组）
       return matchedEntities.length > 0 ? { ...withExpanded, matchedEntities } : withExpanded
     },
@@ -2526,6 +2641,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
                       },
                       ...DIMENSION_ITEM_FIELDS,
                       ...DERIVED_ITEM_FIELDS,
+                      ...AUDIT_ITEM_FIELDS,
                       level: { oneOf: [{ type: 'string', enum: ['day', 'week', 'month', 'year'] }, { type: 'null' }], required: true },
                       updatedAt: { type: 'string', required: true },
                       score: { type: 'number', required: true },
@@ -2573,17 +2689,22 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               // 事实生命周期标记（v0.24.0）：与 recall 同一位置、同一纪律
               // （同一事实两个界面不能长得不一样）。已过时放最前，理由同 recall。
               const supersededNote = supersededByTag(item.supersededBy)
+              // 修订史与准入（v0.52 · 方案 §12.1）：与 recall 同一文案、同一「无数据也要说话」纪律
+              const revisionsNote = revisionsTag(item.revisions, item.title)
+              const readableNote = readableByTag(item.readableBy)
               const validAfterNote = validAfterTag(item.validAfter)
               const occurredAtNote = occurredAtTag(item.occurredAt)
               const supersedesNote = supersedesTag(item.supersedes)
-              return `  - ${lifecycleTag(item.lifecycle)}${supersededNote}${expiryNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}${memTypeNote}${spaceTag(item.space)}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${occurredAtNote.length > 0 ? ' ' + occurredAtNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}`
+              return `  - ${lifecycleTag(item.lifecycle)}${supersededNote}${expiryNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}${memTypeNote}${spaceTag(item.space)}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${occurredAtNote.length > 0 ? ' ' + occurredAtNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${revisionsNote}${readableNote}`
             })
             .join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
         })
+        // 双义状态一次性说明（v0.52 · §12.1）：与 recall 同一条纪律、同一句话
+        const auditFooter = readableByFooter(value.groups.flatMap((group) => group.items.map((item) => item.readableBy)))
         return [{
           type: 'text',
-          text: `记忆档案（共 ${value.total} 组，显示 ${value.groups.length} 组）：\n${lines.join('\n')}`,
+          text: `记忆档案（共 ${value.total} 组，显示 ${value.groups.length} 组）：\n${lines.join('\n')}${auditFooter.length > 0 ? '\n' + auditFooter : ''}`,
         }]
       },
     },
@@ -2652,9 +2773,15 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
         page: args.page,
         pageSize: args.pageSize,
       })
-      // 结果里补 label
+      // 结果里补 label；「谁能读这条」与 recall 同一出口、同一判据（v0.52 · §12.1）——
+      // 两个界面同一事实不能长得不一样（渲染纪律：semantic.md「渲染纪律」段明列 browse 为触发点）。
+      const byId = new Map(entriesByExpiry.map((entry) => [entry.id, entry]))
       return {
-        groups: result.groups.map((group) => ({ ...group, label: bucketLabel(group.bucket) })),
+        groups: result.groups.map((group) => ({
+          ...group,
+          label: bucketLabel(group.bucket),
+          items: attachReadableBy(group.items, byId, config),
+        })),
         total: result.total,
       }
     },

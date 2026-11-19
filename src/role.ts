@@ -30,7 +30,7 @@
  * 历史配置字面量与外部调用方不得因新增字段而崩溃。
  */
 
-import type { Entry, MemoryConfig, RolePolicy, RolesConfig, Space } from './types.ts'
+import type { Entry, MemoryConfig, ReadableByRole, RolePolicy, RolesConfig, Space } from './types.ts'
 
 /** 人类（主脑）会话的缺省角色 */
 export const DEFAULT_ROLE = 'main'
@@ -383,4 +383,34 @@ export function narrowReadScopes(
   if (!view.enabled || view.includeGlobal) return readScopes
   if (explicitScope !== undefined && explicitScope.length > 0) return readScopes
   return readScopes.filter((scope) => scope !== 'global')
+}
+
+/**
+ * 逐角色准入判定（v0.52 · 方案 §12.1「谁能读这条」）——把 R1–R4 从「**调用者**会不会被拒」
+ * 推广成「**每个已声明角色**各自会不会被拒」，供 recall / browse 的详情渲染用。
+ *
+ * 候选角色 = `{roles.default, roles.derived} ∪ policies 里声明过的角色`（去重、缺省角色在前）。
+ * 维度未启用时返回 `[]`——**空数组不是「谁都不能读」**，是「这个维度不存在」；渲染层据此
+ * 说「角色维度未启用」而不是留空（v0.52 判据②）。
+ *
+ * 为什么把 `includeGlobal=false` 也算进来（`R0-global`）：那是**作用域层**的准入
+ * （`narrowReadScopes` 在检索前把 global 去掉），不在 `rejectReason` 的 R1–R4 里。
+ * 不并进来，「谁能读这条」就会对 global 条目上的 worker/verifier/ghost 报出假阳性——
+ * 而这张表存在的全部意义就是**别让人误以为某条记忆别人看得见**。
+ */
+export function readableRolesOf(
+  config: Pick<MemoryConfig, 'roles'> | undefined | null,
+  entry: Pick<Entry, 'kind' | 'role' | 'space'>,
+  options: { entryInGlobalScope?: boolean } = {},
+): ReadableByRole[] {
+  const roles = rolesOf(config)
+  if (!roles.enabled) return []
+  const names = [roles.default, roles.derived, ...Object.keys(roles.policies)]
+    .filter((name, index, all) => name.length > 0 && all.indexOf(name) === index)
+  return names.map((role) => {
+    const policy = rolePolicyOf(config, role)
+    const reason = rejectReason(policy, role, entry)
+      ?? (options.entryInGlobalScope === true && policy.includeGlobal === false ? 'R0-global' : undefined)
+    return reason === undefined ? { role, canRead: true } : { role, canRead: false, reason }
+  })
 }
