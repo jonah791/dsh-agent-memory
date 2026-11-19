@@ -350,6 +350,21 @@ export function findBursts(
   return out
 }
 
+/**
+ * 操作者短 id（渲染用）——**不能直接截前 N 位**。
+ *
+ * 会话 id 的形态是 `session-<uuid>`：所有会话共享 `session-` 前缀，取前 8 位得到的是
+ * 「session-」这个**零区分度的串**（2026-11-19 线上验证当场抓到：审计明细显示「会话 session-」，
+ * 而「谁干的」正是这份流唯一的用途）。⇒ 先剥掉已知共通前缀，再截。
+ *
+ * @param id - 完整会话 id（`session-cc8272d8-…` 或任意 id）
+ * @returns 可辨识的短串（`cc8272d8…`）；剥前缀后不足 12 字符则原样返回
+ */
+export function shortActorId(id: string): string {
+  const stripped = id.startsWith('session-') ? id.slice('session-'.length) : id
+  return stripped.length > 12 ? `${stripped.slice(0, 8)}…` : stripped
+}
+
 /** 动作 → 中文（render 层用；与 ACTOR_AUDIT_ACTIONS 一一对应，测试会守住完整性） */
 export const ACTION_LABELS: Record<ActorAuditAction, string> = {
   write: '写入',

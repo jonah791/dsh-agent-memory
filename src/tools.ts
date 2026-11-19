@@ -30,7 +30,7 @@ import { recallEntries, relatedOf, relateClosure } from './search.ts'
 import { findNearDuplicates, formatCandidate, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
 import type { DedupeTraceRecord, SimilarDisposition } from './dedupe.ts'
 import { filterRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
-import { ACTION_LABELS, ACTOR_AUDIT_ACTIONS, CODE_LABELS, OUTCOME_LABELS, filterActorAudit, findBursts, type ActorAuditAction, type ActorAuditRecord, type ActorAuditSummary, type ActorIdentity, type AuditTarget } from './actor-audit.ts'
+import { ACTION_LABELS, ACTOR_AUDIT_ACTIONS, CODE_LABELS, OUTCOME_LABELS, filterActorAudit, findBursts, shortActorId, type ActorAuditAction, type ActorAuditRecord, type ActorAuditSummary, type ActorIdentity, type AuditTarget } from './actor-audit.ts'
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
 import { countByProject, executionTag, filterByExecution, normalizeProject, parseExecutionArgs, parseExecutionId } from './execution.ts'
 import { countByGrounding, filterByGrounding, groundingTag, normalizeGrounding, parseGroundingArg, UNLABELED_GROUNDING } from './grounding.ts'
@@ -4556,7 +4556,7 @@ function buildTrail(deps: MemoryToolDeps): ToolDefinition {
       const toIso = (ms: number): string => new Date(ms).toISOString().slice(0, 16).replace('T', ' ')
       const actorText = (record: ActorAuditRecord): string => {
         const parts: string[] = []
-        if (record.actor.sessionId !== undefined) parts.push(`会话 ${shortId(record.actor.sessionId)}`)
+        if (record.actor.sessionId !== undefined) parts.push(`会话 ${shortActorId(record.actor.sessionId)}`)
         if (record.actor.role !== undefined) parts.push(`角色 ${record.actor.role}`)
         if (record.actor.delegationDepth !== undefined) parts.push(`深度 ${record.actor.delegationDepth}`)
         return parts.length > 0 ? parts.join(' / ') : '未标注'
@@ -4594,7 +4594,7 @@ function buildTrail(deps: MemoryToolDeps): ToolDefinition {
         filteredTotal: filteredAll.length,
         records: shownRecords,
         bursts: bursts.map((burst) => ({
-          actor: `会话 ${shortId(burst.sessionId)}`,
+          actor: `会话 ${shortActorId(burst.sessionId)}`,
           action: burst.action,
           count: burst.count,
           firstAt: toIso(burst.firstAtMs),

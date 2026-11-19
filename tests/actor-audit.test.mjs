@@ -20,6 +20,7 @@ import {
   parseActorAudit,
   readActorAudit,
   sanitizeActorAuditRecord,
+  shortActorId,
   summarizeActorAudit,
   summarizeActorAuditRecords,
 } from '../lib/actor-audit.js'
@@ -432,4 +433,13 @@ test('A10 ★文件不存在 ⇒ **已接线零事件**（不是「未接线」�
   assert.notEqual(missing, undefined, 'ENOENT 是「还没有事件」，不是「读不到」——两者混同会让新装的插件永远显示未接线')
   assert.equal(missing.summary.total, 0)
   assert.deepEqual(missing.records, [])
+})
+
+test('A11 ★操作者短 id 必须可辨识：剥掉共通前缀再截（线上验证当场抓到的缺陷）', () => {
+  const a = 'session-cc8272d8-5195-4a34-a683-455cf5f12671'
+  const b = 'session-aaaaaaaa-0000-0000-0000-000000000000'
+  assert.notEqual(shortActorId(a), shortActorId(b),
+    '两个不同会话渲染成同一个串（「session-」）⇒「谁干的」不可查，而那正是这份流唯一的用途')
+  assert.equal(shortActorId(a), 'cc8272d8…')
+  assert.equal(shortActorId('short'), 'short', '无前缀且短 ⇒ 原样，不硬加省略号')
 })
