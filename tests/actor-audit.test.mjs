@@ -18,6 +18,7 @@ import {
   filterActorAudit,
   findBursts,
   parseActorAudit,
+  readActorAudit,
   sanitizeActorAuditRecord,
   summarizeActorAudit,
   summarizeActorAuditRecords,
@@ -424,4 +425,11 @@ test('E12 审计未接线时工具照常工作（吞错纪律：审计失败不�
   const { byName, exec } = setupE2E({ recordAudit: false })
   const created = await byName.get('remember').execute({ text: '# 无审计' }, exec)
   assert.equal(typeof created.id, 'string', '没有审计回调也必须能写入——审计是旁证，不是前置条件')
+})
+
+test('A10 ★文件不存在 ⇒ **已接线零事件**（不是「未接线」）：首次部署不该永远报「读不到」', async () => {
+  const missing = await readActorAudit('C:\definitely\not\here\memory-actor-audit.jsonl')
+  assert.notEqual(missing, undefined, 'ENOENT 是「还没有事件」，不是「读不到」——两者混同会让新装的插件永远显示未接线')
+  assert.equal(missing.summary.total, 0)
+  assert.deepEqual(missing.records, [])
 })

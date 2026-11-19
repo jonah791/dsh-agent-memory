@@ -395,8 +395,11 @@ export function filterActorAudit(records: ActorAuditRecord[], query: ActorAuditQ
 /**
  * 读取并解析审计侧车（**吞错**，与 `access-trace.ts::readAccessIndex` 同构）。
  *
- * 不可读 / 不存在 ⇒ `undefined`（调用方按「审计流未接线」处理，不按「零事件」处理——
- * 「没读」与「读了是空」是两件事）。
+ * **三态必须分开**（本模块全部围绕这条纪律）：
+ * - **文件不存在（`ENOENT`）⇒ 空结构**：已经接线、只是**还没有任何事件**——若把它当 `undefined`，
+ *   首次部署会永远报「未接线」，而「未接线」与「零事件」的混淆正是本节要修的那种假读数。
+ * - **其它读失败（权限 / IO）⇒ `undefined`**：真的读不到。
+ * - 读到内容 ⇒ 正常解析。
  */
 export async function readActorAudit(
   filePath: string,
@@ -404,7 +407,10 @@ export async function readActorAudit(
   try {
     const text = await readFile(filePath, 'utf8')
     return { records: parseActorAudit(text), summary: summarizeActorAudit(text) }
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+      return { records: [], summary: summarizeActorAuditRecords([]) }
+    }
     return undefined
   }
 }
