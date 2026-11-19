@@ -90,7 +90,8 @@ test('工具齐备，名称与契约一致', () => {
   //   而恒红的断言不再是指标（读数纪律：两次读数是同一个坏值 ⇒ 先怀疑量法）。
   //   ⇒ 判据：新增工具时**同一次提交**里改这一行；`.ts` 套件不在 `npm test` 的绿线内，
   //   所以它冷了六周才被发现（v0.24.0 → 2026-11-18）。
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_check', 'memory_concept', 'memory_dispose', 'memory_entities', 'memory_entity', 'memory_health', 'memory_link', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_relations', 'memory_review_mark', 'memory_source', 'memory_sources', 'memory_stats', 'memory_supersede', 'memory_thesaurus', 'memory_trail', 'memory_unlink', 'memory_version', 'recall', 'remember', 'update'])
+  // 2026-11-19：`memory_catalog`（v0.40 编目工作面 · 方案 §7 第 07 步）—— 同上，同一次提交内补上。
+  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_catalog', 'memory_check', 'memory_concept', 'memory_dispose', 'memory_entities', 'memory_entity', 'memory_health', 'memory_link', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_relations', 'memory_review_mark', 'memory_source', 'memory_sources', 'memory_stats', 'memory_supersede', 'memory_thesaurus', 'memory_trail', 'memory_unlink', 'memory_version', 'recall', 'remember', 'update'])
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
 })

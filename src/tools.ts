@@ -45,6 +45,7 @@ import { assertExpiryOrder, countByExpiry, expiryTag, filterByExpiryState, occur
 import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, parseValidAfterArg, shortId, supersededByTag, supersedesTag, validAfterTag } from './succession.ts'
 import { auditMemory } from './audit.ts'
 import { retentionSummary } from './retention.ts'
+import { catalogReport } from './catalog.ts'
 import { mergeForgetPlans, planForget } from './forget.ts'
 import type { ForgetCertificate } from './forget.ts'
 import { randomUUID } from 'node:crypto'
@@ -4483,6 +4484,163 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
  *
  * 硬约束：**只写侧车，绝不改条目**（不刷新 accessedAt/updatedAt ⇒ A31 的只读判据不受影响）。
  */
+/**
+ * 构建 `memory_catalog`：编目工作面（v0.40 · 方案 §7 第 07 步「编目与标引」· **只读**）。
+ *
+ * 存在的理由：方案 §7 十步流水线里本插件只有 01（采集）与 09（存储），第 07 步无载体——
+ * 于是 `memType` 真分母覆盖率停在 1.1%。而缺口主战场是**存量**（1700+ 条 vs 每天几十条增量），
+ * 所以先补「让存量可作业」的那一层：报缺口 + 按标签聚簇 + 给建议。
+ *
+ * **不写库、不批量标注**：判断型字段的批量赋值＝机制替我判断，而判错比「未分类」更贵
+ * （未分类是诚实的「不知道」）。
+ */
+function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_catalog',
+    deferLoading: true,
+    description: '编目工作面（只读）：回答「馆藏里还有多少东西没编目、先补哪一批」。输出三个口径齐全的读数——**应编目分母**（排除归档/冷存档/compaction/**summary**：概要是压缩桶，不属于七类任何一类）、**四维缺口**各自独立（memType / space / provenance / sourceIds，不合成完整度分数）、**可机械覆盖上限**（按标签贪心聚簇能覆盖多少；实测 1016/2245 = 45%，剩下是长尾）。聚簇给 `suggested` **建议**类别与样本 id，但**永不落库**——建议是提问不是答案。⚠ 本工具不改任何条目、不刷新 accessedAt。',
+    parameters: {
+      scope: { type: 'string', description: '作用域覆盖（缺省当前 workspace + global；受调用者角色视野约束）。' },
+      role: { type: 'string', description: '角色视角覆盖（缺省按调用者会话身份推导）。' },
+      maxClusters: { type: 'integer', description: '最多出几个簇（缺省 12）——每多一个簇就多一次判断，12 是「一次能看完」的量级。' },
+      minClusterSize: { type: 'integer', description: '一个标签至少覆盖多少条才成簇（缺省 8）。太小的簇是噪声：3 条以下的标签归类收益抵不上判断成本。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          denominator: { type: 'integer', required: true, description: '应编目分母（活跃、非压缩产物、非 summary）' },
+          excluded: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              archived: { type: 'integer', required: true },
+              coldCheckpoint: { type: 'integer', required: true },
+              compaction: { type: 'integer', required: true },
+              summary: { type: 'integer', required: true },
+            },
+          },
+          gaps: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              // 四维各自显式声明（不用 additionalProperties:true——那会让推断类型退化成
+              // `Record<string, JsonValue>`，与纯函数的 CatalogGap 不兼容，而错误会落在
+              // 渲染函数的参数上、看不出根因）
+              memType: {
+                type: 'object',
+                required: true,
+                additionalProperties: false,
+                properties: {
+                  missing: { type: 'integer', required: true },
+                  total: { type: 'integer', required: true },
+                  rate: { type: 'number', required: true },
+                },
+              },
+              space: {
+                type: 'object',
+                required: true,
+                additionalProperties: false,
+                properties: {
+                  missing: { type: 'integer', required: true },
+                  total: { type: 'integer', required: true },
+                  rate: { type: 'number', required: true },
+                },
+              },
+              provenance: {
+                type: 'object',
+                required: true,
+                additionalProperties: false,
+                properties: {
+                  missing: { type: 'integer', required: true },
+                  total: { type: 'integer', required: true },
+                  rate: { type: 'number', required: true },
+                },
+              },
+              sourceIds: {
+                type: 'object',
+                required: true,
+                additionalProperties: false,
+                properties: {
+                  missing: { type: 'integer', required: true },
+                  total: { type: 'integer', required: true },
+                  rate: { type: 'number', required: true },
+                },
+              },
+            },
+          },
+          unclassified: { type: 'integer', required: true },
+          clusters: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                tag: { type: 'string', required: true },
+                count: { type: 'integer', required: true },
+                suggested: { type: 'string' },
+                samples: {
+                  type: 'array',
+                  required: true,
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', required: true },
+                      title: { type: 'string', required: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          clustered: { type: 'integer', required: true },
+          uncovered: { type: 'integer', required: true },
+          zeroTag: { type: 'integer', required: true },
+          byEffectiveType: { type: 'object', additionalProperties: true, required: true },
+        },
+      },
+      render: (_args, value) => {
+        const pct = (n: number, d: number) => (d === 0 ? '—' : `${((n / d) * 100).toFixed(1)}%`)
+        const gapLine = (label: string, gap: { missing: number; total: number; rate: number }) =>
+          `${label} 覆盖 ${pct(gap.total - gap.missing, gap.total)}（缺 ${gap.missing}）`
+        const lines = [
+          `编目工作面（只读）：应编目 **${value.denominator}** 条`,
+          `分母排除：归档 ${value.excluded.archived} · 冷存档 ${value.excluded.coldCheckpoint} · compaction ${value.excluded.compaction} · **概要 ${value.excluded.summary}**（压缩桶，不属于七类任何一类）`,
+          `四维缺口（各自独立，不合成分数）：${gapLine('memType', value.gaps.memType)}｜${gapLine('space', value.gaps.space)}｜${gapLine('provenance', value.gaps.provenance)}｜${gapLine('sourceIds', value.gaps.sourceIds)}`,
+          `未分类 **${value.unclassified}** 条：${value.clusters.length} 个簇覆盖 ${value.clustered}（${pct(value.clustered, value.unclassified)}）· 覆盖不到 **${value.uncovered}** · 其中零标签 ${value.zeroTag}`,
+        ]
+        for (const cluster of value.clusters) {
+          const hint = cluster.suggested === undefined ? '（无建议）' : `→ 建议 ${cluster.suggested}`
+          const samples = cluster.samples.map((s) => `${s.id.slice(0, 8)} ${s.title.slice(0, 28)}`).join(' / ')
+          lines.push(`  - [${cluster.tag}] ×${cluster.count} ${hint}｜样本 ${samples}`)
+        }
+        lines.push('⚠ 建议是**提问不是答案**（标签可能同时指两类）；「覆盖不到」的那批是长尾，只能逐条判。本工具不改任何条目。')
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      // 含归档取全量：`catalogReport` 自己算分母与排除项（传剔过的集合会让「排除」永远显示 0）
+      const { entries } = gatherReadable(deps, {
+        readScopes,
+        includeArchive: true,
+        view,
+        explicitScope: args.scope,
+      })
+      return catalogReport(entries, {
+        ...(args.maxClusters !== undefined ? { maxClusters: args.maxClusters } : {}),
+        ...(args.minClusterSize !== undefined ? { minClusterSize: args.minClusterSize } : {}),
+      })
+    },
+  })
+}
+
 function buildReviewMark(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_review_mark',
@@ -4803,6 +4961,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildMerge(deps),
     buildStats(deps),
     buildAudit(deps),
+    buildCatalog(deps),
     buildReviewMark(deps),
     buildTrail(deps),
     buildRecompress(deps),
