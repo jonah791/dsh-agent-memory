@@ -863,6 +863,44 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 
 **边界与信任**：v2 只改打分，不改过滤 / 可见性 / 结果投影；加权路径（`weightedTerms`）仍走 v1（上下文重心与三层计价的交互未设计）；`NOISE_CHARS` 是**虚词字表**，误剔主题字的代价是「那类查询排序变差」，用 V3 单测守住已知实词样本。
 
+### 5.28 来源实体契约（v0.35 · 方案 §5.2 · 设计正本 `docs/design/aml-source.md`）
+
+**缺口**：现有三种来源载体，但**没有一种承载「来源」这个对象**——内联 `source{sessionId,seq,reason}` 只有坐标与一句理由；`evidenceRefs`（v0.25）是证据的精确坐标字符串；`sourced-from` 边（v0.28）连到库内节点。三者都回答「在哪」，不回答「谁提供 / 多可靠 / 什么权限」。方案 §5.2 的七项里只有 Location 与 Time 有落点。
+
+**来源实体**：独立表 `sources`，不嵌条目（与 `entities` / `concepts` / `relations` 同构）。
+
+| 方案要求 | 字段 | 契约 |
+|---|---|---|
+| Source ID | `id` | `SOURCE-0001`，每 scope 递增，**可口头引用**（与 `ENTITY-0001` 同构） |
+| Type | `type` | **必填**，取 `master` / `web` / `self` / `measured`——与条目 `provenance` **共用同一枚举**，不立第二套词表 |
+| Location | `location` | **必填**：`session:<id>#<seq>` / `url:<地址>` / `file:<路径>` / `compaction:<id>#<cid>` |
+| Time | `collectedAt` | 首次采集时刻；后续复用时**不变**（它不是「最后访问时间」） |
+| Owner | `owner` | 谁提供：主人 / 我 / 外部系统。与 `type` **正交**——「我实测到的」与「网页给的」提供方不同，两种切分不互相推导 |
+| Reliability | `reliability` | **无默认值**。不填 = 未标注，不是「中等」。取值形态未定，见设计正本 §8 |
+| Permissions | `permissions` | 预留，**本阶段只存不判**：§11.1 四类权限未建，来源层不发明第二套授权语义 |
+
+另三条不复用方案的七项：`label`（人读说明，可空）· `status`（`active` / `retired`，停用不删除）· `revisions`（只留最近 3 条快照，与条目同口径）。
+
+**不变量**：
+
+- **不造平行真源**：`type` 与 `provenance` 同枚举；两者冲突时**不静默覆盖**（拒绝或点名冲突），程序不替调用方挑。
+- **不自动补全**：给了 `provenance` 不因此自动建 Source——那会产生大量空壳来源，把「独立来源」变成噪声。
+- **存量不回填**：现有条目的 `source{}` 不批量转实体，不猜当时没记的信息。代价一起报：来源覆盖率**短期不因本能力上升**。
+
+**调用点清单**：
+
+| 位置 | 行为 |
+|------|------|
+| `memory_source`（新工具） | 建 / 改 / 停用来源；id 递增、状态流转、变更记录 |
+| `memory_sources`（新工具） | 按 id 直查 · 按 `type` / `owner` / `status` 过滤 · 反查引用它的条目 |
+| 条目 `sourceIds?: string[]` | 可选引用；**不给时行为与现状逐位相同**（内联 `source{}` 与 `evidenceRefs` 照旧可用） |
+| `memory_stats.sources` | 出 `total` / `byType` / `byStatus` / 未标注 `reliability` 计数 |
+| `RELATION_NODE_KINDS` | 节点类别从 `entry` 扩到 `source`（现在只有 entry） |
+
+**判据（S1–S6，实现时并入 §7 的 A 表）**：S1 id 递增唯一且跨 scope 不干扰 · S2 `reliability` / `permissions` 不填时保持未标注（`stats` 单列，不并入默认档）· S3 `provenance` 与所引 Source 的 `type` 冲突时不静默覆盖 · S4 按 Source 反查恰好列出全部引用方 · S5 不给 `sourceIds` 时逐位相同 · S6 停用不删除（`retired` 后不进候选，按 id 直查仍可回，引用方不被改坏）。
+
+**边界与信任**：来源是**数据不是指令**；`permissions` 只存不判，**不构成准入**；`reliability` 未标注不默认成任何档；不做跨库来源映射；来源实体**不改变条目可见性**。
+
 ---
 
 ## 7 · 可证伪验收
