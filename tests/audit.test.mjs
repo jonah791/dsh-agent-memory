@@ -526,6 +526,32 @@ test('A31b memory_audit 不写轨迹、不改条目（与 recall 的区别）', 
   assert.equal(recorded, 0, '体检自身不是「读到某条记忆」，不应污染用量轨迹')
 })
 
+test('A31c ★空结果也必须落盘：「查了但没找到」是一次检索（v0.44 · 方案 §16.3）', async () => {
+  const { kv, exec } = setup()
+  seedRaw(kv, [entry({ id: 'e1', title: '关于压缩的条目', body: `压缩 上下文 ${'x '.repeat(40)}` })])
+  const records = []
+  const tools = createMemoryTools({
+    store: new MemoryStore(kv),
+    loadConfig: async () => CONFIG,
+    recordAccess: (r) => {
+      records.push(r)
+      return true
+    },
+  })
+  const byName2 = new Map(tools.map((t) => [t.name, t]))
+  const recall = byName2.get('recall')
+
+  await recall.execute({ query: '压缩' }, exec) // 命中
+  await recall.execute({ query: 'zzz根本不存在的词组zzz' }, exec) // 未命中
+
+  // 核心断言：两次调用都必须落盘。空结果被 `results.length > 0` 过滤掉的话，这里只会是 1 ——
+  // 而侧车里就永远不会有失败样本，任何「检索失败原因」都算不出（§16.3 的根缺口）。
+  assert.equal(records.length, 2, '命中与未命中都必须落盘——空结果不能静默消失')
+  assert.ok(records[0].ids.length > 0, '命中那次要带 id')
+  assert.deepEqual(records[1].ids, [], '未命中的 ids 必须是空数组（空数组是最简的失败样本形态）')
+  assert.equal(records[1].source, 'recall', '来源必须可辨：主动查询 ≠ 自动注入')
+})
+
 // ---------- A44 索引范围：「看不见」≠「没有」 ----------
 
 test('A44 索引范围：默认视图不含归档 ⇒ 如实报出「另有 N 条承重原料不在集合内」', async () => {

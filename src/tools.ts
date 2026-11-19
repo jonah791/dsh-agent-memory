@@ -1065,8 +1065,12 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         collapseFamily: args.collapseFamily ?? false,
         ...(entityMatches.length > 0 ? { entityMatches } : {}),
       })
-      // 侧车用量轨迹（v0.6）：只交出命中 id，**绝不改条目**；失败静默（吞错在实现方）
-      if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined && result.results.length > 0) {
+      // 侧车用量轨迹（v0.6）：只交出命中 id，**绝不改条目**；失败静默（吞错在实现方）。
+      // ⚠ **空结果必须落盘**（v0.44 · 方案 §16.3）：此前这里是 `result.results.length > 0`，
+      // 于是「查了但没找到」从不被记录 ⇒ 空结果率结构性地恒为 0，任何「检索失败原因」都算不出。
+      // 读数层教训（第五次同形）：**「没记录」会被读成「没发生」**。空数组是最简的失败样本形态，
+      // 它不改变 `R7`（按条目·次算，空行贡献 0），只让「调用次数」这个分母变真。
+      if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
         void deps.recordAccess({
           atMs: Date.now(),
           source: 'recall',

@@ -320,11 +320,20 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
       maxBytes: config.autoInject.maxBytes,
       ...(weightedTerms.length > 0 ? { weightedTerms } : {}),
     })
-    if (digest.length === 0) return decision
+    // v0.44（方案 §16.3）：**空注入同样是一次检索**——此前这里直接 return，于是
+    // 「auto 从没命中过」这件事在侧车里完全不可见（读数层教训：没记录会被读成没发生）。
+    // `digest` 为空可能是没命中、也可能是命中后被 token 预算裁光，两者都算「这次什么也没给」，
+    // 所以记 `ids: []` 而不是 `probe.results`——记录的是**实际注入**，不是候选。
+    if (digest.length === 0) {
+      if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
+        void deps.recordAccess({ atMs: Date.now(), source: 'auto', role: view.role, ids: [] })
+      }
+      return decision
+    }
     // 本次命中的条目：与 buildAutoRecallDigest 内部同参同源（确定性 ⇒ 结果一致）
     const hitIds = probe.results.map((item) => item.id)
     for (const id of hitIds) injected.add(id)
-    if (hitIds.length > 0 && config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
+    if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
       void deps.recordAccess({ atMs: Date.now(), source: 'auto', role: view.role, ids: hitIds })
     }
 

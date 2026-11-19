@@ -286,7 +286,11 @@ usage   = 排序加权归因 Σ decay^pos（v0.12；无轨迹 ⇒ 恒 0，公式
 
 **输出形状**：`memory_audit({ scope?, role?, topN?, minChars?, includeArchive? })` → `{ summary: { total, chars, byBucket, charsByBucket }, groups: [{ key, kind/level/tag, count, chars, bucket }], candidates: [{ id, kind, title, bucket, score, reasons[], evidence }], notes[] }`。
 
-**逻辑轨迹（侧车，v0.6 起采集）**：`<DSH_HOME>/memory-access-trace.jsonl` —— 一行一次读命中：`{atMs, source:'recall'|'auto', role, ids:[…]}`。写入**只追加**（POSIX append，天然免锁）、**吞错**（失败即跳过，不影响 recall）、**按体积轮转**（超 `access_trace.max_bytes` 改名为 `.1` 重开），**绝不改条目**。审计器只读它，缺文件 ⇒ `usage=0`。
+**逻辑轨迹（侧车，v0.6 起采集）**：`<DSH_HOME>/memory-access-trace.jsonl` —— 一行一次**检索调用**（v0.44 起含空结果）：`{atMs, source:'recall'|'auto', role, ids:[…]}`，`ids` **可以为空数组**。写入**只追加**（POSIX append，天然免锁）、**吞错**（失败即跳过，不影响 recall）、**按体积轮转**（超 `access_trace.max_bytes` 改名为 `.1` 重开），**绝不改条目**。审计器只读它，缺文件 ⇒ `usage=0`。
+
+⚠ **「一行一次调用」而不是「一行一次命中」（v0.44 修）**：旧契约写的是「一行一次**读命中**」，实现据此在两条写入口都加了 `results.length > 0` / `hitIds.length > 0` 的过滤 ⇒ **空结果从不落盘**，侧车里 0 条失败样本，「检索失败原因」（方案 §16.3）因此结构性地无法计算。这是「读数层缺陷」的第五次同形，且**这次是契约措辞造成的**：措辞决定了实现边界，而不是实现漏了一步。⇒ 判据 A207。
+
+⚠ **两个分母别混**：`调用次数`（行数，线上 3539）≠ `返回条目·次`（Σ `ids`，线上 14,223，均值 4.02 条/次）。R7「失效误用率」用后者做分母（测返回结果的质量）；「空结果率」只能用前者。⚠ `auto` 路径的空注入落盘**没有单测**：`createAutoInject` 依赖 dsh agent 上下文，`tests/auto-inject.test.mjs` 只覆盖纯函数 ⇒ 该项只有线上验证。
 
 **硬约束（三条，均可断言）**：
 1. **只读**：跑完存储文件内容不变、`accessedAt` 不变（判据：跑前后字节级一致）
@@ -1311,6 +1315,7 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | A203 | **回忆与跨会话整合**：自然查询取回**同一条**且排第一；两个 `sessionId` 写的同主题记忆一次检索同时取回 | 同文件「S1」「S2」 | ✔ 已实测（单测） |
 | A204 | **遗忘场景端到端**：删除后默认视图查不到、归档视图能找回 | 同文件「S4」 | ✔ 已实测（单测） |
 | A206 | ★**类别来源三档与两个口径并列**（v0.43）：`memory_catalog.effectiveSources` 报 `explicit` / `derived-from-kind` / `unknown`；渲染把「字段存有率」与「有效分类率」并列——线上 1.4% vs 17.0%，差 13 倍。**只报前者会让「维度建了但没人用」成为唯一读法**，而真实边界是 83% 的存量（全是 `kind='knowledge'`）在语义上无法机械归类 | `tests/catalog.test.mjs`「C13」 | ✔ 已实测（单测；尸体：关掉派生 ⇒ 只有 C13 红） |
+| A207 | ★**空结果必须落盘**：「查了但没找到」是一次检索，侧车里必须有 `ids: []` 的记录——否则失败样本结构性缺失，「检索失败原因」（方案 §16.3）永远算不出。命中那次带 id、未命中那次空数组、`source` 两者都要可辨 | `tests/audit.test.mjs`「A31c」 | ✔ 已实测（单测；尸体：把 `results.length > 0` 加回去 ⇒ **只有 A31c 红**）。⚠ **边界**：`auto` 路径的空注入落盘**没有单测**（`createAutoInject` 依赖 dsh agent 上下文），只有线上验证 |
 | A205 | ★**分项相加 ≠ 净排除**：`excluded` 新增 `considered` 与 `net`；`net` 必须由「全量 − 分母」算，**不能**用四项相加——一条已归档的 summary 会同时进 `archived` 与 `summary`（线上实测重叠 **424** 条：净排除 1328 vs 四项相加 1752）。渲染并列四个分项时必须同时出现「不可相加」与「交集」 | `tests/catalog.test.mjs`「C1c」「C12」 | ✔ 已实测（单测；尸体：把 `net` 改成四项相加 ⇒ **只有 C1c 红**，C12 因样本无排除项而恒成立、不红——这条边界已写进判据注释，防止未来的我把它当成覆盖了自洽性） |
 | A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
