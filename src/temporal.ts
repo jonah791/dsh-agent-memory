@@ -119,10 +119,17 @@ export const MAX_WATCH_CHARS = 200
 const MAX_RELATIVE_DAYS = 3650
 
 const DAY_MS = 86_400_000
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
+/**
+ * 日期 / ISO 时刻的**形态闸门**——`export` 给 `temporal-dual.ts`（双时态）复用。
+ *
+ * 为什么导出而不是各写一份：这两个正则就是「什么算合法日期」的定义。**同一条判据两份实现，
+ * 迟早一份改了另一份没改**（本仓反复出现的失效形状）；而且形态白名单的收窄理由
+ * （见 `parseStoredDeadline`）只写在一处，复制会丢掉理由。
+ */
+export const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const REL_RE = /^\+(\d+)([dw])$/
 /** ISO 8601 日期时间（`YYYY-MM-DDThh:mm…`）的**形态**闸门——见 `parseStoredDeadline` 的收窄理由 */
-const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/
+export const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/
 
 /** `Date` → `YYYY-MM-DD`（UTC 日） */
 export function isoDate(date: Date): string {

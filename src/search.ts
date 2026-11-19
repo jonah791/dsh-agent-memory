@@ -1190,6 +1190,8 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     // ⚠ 三个字段都**原样透出**，不在这里判定「是否过时」：字段存在即已替代
     // （判据住 `succession.ts::isSuperseded`），渲染层只负责把它印出来。
     ...(entry.validAfter !== undefined ? { validAfter: entry.validAfter } : {}),
+    ...(entry.occurredAt !== undefined ? { occurredAt: entry.occurredAt } : {}),
+    ...(entry.expiry !== undefined ? { expiry: entry.expiry } : {}),
     ...(entry.supersededBy !== undefined ? { supersededBy: entry.supersededBy } : {}),
     ...(entry.supersedes !== undefined ? { supersedes: entry.supersedes } : {}),
     // 来源类型（v0.21.0）——**同一投影点、同一教训**（v0.13/v0.14/v0.15 连续三版都栽在漏这里）。

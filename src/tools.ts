@@ -41,6 +41,7 @@ import { countBySpace, filterBySpace, parseSpaceArg, parseSpaceFilterArg, spaceT
 import { countByLifecycle, filterByLifecycle, lifecycleTag, parseLifecycleFilterArg, parseStatusArg } from './lifecycle.ts'
 import { evidenceTag, formatEvidenceRef, parseEvidenceRefsArg } from './evidence.ts'
 import { archivalOf, archiveReasonTag, countByArchiveReason, countByProvenance, filterByProvenance, parseArchiveReasonTypeArg, parseProvenanceArg, provenanceTag, PROVENANCE_TYPES } from './archive.ts'
+import { assertExpiryOrder, countByExpiry, expiryTag, filterByExpiryState, occurredAtTag, parseExpiryStateFilter, parseMomentArg, type ExpiryState } from './temporal-dual.ts'
 import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, parseValidAfterArg, shortId, supersededByTag, supersedesTag, validAfterTag } from './succession.ts'
 import { auditMemory } from './audit.ts'
 import { mergeForgetPlans, planForget } from './forget.ts'
@@ -440,6 +441,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       watchFor: { type: 'array', items: { type: 'string' }, description: '观察条件（v0.15.0）：**什么样的新信息会让这条失效**（1–8 条短句，每条 ≤200 字）。**为什么值得填**（论文实测）：决策时写下的观察条件能达 92.2% 的关键新信息、只带 20 条无关噪音；而「把全部背景事实都索引上」虽达 100%，却带 89 条噪音——**少而准**才划算。**怎么填**：写「什么事件会让它不成立」，点名具体实体（含它的**别名**与**上游依赖**），**略去用不到的**。例：`["DuckDuckGo 通道可用率重测低于 80%", "busDir 或 web 端口改变", "该插件被卸载或改名"]`。**写入时机只有一次——就是现在**（我记得为什么这样判断）；事后再补，我想不起当时在等什么。它会被印在 recall 结果里，命中的那一刻我就看见「它在等什么」。' },
       provenance: { type: 'string', description: '来源类型（v0.21.0）：这条记忆的信息**从哪来**——`master`（主人说的：原话 / 指令 / 定调 / 纠正）/ `web`（外部：网页 / 论文 / 他人代码 / 第三方工具输出）/ `self`（**我自己推出或提议的**）/ `measured`（我实测 / 运行 / 读数得到的）。**为什么填**：`grounding` 只覆盖「需要授权判断」的条目（约 7%），技术结论、论文笔记、实测读数全落在它之外——于是「这条是我实测的还是我从网上读来的」在库里无法区分，而两者该怎么用完全不同（读数要问样本多大，网上读来的要回原文核对）。**什么时候不填**：真的想不起来源时留空（省略 = 不知道，不是某个默认值）。⚠ 与 `grounding` 不冲突、可同时填：一条「主人否决了 RAG」既是 `master` 又可以是 `established`。' },
       cue: { type: 'array', items: { type: 'string' }, description: '情境形状（v0.16.0）：这条经验**在什么形状的情境下该被取出使用**（1–8 条短句）。与另两维**不可互相替代**：`aliases` 管**入口词**（可能被怎么问）、`watchFor` 管**时效**（什么新信息会让它失效）、`cue` 管**应用场景**（什么处境该用它）。**怎么填**：写情境的**形状**而不是本次任务的事实，才能在**另一件事**上触发。论文给的判据线（Harness² 的 experience cue）：太泛无用（`be thorough`）；太具体永不触发（`某日某费用涨到 250`）；正好是「当仪器执行若干顺序动作、且其中一个会终止行动者自身的权限时，把终止性动作排在最后」。它会被印在 recall 里——命中的那一刻我就看见「什么处境该用它」。' },
+      occurredAt: { type: 'string', description: '事件时间（v0.38 · 方案 §9.3）：**这条描述的事情本身何时发生**——`YYYY-MM-DD` 或 ISO 时刻（如 `2026-11-15T21:00:00+08:00`）。与 `createdAt`（我何时记下）**不是一回事**：11-19 追记 11-15 的决定时，本字段是 11-15。与 `validAfter`（结论从何时适用）也**不可合并**——情景类记忆没有「生效」，只有发生时刻。**什么时候填**：事件的真实时刻早于我写下它的时刻时（追记 / 复盘 / 引用旧对话）。⚠ 省略 = 不知道，**不是**等于 `createdAt`。' },
+      expiry: { type: 'string', description: '失效时刻（v0.38 · 方案 §9.3）：**这条到何时不再成立**——`YYYY-MM-DD`（按当日末刻）或 ISO 时刻。与三个邻居都不可合并：`reviewAfter` 是「我该何时**重看**」（提醒维，到期≠作废）；`supersededBy` 是「被哪一条顶掉」（有替代者）；`archived` 是「我决定不再用」（处置）。**什么时候填**：结论有明确失效点且不会有人来替代它时（会议安排 / 临时状态 / 有时效的额度）。⚠ 省略 = 不知道（**不等于**「永久有效」）；过期**不改生命周期、不自动归档**，只在读取与注入时打 `⌛已失效` 标记。' },
       validAfter: { type: 'string', description: '生效时间（v0.24.0）：这条结论**从何时开始成立**——`YYYY-MM-DD`（如 2026-11-01）或 ISO 时刻（如 2026-11-01T09:00:00Z，取 UTC 日）。**与 createdAt 不是一回事**：createdAt 答「我什么时候记下」，本字段答「这件事什么时候开始为真」——主人的定调可能今天记下、针对的是上周的决定。**什么时候填**：这条结论所描述的事**早于/晚于**我记下它的时刻时（追记历史决定、追认已生效的规则、登记从某日起适用的约定）。**什么时候不填**：写入时刻就是事实起点时（大多数情况）——⚠ **空是常态，填是例外**；省略 = 不知道，**不是**「等于 createdAt」（别拿它凑时间线）。⚠ **不接受相对写法**（`+7d`）——它答既成事实，不是死线（要死线请用 reviewAfter）。' },
       sourceIds: {
         type: 'array',
@@ -527,6 +530,11 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       // （静默当「不知道」正是本维度要防的失败：我以为记下了生效时间、其实没记，
       // 未来的我照旧把「写作时刻」当「事实起点」）。⚠ 不收相对写法（理由见 succession.ts）。
       const validAfter = parseValidAfterArg(args.validAfter, 'remember.validAfter')
+      // 双时态（v0.38）：解析后立刻校验区间——`expiry < validAfter` 意味着「从未有效过」，
+      // 几乎一定是笔误，静默接受会让一条永不生效的记录混进库里。
+      const occurredAt = parseMomentArg(args.occurredAt, 'remember.occurredAt')
+      const expiry = parseMomentArg(args.expiry, 'remember.expiry')
+      assertExpiryOrder(expiry, validAfter, 'remember.expiry')
       // 执行位置（v0.23.0）：与 `dsh-project-state` 联动的**那一跳**。
       //   - `project` 缺省**自动判定**：cwd 属于哪个已注册项目是**查表**（事实），不是判断；
       //   - `taskId` **不自动**：「这条记忆是否来自这个任务」是判断，不由机制替我断言
@@ -630,6 +638,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         ...(sourceIds !== undefined && sourceIds.length > 0 ? { sourceIds } : {}),
         // 生效时间（v0.24.0）：只在新建时盖章（store 层同形处理——命中已有条目时保留原值）。
         ...(validAfter !== undefined ? { validAfter } : {}),
+        ...(occurredAt !== undefined ? { occurredAt } : {}),
+        ...(expiry !== undefined ? { expiry } : {}),
         // 执行位置（v0.23.0）：两级不可拆——taskId 没有 project 时不落盘（见 execution.ts）。
         ...(project !== undefined ? { project } : {}),
         ...(project !== undefined && taskId !== undefined ? { taskId } : {}),
@@ -692,6 +702,8 @@ export const DIMENSION_ITEM_FIELDS = {
   archivedReasonType: { type: 'string', enum: ['refuted', 'merged', 'superseded', 'stale', 'capacity', 'deleted', 'unspecified'], description: '归档原因类型（v0.21.0 · v0.27 扩 `deleted`）：这条**怎么没了**——仅已归档条目出现。它决定引用它的活跃条目该怎么处置：`refuted`/`superseded`/`stale` ⇒ 结论不能再当依据（引用方必须撤或降置信）；`merged`/`capacity` ⇒ 内容仍在（换了位置 / 只是清位）；`deleted` ⇒ **我删掉它**（用户意图，区别于「它退役了」）；`unspecified` = 未判断（v0.20 及以前的存量归档）。' },
   archivedReason: { type: 'string', description: '归档原因详情（v0.21.0）：类型之外的人类可读补充；仅已归档且给了原因时出现。' },
   validAfter: { type: 'string', description: '生效时间（v0.24.0）：这条结论**从何时开始成立**（`YYYY-MM-DD`）。与 `createdAt`（我何时记下）不同——主人的定调可能今天记下、针对的是上周的决定。未设的条目省略该键（⚠ 省略 = **不知道**，**不是**「等于 createdAt」）。' },
+  occurredAt: { type: 'string', description: '事件时间（v0.38 · 方案 §9.3）：这条描述的事情**本身何时发生**（`YYYY-MM-DD` 或 ISO 时刻）。与 `createdAt`（我何时记下）、`validAfter`（结论从何时适用）三者不可合并。未设的条目省略该键（⚠ 省略 = **不知道**）。' },
+  expiry: { type: 'string', description: '失效时刻（v0.38 · 方案 §9.3）：这条**到何时不再成立**。与 `reviewAfter`（我该何时重看）不可合并——前者是事实维、后者是提醒维。未设的条目省略该键（⚠ 省略 = **不知道**，不等于「永久有效」也不等于「已失效」）。' },
   supersededBy: { type: 'string', description: '被替代（v0.24.0）：替代这条的记忆 id（**字段存在即已过时**；只记一格，不递归成链）。⚠ 旧条目**不会被删除**，仍会返回——保留原值正是为了对照（「以前是 X，因为…」）。' },
   supersedes: { type: 'array', items: { type: 'string' }, description: '替代了谁（v0.24.0）：被这条顶掉的记忆 id 列表（只记**直接**替代对象，不递归展开祖先）。' },
   evidenceRefs: {
@@ -756,6 +768,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` = **只看我自己提的、主人未回应的事**——自查「我有没有把提议当成定论」时用它；`rejected` = 只看主人否决过的（防我旧事重提）；`established` = 只看主人明确说过的。缺省 = 不过滤。⚠ 同为**可选筛子**，不是可见性边界。' },
       provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源过滤（v0.21.0）：只看某类来源的条目——`master`（主人说的）/ `web`（外部：网页·论文）/ `self`（我推的·我提议的）/ `measured`（我实测的）。缺省 = 不过滤。**典型用法**：`self` = 自查「哪些结论的权威只在我这边」；`web` = 找出「该回原文核对」的条目；`master` = 「主人到底说过哪些」。⚠ 与 grounding 不同：那个筛「主人回应了没有」，这个筛「信息从哪来」。' },
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看**该重看**的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`（还早）。典型用法：`["expired","due-soon"]` = 「**我的哪些结论该重看了**」。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目在任何取值下都不返回（它们的时效状态是「**不知道**」，不是「有效」）。' },
+      expiryState: { type: 'array', items: { type: 'string', enum: ['active', 'expired', 'unset'] }, description: '失效状态过滤（v0.38 · 方案 §9.3）：只看某几档——`expired` **已失效**（时间到了，别再当事实用）/ `active` 还没到 / `unset` 未设失效时刻。⚠ 与 `staleness` **互不干扰**：那个筛「复查死线」（提醒维），这个筛「内容是否已失效」（事实维），可同时用。缺省 = 不过滤。' },
       superseded: { type: 'string', description: '替代状态筛（v0.24.0）：`current` = 只看**还没被替代**的条目 / `superseded` = 只看**已被替代**的条目。缺省 = 不过滤。⚠ **缺省不隐藏已过时条目是刻意的**——对照是它的全部价值（旧值里往往写着「以前为什么这么定」）。本筛子是**审查入口**：「我有哪些结论已经被顶掉了」。' },
       collapseFamily: { type: 'boolean', description: '家族折叠（v0.16.0 · 论文 Memory Echo 的 Family 组件）：把**候选池内**的「时间桶概要 + 它 archiveRef 的原料」压成**每族一位**（族内得分最高者为代表），其余不占本次服务位。论文依据：「Repeated writes therefore add records, not independent votes」（arXiv 2610.17763v1 §5.1）——同一来源的派生不该当多个独立证据占位。**缺省 false**：论文消融显示 Family 单独上线会把准确率从 0.825 打到 0.651（≈ −33 题），须与「当前事实优先」配对才安全，故先做成可选。⚠ 只在 `includeArchive: true` 时有实际效果（默认视图下原料已冷归档，不会与概要同时命中）；折叠不删数据，只是本次不占位。' },
       expandThesaurus: { type: 'boolean', description: '按主题词表扩展查询（v0.29.0 · 方案 §4.2）：把查询里出现的概念换成它的**全部同义词**再检索（查「记忆库」也能命中写成「智能体记忆」的条目）。**缺省 false**（存量检索行为逐字不变）；展开的词会出现在返回的 `expandedTerms` 里，**看得见才可复核**。词表为空时静默不扩展（不是错误）。前提：该概念已在词表中且适用中（`memory_concept` 建立、`memory_thesaurus` 查看）。' },
@@ -877,6 +890,9 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // 「未设死线」留空）——同 subjectTag / groundingTag 的教训：标记要挑着打，
           // 全打等于没打。它放前缀的**最前**：过期是「这条结论可能已经不成立」，
           // 比「这是谁的提议」更该被第一眼看见。
+          // 已失效（v0.38）：与「已过时」（有替代者）并列，比「该复查」（只是提醒）硬。
+          // 三种标记互不吃掉——一条可以既被取代、又已失效、又该复查。
+          const expiryNote = expiryTag(item.expiry, renderNow)
           const stalenessNote = stalenessTag(item.reviewAfter, renderNow)
           // 观察条件（v0.15.0）：印在结果行尾 = **免费路由**。论文的 router 服务于
           // 「持续新闻流 × 大量开放决策」；而我的输入流就是我的注意力——`recall` 每轮都在
@@ -908,12 +924,13 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           // validAfter（自何时成立）与 supersedes（替代了谁）都是元数据，放句尾。
           const supersededNote = supersededByTag(item.supersededBy)
           const validAfterNote = validAfterTag(item.validAfter)
+          const occurredAtNote = occurredAtTag(item.occurredAt)
           const supersedesNote = supersedesTag(item.supersedes)
           // 空间归属 / 生命周期标记（v0.27.0）：`〔个人〕` 只给已标注条目；
           // 生命周期标记只给 pending / disputed / deleted 三态（其余由既有 tag 渲染，不重复）
           const spaceNote = spaceTag(item.space)
           const lifecycleNote = lifecycleTag(item.lifecycle)
-          return `- ${lifecycleNote}${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote}${memTypeNote}${spaceNote} 相关度${item.score}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${relatedNote}`
+          return `- ${lifecycleNote}${supersededNote}${expiryNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}@${item.scope}${levelNote}${memTypeNote}${spaceNote} 相关度${item.score}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${occurredAtNote.length > 0 ? ' ' + occurredAtNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}${relatedNote}`
         })
         return [{
           type: 'text',
@@ -979,12 +996,18 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       // 空间 / 生命周期筛（v0.27.0）：同为可选筛子，**未给时零拷贝透传**（存量行为逐字节不变）。
       const spaces = parseSpaceFilterArg(args.space, 'recall.space')
       const now = new Date()
-      const entries = filterByStaleness(
-        filterByProvenance(
-          filterByGrounding(filterByExecution(filterBySubject(filterBySuccession(gathered.entries, superseded), subject), execPos), grounding),
-          provenance,
+      // 失效过滤（v0.38）：可选筛子，未给 = 零拷贝透传（与 staleness 同形但不同维）
+      const expiryStates = parseExpiryStateFilter(args.expiryState, 'recall.expiryState')
+      const entries = filterByExpiryState(
+        filterByStaleness(
+          filterByProvenance(
+            filterByGrounding(filterByExecution(filterBySubject(filterBySuccession(gathered.entries, superseded), subject), execPos), grounding),
+            provenance,
+          ),
+          staleness,
+          now,
         ),
-        staleness,
+        expiryStates ?? [],
         now,
       )
       // 词表扩展（v0.29.0 · 方案 §4.2）：**开了才扩展**（缺省 false ⇒ 存量检索行为逐字不变）。
@@ -1204,6 +1227,8 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       watchFor: { type: 'array', items: { type: 'string' }, description: '时效维（v0.15.0）——**整体替换**观察条件：给 1–8 条（每条 ≤200 字）= 设置；给**空数组** = 清空；缺省 = 不动。' },
       provenance: { type: 'string', description: '来源类型（v0.21.0）——**显式纠正 / 回填**已存在条目的「信息从哪来」：给 `master`/`web`/`self`/`measured` = 设置，给空字符串 = 清除回未标注，缺省 = 不动。**主要用途是回填**：存量条目写入时还没有这个字段，而「这条是主人说的还是我从网页读来的」决定它该怎么被用；批量回填请先用 recall 定位 id。' },
       validAfter: { type: 'string', description: '生效时间（v0.24.0）——**显式纠正 / 回填**「这条结论从何时开始成立」：给 `YYYY-MM-DD`（或 ISO 时刻，取 UTC 日）= 设置；给**空字符串** = 清除（回到「不知道」）；缺省 = 不动。**主要用途是回填**：存量条目写入时还没有这个字段，而「这件事从何时为真」是我事后仍能判断的事实（无需当时在场）。⚠ 不接受相对写法（`+7d`）；要设死线请用 `reviewAfter`。' },
+      occurredAt: { type: 'string', description: '事件时间（v0.38 · 方案 §9.3）——**显式纠正 / 回填**「这件事本身何时发生」：给 `YYYY-MM-DD` 或 ISO 时刻 = 设置；给**空字符串** = 清除（回到「不知道」）；缺省 = 不动。典型用途：追记时把「我何时记下」与「事情何时发生」分开。⚠ 省略 ≠ 等于 `createdAt`。' },
+      expiry: { type: 'string', description: '失效时刻（v0.38 · 方案 §9.3）——给 `YYYY-MM-DD`（按当日末刻）或 ISO 时刻 = 设置；给**空字符串** = 清除（回到「不知道」，**不是**「永久有效」）；缺省 = 不动。⚠ 与 `reviewAfter` 不同维：那个是「该何时重看」，这个是「到何时不再成立」。⚠ 若与既有 `validAfter` 冲突（失效早于生效）⇒ **本调用被拒**（区间为空几乎一定是笔误）。' },
     },
     output: {
       schema: {
@@ -1300,6 +1325,20 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       if (args.validAfter !== undefined) {
         patch.validAfter = parseValidAfterArg(args.validAfter, 'update.validAfter') ?? null
       }
+      // 双时态（v0.38）：三态同 subject（给值 = 设置 / 空串 = 清除 / 缺省 = 不动）。
+      if (args.occurredAt !== undefined) {
+        patch.occurredAt = parseMomentArg(args.occurredAt, 'update.occurredAt') ?? null
+      }
+      if (args.expiry !== undefined) {
+        patch.expiry = parseMomentArg(args.expiry, 'update.expiry') ?? null
+      }
+      // 区间校验按「修改**之后**的状态」判：只给 expiry 而条目已有 validAfter 时，
+      // 冲突发生在两者之间——只看本次给的值会漏掉这种。
+      assertExpiryOrder(
+        patch.expiry === null ? undefined : (patch.expiry ?? entry.expiry),
+        patch.validAfter === null ? undefined : (patch.validAfter ?? entry.validAfter),
+        'update.expiry',
+      )
       // 执行位置显式纠正 / 清除（v0.23.0）：三态同 subject（给值 = 设置 / 空串 = 清除 / 缺省 = 不动）。
       // ⚠ 两条与**新建**路径刻意不同的判断（理由见 `execution.ts::parseExecutionId` 注释）：
       //   ① 单给 taskId 在这里**可能合法**——条目若已有 project，就地补任务 id 是正当操作
@@ -1987,6 +2026,17 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
               withPermissions: { type: 'integer', required: true, description: '带权限的（本阶段只存不判，不构成准入）' },
             },
           },
+          expiry: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            description: '双时态·失效时刻（v0.38 · 方案 §9.3）：三档读数。⚠ 与 `byStaleness` **不是同一维**——那个是「该重看」（提醒维），这个是「已不成立」（事实维）。',
+            properties: {
+              active: { type: 'integer', required: true, description: '还没到失效时刻' },
+              expired: { type: 'integer', required: true, description: '**已失效**：时间到了，别再当事实用' },
+              unset: { type: 'integer', required: true, description: '未设失效时刻（**不是「永久有效」**——是「不知道」）' },
+            },
+          },
           audit: {
             type: 'object',
             additionalProperties: false,
@@ -2038,6 +2088,9 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           + `\n来源实体：${value.sources.wired
             ? `${value.sources.total} 个来源（适用 ${value.sources.active} / 停用 ${value.sources.retired}；未标注可靠度 ${value.sources.unlabeledReliability} / 带提供方 ${value.sources.withOwner} / 带权限 ${value.sources.withPermissions}）`
             : '未接线（sources 表未装配）——此处的 0 不代表来源库为空'}`
+          // 双时态（v0.38 · 方案 §9.3）：单独一行——「几条已失效」是行动信号（别再拿它们当事实）
+          + `
+失效时刻：${value.expiry.expired} 条**已失效** / ${value.expiry.active} 条未到期 / ${value.expiry.unset} 条未设`
           // 操作者审计流（v0.37 · 方案 §11.4）：同 relations / sources——wired=false 必须看得见。
           // 「准入拒绝 0」单独给数：它不是「零违规」，只说明没有拒绝被记录（放行不记是设计）。
           + `\n审计流：${value.audit.wired
@@ -2161,6 +2214,8 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
             withPermissions: stats.withPermissions,
           }
         })(),
+        // 双时态（v0.38）：三档之和 == total；「未设」单列（不并入「有效」——不知道不是有效）
+        expiry: countByExpiry(entries, new Date()),
         // 操作者审计流（v0.37 · 方案 §11.4）：同 concepts / entities / sources——`wired=false` 与「零事件」必须可区分。
         // ⚠ 「准入拒绝 0」不是「零违规」：它只说明**没有拒绝被记录**（放行不记是设计）。
         audit: (() => {
@@ -2214,6 +2269,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` / `rejected` / `scoped` / `established`。缺省 = 不过滤。用于翻档案自查（如「我提过哪些主人没回应的方案」）。' },
       provenance: { type: 'string', enum: ['master', 'web', 'self', 'measured'], description: '来源过滤（v0.21.0）：`master` / `web` / `self` / `measured`。缺省 = 不过滤。用于翻档案自查（如「我读过的东西都记了些什么」「哪些结论是我自己推的」）。' },
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看某档时效状态的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`。用于**按时间线**翻「哪些结论该重看了」（recall 要查询词，这里不要）。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目时效状态是「不知道」，不是「有效」。' },
+      expiryState: { type: 'array', items: { type: 'string', enum: ['active', 'expired', 'unset'] }, description: '失效状态过滤（v0.38 · 方案 §9.3）：只看某几档——`expired` **已失效**（时间到了，别再当事实用）/ `active` 还没到 / `unset` 未设失效时刻。⚠ 与 `staleness` **互不干扰**：那个筛「复查死线」（提醒维），这个筛「内容是否已失效」（事实维），可同时用。缺省 = 不过滤。' },
       superseded: { type: 'string', description: '替代状态筛（v0.24.0）：`current`（还没被替代）/ `superseded`（已被替代）。缺省 = 不过滤，**已过时条目默认仍会出现**（对照是它的全部价值）。用途：翻档案时只挑「已经作废的那批」看演替史。' },
     },
     output: {
@@ -2276,6 +2332,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
           // 文档承诺与实现不符。标记要挑着打：只凸显需警觉的档位，其余留空。
           const items = group.items
             .map((item) => {
+              const expiryNote = expiryTag(item.expiry, renderNow)
               const stalenessNote = stalenessTag(item.reviewAfter, renderNow)
               const subjectNote = subjectTag(normalizeSubject(item.subject))
               const groundingNote = groundingTag(normalizeGrounding(item.grounding))
@@ -2297,8 +2354,9 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               // （同一事实两个界面不能长得不一样）。已过时放最前，理由同 recall。
               const supersededNote = supersededByTag(item.supersededBy)
               const validAfterNote = validAfterTag(item.validAfter)
+              const occurredAtNote = occurredAtTag(item.occurredAt)
               const supersedesNote = supersedesTag(item.supersedes)
-              return `  - ${lifecycleTag(item.lifecycle)}${supersededNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}${memTypeNote}${spaceTag(item.space)}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}`
+              return `  - ${lifecycleTag(item.lifecycle)}${supersededNote}${expiryNote}${stalenessNote}${subjectNote}${groundingNote}${transcriptiveNote}${provenanceNote}${evidenceNote}${archiveNote}${projectNote}[${item.kind}${memTypeNote}${spaceTag(item.space)}] ${item.title}(id=${item.id})${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}${occurredAtNote.length > 0 ? ' ' + occurredAtNote : ''}${watchNote.length > 0 ? ' ' + watchNote : ''}${cueNote.length > 0 ? ' ' + cueNote : ''}${supersedesNote}`
             })
             .join('\n')
           return `${group.label}${levelNote}（${group.items.length} 条）：\n${items}`
@@ -2330,6 +2388,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       // 时效维筛（v0.15.0）：第三级同为可选筛子。加在 browse 上不是「为对称而对称」——
       // **审查入口必须在所有读路径上可达**：否则「我以为能翻到，结果那个工具不支持」
       // 会复现 2026-09-26 那个坑（知道标题却拿不到 id，因为 render 层漏了字段）。
+      const expiryStates = parseExpiryStateFilter(args.expiryState, 'memory_browse.expiryState')
       const entries = filterByLifecycle(
         filterBySpace(
           filterByMemType(
@@ -2359,7 +2418,9 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
         ),
         statuses,
       )
-      const result = browseEntries(entries, {
+      // 失效过滤（v0.38）：可选筛子，未给 = 零拷贝透传
+      const entriesByExpiry = filterByExpiryState(entries, expiryStates ?? [], new Date())
+      const result = browseEntries(entriesByExpiry, {
         kind: args.kind,
         tags: args.tags,
         since: args.since,

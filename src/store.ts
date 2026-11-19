@@ -155,6 +155,10 @@ export interface EntryDraft {
    * ⚠ 无默认值：不给 = **不知道**（不是「等于 createdAt」——理由见 `types.ts::Entry.validAfter`）。
    */
   validAfter?: string
+  /** 事件时间（v0.38 · 方案 §9.3）：这条描述的事情本身何时发生；无默认值（不给 = 不知道）。 */
+  occurredAt?: string
+  /** 失效时刻（v0.38 · 方案 §9.3）：这条到何时不再成立；无默认值（不给 = 不知道，不等于「永久有效」）。 */
+  expiry?: string
   /**
    * 来源类型（v0.21.0）：这条记忆的**信息从哪来**（`master` / `web` / `self` / `measured`）。
    *
@@ -248,6 +252,10 @@ export interface EntryPatch {
    * 是我**事后仍能判断**的事实（无需当时在场）——禁止转移等于让几百条存量永远补不上。
    */
   validAfter?: string | null
+  /** 事件时间（v0.38）：`null` = 清除回「不知道」 */
+  occurredAt?: string | null
+  /** 失效时刻（v0.38）：`null` = 清除回「不知道」 */
+  expiry?: string | null
   /**
    * 替代关系（v0.24.0）——**唯一写入口是 `memory_supersede`**，`update` 工具不暴露。
    *
@@ -422,6 +430,8 @@ export class MemoryStore {
       // 生效时间（v0.24.0）：只在新建时盖章（与 reviewAfter 同形——命中已有条目时保留原值，
       // 理由见 EntryDraft.validAfter 注释）。只有**有值**时才出现（无损 JSON 纪律）。
       ...(draft.validAfter !== undefined ? { validAfter: draft.validAfter } : {}),
+      ...(draft.occurredAt !== undefined ? { occurredAt: draft.occurredAt } : {}),
+      ...(draft.expiry !== undefined ? { expiry: draft.expiry } : {}),
       // 来源类型（v0.21.0）：只在新建时盖章（与 subject/grounding 同形——合并路径保留原标注，
       // 理由见 EntryDraft.provenance 注释）。
       ...(draft.provenance !== undefined ? { provenance: draft.provenance } : {}),
@@ -522,6 +532,14 @@ export class MemoryStore {
     if (patch.validAfter !== undefined) {
       if (patch.validAfter === null) delete updated.validAfter
       else updated.validAfter = patch.validAfter
+    }
+    if (patch.occurredAt !== undefined) {
+      if (patch.occurredAt === null) delete updated.occurredAt
+      else updated.occurredAt = patch.occurredAt
+    }
+    if (patch.expiry !== undefined) {
+      if (patch.expiry === null) delete updated.expiry
+      else updated.expiry = patch.expiry
     }
     // 替代关系（v0.24.0）：三态同 subject。**唯一写入口是 memory_supersede**——
     // 存储层保留三态是为了让那条成对写路径与将来的迁移脚本共用一条路（见 EntryPatch 注释）。

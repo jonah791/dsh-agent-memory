@@ -24,6 +24,7 @@ import { executionTag } from './execution.ts'
 import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
 import { supersededByTag } from './succession.ts'
+import { expiryTag } from './temporal-dual.ts'
 import { isInjectable } from './lifecycle.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -54,6 +55,7 @@ function lineOf(entry: Entry): string {
   // 时效维标记（v0.15.0）：只凸显需警觉的档位（已过期 / 7 天内到期）。
   // 速览是每个会话最先看到的文本——把「这条结论的复查死线已过」摆在最前，
   // 成本是每行几字符，收益是我在**用**它之前就看见它该重看了。
+  const expiryNote = expiryTag(entry.expiry, new Date())
   const stalenessNote = stalenessTag(entry.reviewAfter, new Date())
   // 执行位置标记（v0.23.0）：有值才打（通用条目留空——标记要挑着打）。
   // 速览是每个会话最先看到的东西，在这里标出的理由与 stalenessNote 同：
@@ -66,7 +68,7 @@ function lineOf(entry: Entry): string {
   // 改变我的判断（少数情形）；recall / memory_browse 里都能看到（同 auto-inject 不注入
   // watchFor 的理由：预算要花在会改变动作的信息上）。
   const supersededNote = supersededByTag(entry.supersededBy)
-  return `- ${supersededNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
+  return `- ${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
 }
 
 /**

@@ -163,6 +163,10 @@ export const entrySchema = zod.object({
    * ——类型层不会报错，运行层不会报错，只有「读数不对」会报错。
    */
   validAfter: zod.string().optional(),
+  // 双时态（v0.38 · 方案 §9.3）：**写入边界必须声明**——否则 storage-domain 在持久化校验时
+  // 静默剥掉而写入仍返回成功（本仓同一个坑的第 N 次，见 §9 第 16/24/25/26/27/28 条）。
+  occurredAt: zod.string().optional(),
+  expiry: zod.string().optional(),
   supersededBy: zod.string().optional(),
   supersedes: zod.array(zod.string()).optional(),
   author: zod.object({

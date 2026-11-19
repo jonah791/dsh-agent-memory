@@ -30,6 +30,7 @@ import { executionTag } from './execution.ts'
 import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
 import { supersededByTag } from './succession.ts'
+import { expiryTag } from './temporal-dual.ts'
 import { isInjectable } from './lifecycle.ts'
 import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
@@ -138,6 +139,7 @@ export function buildAutoRecallDigest(
     // 放这里的理由（论文的 routing 落点）：这是**每条主人消息都跑**的注入路径——
     // 若命中的条目已过期，「我正拿一条可能已失效的记忆当前提」正是最该被看见的时刻。
     // ⚠ 刻意**不注入 watchFor**：注入有字节预算，观察条件是多句文本，会把 top3 的实际内容挤掉。
+    const expiryNote = expiryTag(r.expiry, new Date())
     const stalenessNote = stalenessTag(r.reviewAfter, new Date())
     // 执行位置标记（v0.23.0）：有值才打（通用条目留空）。**纯附加信息**：不改排序、
     // 不改过滤、不改条数。放这里的理由与 stalenessNote 同——这是每条主人消息都跑的
@@ -169,7 +171,7 @@ export function buildAutoRecallDigest(
     const payload = useCue
       ? `◎${cueFirst.length > SNIPPET_MAX ? cueFirst.slice(0, SNIPPET_MAX).trimEnd() + '…' : cueFirst}`
       : snippet
-    lines.push(`- ${supersededNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}] ${r.title}（${date}${score}）：${payload}`)
+    lines.push(`- ${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}] ${r.title}（${date}${score}）：${payload}`)
   }
   let body = `【相关记忆（auto-recall）】\n${lines.join('\n')}`
   if (body.length > opts.maxBytes) {
