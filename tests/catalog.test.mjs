@@ -263,3 +263,28 @@ test('C10 提示表只含合法类别（防止手滑写错枚举）', () => {
     assert.ok(valid.has(type), `${tag} → ${type} 不是合法 memType`)
   }
 })
+
+test('C11 ★ credibility 的口径必须印在渲染里（同数并列时的误读防线）', async () => {
+  const { byName, exec } = setup()
+  const tool = byName.get('memory_catalog')
+  await byName.get('remember').execute({ text: '口径判据用的种子条目，什么都不标', kind: 'knowledge' }, exec)
+  const value = await tool.execute({}, exec)
+  const text = tool.output.render({}, value).map((c) => c.text).join('\n')
+
+  // ① 新段必须进渲染——只写在结构化返回里等于没做（v0.24.3 同形教训）
+  assert.match(text, /四维可信度/, 'credibility 段没进渲染 ⇒ 到不了人眼前')
+  assert.ok(value.credibility.dimensions.length === 4)
+
+  // ② ★ 口径句必须在：线上实测（15:38）出现「核验 unknown 1309」与「归档 1309」同数，
+  //    两组数毫无关系（分母已排除归档），但并列出现时读者会怀疑其中一个把另一个算进去了。
+  //    这是「读数层表达缺陷」的第四次同形 ⇒ 把口径写进渲染，不指望读者自己想到。
+  assert.match(text, /归档已排除/, '口径必须紧贴在数后面')
+  assert.match(text, /巧合/, '同数时要明说「不是串了」——不说就会被当成 bug')
+
+  // ③ 代理维的边界必须出现在人眼前（只写在 schema description 里不算）
+  assert.match(text, /代理/, 'proxy 维的 caveat 必须渲染')
+  assert.match(text, /不含总分/, '「可信度不能只有一个数字」是方案原话，渲染里必须说清')
+
+  // ④ 两段分母必须是同一个数（各报一个会让「差在哪」不可见）
+  assert.equal(value.credibility.denominator, value.denominator)
+})

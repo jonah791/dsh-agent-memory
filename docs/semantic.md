@@ -1260,6 +1260,8 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | A196 | ★ **四维判定成对覆盖**：来源（全标/半标/悬空/停用/未登记）、抽取（master 有坐标/无坐标、web 有来源/无来源、self、未标）、核验（established/scoped/rejected/proposed/measured/无）、时效（失效/有效/仅复看/都无）逐格各一条 | 同文件「D2–D5」「D7」「D10–D12」 | ✔ 已实测（单测 18 条） |
 | A197 | **代理维自带边界**：`fidelity=proxy` 恰为两维（来源可靠性、抽取置信度），且两维都带非空 `caveat` 与 `needs`；空分母不产生 NaN | 同文件「D15」「D16」 | ✔ 已实测（单测；尸体：清空 caveat ⇒ D15 红） |
 | A198 | **写入面成对**：`provenance=web` 且无 `sourceIds` ⇒ 通过但 `sourceNotice` 点名；建了来源并引用 ⇒ 不提示；`measured`/`self` 不适用本条（提示在正常路径亮 = 噪音） | 同文件「S3g」 | ✔ 已实测（单测） |
+| A199 | ★ **线上读数自洽且缺口可读**（15:38 实测，分母 1770）：四维各自的四档之和分别 == 1770；`allSettled = 0` · `anySettled = 234`；抽取置信度与时效的 `settled` **均为 0**（活跃库无一条设 `expiry`、无一条 `master` 带 `evidenceRefs`）⇒ 缺口在「权威数据从未被记录」而非机制缺失；两段分母相等；渲染里必须印口径「归档已排除」——`verificationStatus.unknown 1309` 与「归档 1309」同数**纯属巧合**（判据 C11 钉住） | 线上 `memory_catalog`（15:38）+ `tests/catalog.test.mjs`「C11」 | ✔ 已实测（重启后线上；C11 单测钉住口径） |
+| A200 | **写入面线上真调**：`remember({provenance:'measured'})` 正常路径**不**触发 `sourceNotice`（提示在正常路径亮 = 噪音） | 记忆 `9d0429d8` 的写入回执 | ✔ 已实测（线上 15:38，返回无 `sourceNotice`） |
 | A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
 | A2 | 同标题 `knowledge` 再写 → `merged`（标签并集 + 正文追加，不新增条目） | `tests/tools.test.ts`「remember：同标题 knowledge → merged（标签并集）」；`tests/store.test.mjs` describe「去重合并（规格 §2.2）」 | ✔ 已实测 |
@@ -1687,7 +1689,19 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
     - **来源必须按 scope 查（D18 的由来）**：第一版用 `Map<id, Source>`，而 source id（`SOURCE-0001`）只在 scope 内唯一——两个 workspace 各有 `SOURCE-0001` 时按 id 建 Map 会撞号、结果取决于遍历顺序（`sources.ts::find` 的注释里踩过同形的坑）。改成注入查找函数 `lookupSource(scope, id)`，纯函数不 import 存储类型，测试用闭包即可。
     - **写入面顺带补一格（§7 第 02 步「来源登记」）**：`remember` 的 `sourceNotice` 原本只有「有依据没归属」，现在补「**有归属没依据**」——`provenance=web` 却没有 `sourceIds` 时点名「以后回查不到这条从哪读来的」。同样**不阻断**（写下来仍是净收益，只是缺可核坐标系），判据 S3g 成对测（该提示的提示 / 有来源不提示 / `measured` 与 `self` 不适用）。
     - **已知缺口（写进边界第 ④ 条，不假装覆盖）**：写入面只覆盖 `remember`；`update` 改 `provenance` / `sourceIds` 时不走 `sourceNotice`。
-    - **落地判据**：`tests/credibility.test.mjs` 18 条（D1–D18），尸体验证 5 处全红 + 第 6 处被编译拦下（`scripts/corpse-credibility.mjs` 可复跑）；`tests/sources.test.mjs` 加 S3g；全家 **670/670** + 88 pass（1 skip）；工具面仍 27（不新增工具，`memory_catalog` 加一段读数）。
+    - **落地判据**：`tests/credibility.test.mjs` 18 条（D1–D18），尸体验证 5 处全红 + 第 6 处被编译拦下（`scripts/corpse-credibility.mjs` 可复跑）；`tests/sources.test.mjs` 加 S3g；`tests/catalog.test.mjs` 加 C11；全家 **671/671** + 88 pass（1 skip）；工具面仍 27（不新增工具，`memory_catalog` 加一段读数）。
+    - **线上验收（15:38，重启一次；分母 1770）**：四维各自的四档之和分别 == 1770（**逐维验算过**）。读数本身是这一轮最大的产出，因为它把「缺什么」说得比以往任何一次都具体：
+
+      | 维 | settled | selfVerified | inconclusive | unknown | 可读率 |
+      |---|---|---|---|---|---|
+      | 来源可靠性（代理） | 2 | 0 | 0 | 1768 | 0.11% |
+      | 抽取置信度（代理） | **0** | 0 | 318 | 1452 | **0** |
+      | 事实核验状态（直接） | 232 | 224 | 5 | 1309 | 13.1% |
+      | 时效状态（直接） | **0** | 0 | 76 | 1694 | **0** |
+
+      `allSettled = 0`（四维全通的条目一条都没有）· `anySettled = 234`。**两个 0 不是算错**：活跃 1770 条里没有一条设 `expiry`（76 条设的是 `reviewAfter`，它答「何时该重看」不答「何时不再成立」）；没有一条 `master` 记忆带 `evidenceRefs`（全库坐标只有 3 条且都不在活跃面）。⇒ **缺口在「权威数据从未被记录」，不在机制**——这与 v0.39 的发现是同一件事的两个面。
+    - **线上抓到的第四处「读数层表达缺陷」并当场修**：`verificationStatus.unknown = 1309` 与「已归档 1309 条」**同数**（纯属巧合，分母 1770 早已排除归档）。两个 1309 会并列出现在同一份渲染里，读的人极可能怀疑「是不是把归档算进来了」。前三次同形是 v0.37 的 ENOENT 误报、短 id 零区分度、v0.39 的 `needsAction` 与改档数并列——**共同点仍是「单测验数值，不验两个数放在一起会不会被误读」**。这次是我自己在线上读数里发现的，处置是**把口径写进渲染**（「归档已排除；同数是巧合，不是串了」）并用 C11 钉住，而不是指望读者自己想到。
+    - **另修一处类型与 schema 的冲突**：`needs: readonly string[]` 与 schema 推断出的 `string[]` 不兼容（v0.38 踩过同形），改成属性 `readonly`、数组可变。
 
 ## 10 · 未决问题
 

@@ -4674,6 +4674,10 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
         lines.push(
           `  四维全通 **${cred.allSettled}** 条 · 至少一维能读 **${cred.anySettled}** 条 · 分母 ${cred.denominator}（与上同一把尺子）`,
         )
+        // ⚠ 口径必须紧贴在数后面：线上实测（15:38）出现「核验状态 unknown 1309」与「归档 1309」同数，
+        // 而它们**毫无关系**（分母已排除归档）。两个数并列时读者会怀疑其中一个把另一个算进去了——
+        // 这是「读数层表达缺陷」的第四次同形，所以这次把口径写进渲染，不指望读者自己想到。
+        lines.push(`  口径：分母与上面**同一把尺子**（活跃、非压缩产物、非 summary），**归档已排除在外**——各维的 unknown 是「活跃条目里没有值」，与「归档多少条」无关；两者数字相同是巧合，不是串了。`)
         lines.push(`  ⚠ ${cred.note}`)
         for (const d of cred.dimensions) {
           if (d.fidelity !== 'proxy') continue
