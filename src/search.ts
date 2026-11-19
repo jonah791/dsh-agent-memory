@@ -532,11 +532,20 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   const avgBodyLen = filtered.length > 0
     ? filtered.reduce((sum, entry) => sum + entry.body.length, 0) / filtered.length
     : 0
+  // 打分器 v2（v0.34）：只有显式 `scorer='v2'` 才换路径；加权路径（上下文重心）仍走 v1。
+  const useV2 = tuning.scorer === 'v2' && weighted === undefined
+  const v2Tokens = useV2 ? tokenizeForV2(query.query) : undefined
+  // v2 要的是**未被泛词门抑制**的 IDF：`genericFactor=1` ⇒ 不归零，抑制改由平滑系数接管
+  const v2Profiles = v2Tokens === undefined ? undefined : tokenProfile(filtered, [...v2Tokens.l1, ...v2Tokens.l2], 1)
+  const v2Idf = v2Profiles === undefined ? undefined : new Map(v2Profiles.map((item) => [item.term, item.idf]))
+  const v2Df = v2Profiles === undefined ? undefined : new Map(v2Profiles.map((item) => [item.term, item.df]))
   let scored = filtered.map((entry) => ({
     entry,
-    score: weighted !== undefined
-      ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen, tuning, query.entityMatches)
-      : scoreEntry(entry, tokens, idf, avgBodyLen, tuning, query.entityMatches),
+    score: v2Tokens !== undefined && v2Idf !== undefined && v2Df !== undefined
+      ? scoreEntryV2(entry, v2Tokens, v2Idf, v2Df, filtered.length, tuning.coverageWeight)
+      : weighted !== undefined
+        ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen, tuning, query.entityMatches)
+        : scoreEntry(entry, tokens, idf, avgBodyLen, tuning, query.entityMatches),
   }))
   // 带查询时剔除零分条目（无关内容不进结果）；无查询词时全量按新鲜度排序
   if (hasQuery) scored = scored.filter(({ score }) => score > 0)
@@ -632,6 +641,97 @@ export function explainRecall(entries: Entry[], query: RecallQuery = {}): ScoreE
     score,
     terms: terms ?? [],
   }))
+}
+
+// ---------- 打分器 v2（v0.34 · 三层计价） ----------
+// 设计正本：`docs/design/aml-scorer-v2.md`。**默认关**（`tuning.scorer='v1'`），零行为变化。
+
+/** v2 的字段权重（设计值 · **必须扫描标定**，见设计文档 §5 风险：写死等于把拍脑袋换个地方放） */
+const V2_FIELD_WEIGHTS = { alias: 2.0, tag: 2.0, title: 1.5, body: 1.0 } as const
+
+/** v2 的 L2 覆盖层系数（设计值 · 同样必须扫描标定） */
+const V2_COVERAGE_WEIGHT = 0.35
+
+/**
+ * 噪声 bigram 判据（v2 · L3）：由**停用字或疑问字**参与的字符对无区分力。
+ *
+ * 为什么必须是字符级而不是整词级：噪声的来源就是**跨词边界**——`么恢` 来自「怎么恢复」两个词
+ * 的交界，任何整词表里都查不到它。实测 `dropQuestionFrames`（整词级）零效果，正是这个原因。
+ */
+const NOISE_CHARS = new Set('的了是在有和与或之怎么会该也就都而又很更要能可让把被给向从对为着过吗呢吧啊呀嘛哦嗯哪谁何多少几个')
+
+export function isNoiseBigram(bigram: string): boolean {
+  if (STOP_WORDS.has(bigram)) return true
+  for (const ch of bigram) if (NOISE_CHARS.has(ch)) return true
+  return false
+}
+
+/** v2 的分词结果：L1 精确层与 L2 覆盖层分开（两层的 IDF 处理与权重都不同） */
+interface ScorerTokens {
+  l1: string[]
+  l2: string[]
+}
+
+function tokenizeForV2(query: string | undefined): ScorerTokens {
+  if (query === undefined) return { l1: [], l2: [] }
+  const lowered = query.toLowerCase()
+  const l1: string[] = []
+  for (const part of WORD_SEGMENTER.segment(lowered)) {
+    if (!part.isWordLike) continue
+    const word = part.segment
+    if (word.length === 0 || STOP_WORDS.has(word) || QUESTION_PHRASES.includes(word)) continue
+    if (!l1.includes(word)) l1.push(word)
+  }
+  const l1Set = new Set(l1)
+  const l2: string[] = []
+  // L2 从**整句连续段**取 2-gram（不按词切）——这一层存在的理由正是「词切不到的覆盖」。
+  // 噪声 bigram 在这里就剔掉，它们不参与打分（L3）。
+  for (const bigram of cjkBigrams(lowered.replace(/\s+/g, ''))) {
+    if (l1Set.has(bigram)) continue
+    if (isNoiseBigram(bigram)) continue
+    if (!l2.includes(bigram)) l2.push(bigram)
+  }
+  return { l1, l2 }
+}
+
+/**
+ * v2 单条打分：L1 精确层 + L2 覆盖层。
+ *
+ * 与 v1 的三处差别，每一处都对着一条已定位的结构缺陷：
+ * ① 字段权重 2/2/1.5/1（v1 是 3/3/2/1）⇒ 单点四字段命中从 9×IDF 降到 6.5×IDF（治「多字段累加」）；
+ * ② L1 的 IDF **不吃泛词门**，改乘 `1/(1+df/N)` 平滑降权 ⇒ 消除「df 越过 10% 就归零」的悬崖
+ *    （`压缩` df=200/1775 ⇒ 系数 0.90，而 v1 给它 0）——治「罕见 ≠ 重要」的另一半；
+ * ③ L2 只给 0.35 ⇒ 跨词 2-gram 补召回但夺不了排序（治「垃圾 bigram 拿高分」）。
+ *
+ * @param entry - 候选条目
+ * @param tokens - L1 / L2 两层词项
+ * @param idf - **未被泛词门抑制**的 IDF 表（抑制在 v2 里由平滑系数接管）
+ * @param df - 词项 → 文档频率
+ * @param total - 候选集条目数（平滑降权的分母）
+ */
+function scoreEntryV2(
+  entry: Entry,
+  tokens: ScorerTokens,
+  idf: ReadonlyMap<string, number>,
+  df: ReadonlyMap<string, number>,
+  total: number,
+  coverageWeight: number,
+): number {
+  const view = lowerOf(entry)
+  let score = 0
+  const apply = (term: string, coefficient: number): void => {
+    if (view.aliases.some((alias) => alias.includes(term))) score += V2_FIELD_WEIGHTS.alias * coefficient
+    if (view.tags.some((tag) => tag.includes(term))) score += V2_FIELD_WEIGHTS.tag * coefficient
+    if (view.title.includes(term)) score += V2_FIELD_WEIGHTS.title * coefficient
+    if (view.body.includes(term)) score += V2_FIELD_WEIGHTS.body * coefficient
+  }
+  for (const term of tokens.l1) {
+    const base = idf.get(term) ?? 1
+    const smooth = total > 0 ? 1 / (1 + (df.get(term) ?? 0) / total) : 1
+    apply(term, base * smooth)
+  }
+  for (const term of tokens.l2) apply(term, (idf.get(term) ?? 1) * coverageWeight)
+  return score
 }
 
 /**
@@ -861,6 +961,10 @@ interface ResolvedTuning {
   genericFactor: number
   /** 疑问句式骨架剥离（v0.33）；`false` = 现行行为 */
   dropQuestionFrames: boolean
+  /** 打分器版本（v0.34）；`v1` = 现行行为 */
+  scorer: 'v1' | 'v2'
+  /** v2 的 L2 覆盖层系数（v0.34）；设计值 0.35，实测必须扫描 */
+  coverageWeight: number
 }
 
 /**
@@ -879,6 +983,8 @@ function resolveTuning(tuning?: RecallTuning): ResolvedTuning {
     multiFieldCap: tuning?.multiFieldCap ?? false,
     genericFactor: tuning?.genericFactor ?? 0,
     dropQuestionFrames: tuning?.dropQuestionFrames ?? false,
+    scorer: tuning?.scorer ?? 'v1',
+    coverageWeight: tuning?.coverageWeight ?? V2_COVERAGE_WEIGHT,
   }
 }
 
