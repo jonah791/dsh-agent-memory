@@ -166,29 +166,91 @@ function setupE2E(options = {}) {
   return { store, sources, byName, exec }
 }
 
-test('S3 provenance 与来源 type 冲突：不静默覆盖，整笔拒绝', async () => {
-  const { sources, byName, exec } = setupE2E()
-  const web = await sources.create({ scope: WID, type: 'web', location: 'url:https://example.com/x' })
+// ---------- S3：归属（provenance）与依据（sourceIds）**正交** ----------
+//
+// 裁决（2026-11-19 13:20，理由正本在 `docs/semantic.md §5.28`）：v0.35.0 的初版要求
+// `source.type === entry.provenance`，把**知识生产最日常的形状**判成错误——我读了主人给的方案、
+// 得出他没说过的结论（归属 self / 依据 master），这正是「结论是我的、依据是他的」。
+// 两个字段答的不是同一个问题：provenance 答「这条结论归属谁」，sourceIds 答「能去哪核」。
+// 绑成相等 ⇒ 判据没有分辨力（把正常当错），且没有替代路径（§8.3 同一种病）。
+//
+// 「正交」不等于「不管」——错与不全分两档：**悬空引用是错（拒）**，
+// **有依据无归属 / 引用已停用来源是不全（过，但点名）**。
+// ⚠ 每条能亮的判据都必须有一条证明它在该灭时会灭，否则负向全绿会掩盖正向被堵死。
+
+test('S3a 正交：归属 self 引用 master 来源 ⇒ 通过，两字段各自独立落盘', async () => {
+  const { store, sources, byName, exec } = setupE2E()
+  const plan = await sources.create({ scope: WID, type: 'master', location: 'session:s-plan#3' })
   const remember = byName.get('remember')
 
-  // ① 不给 provenance ⇒ 拒绝（两个真源不能只剩一个）
+  const ok = await remember.execute({ text: '# 我的推论\n基于主人的方案', provenance: 'self', sourceIds: [plan.id] }, exec)
+  assert.equal(ok.action, 'created')
+  const entry = store.get(WID, ok.id)
+  assert.deepEqual(entry.sourceIds, [plan.id], '依据落盘')
+  assert.equal(entry.provenance, 'self', '归属不被来源 type 覆盖')
+
+  // 负向对照：这是完全正常的形状，不该报任何提示——提示若在这里亮就成了噪音
+  assert.equal(ok.sourceNotice, undefined)
+})
+
+test('S3b 有依据无归属 ⇒ 通过但点名（元数据不全不是错）', async () => {
+  const { sources, byName, exec } = setupE2E()
+  const plan = await sources.create({ scope: WID, type: 'master', location: 'session:s-plan#4' })
+  const remember = byName.get('remember')
+
+  const ok = await remember.execute({ text: '# 只有依据\n正文', sourceIds: [plan.id] }, exec)
+  assert.equal(ok.action, 'created', '元数据不全不阻断写入')
+  assert.match((ok.sourceNotice ?? []).join('\n'), /provenance/, '但要点名缺的那一格')
+})
+
+test('S3c 引用已停用来源 ⇒ 通过但点名（「依据被撤销」本身是要记录的事实）', async () => {
+  const { sources, byName, exec } = setupE2E()
+  const page = await sources.create({ scope: WID, type: 'web', location: 'url:https://example.com/gone' })
+  await sources.retire(WID, page.id, '网页已下线')
+  const remember = byName.get('remember')
+
+  const ok = await remember.execute({ text: '# 引用已下线网页\n正文', provenance: 'web', sourceIds: [page.id] }, exec)
+  assert.equal(ok.action, 'created', '停用来源仍可被引用——否则「那条依据撤了」这件事无法记录')
+  assert.match((ok.sourceNotice ?? []).join('\n'), /已停用/)
+})
+
+test('S3d 悬空来源 id ⇒ 拒（数据完整性，不是语义判断）', async () => {
+  const { byName, exec } = setupE2E()
   await assert.rejects(
-    () => remember.execute({ text: '# 只有来源\n正文', sourceIds: [web.id] }, exec),
-    /必须同时给 provenance/,
-  )
-  // ② 冲突 ⇒ 拒绝，且错误里**点名两个值**（不然调用方不知道该改哪边）
-  await assert.rejects(
-    () => remember.execute({ text: '# 冲突\n正文', provenance: 'master', sourceIds: [web.id] }, exec),
-    /类型是 web.*provenance=master/s,
-  )
-  // ③ 不存在 ⇒ 拒绝
-  await assert.rejects(
-    () => remember.execute({ text: '# 悬空\n正文', provenance: 'web', sourceIds: ['SOURCE-9999'] }, exec),
+    () => byName.get('remember').execute({ text: '# 悬空\n正文', provenance: 'web', sourceIds: ['SOURCE-9999'] }, exec),
     /不存在/,
   )
-  // ④ 一致 ⇒ 通过
-  const ok = await remember.execute({ text: '# 一致\n正文', provenance: 'web', sourceIds: [web.id] }, exec)
-  assert.equal(ok.action, 'created')
+})
+
+test('S3e 来源库未接线 ⇒ 拒（不能引用不存在的来源实体）', async () => {
+  const { byName, exec } = setupE2E({ sources: false })
+  await assert.rejects(
+    () => byName.get('remember').execute({ text: '# 无库\n正文', provenance: 'web', sourceIds: ['SOURCE-0001'] }, exec),
+    /未接线/,
+  )
+})
+
+test('S3f 写入形态返回值不越 output.schema（线上 additionalProperties:false 会整条拒收）', async () => {
+  // 为什么单测调 execute() 看不见这一跳：宿主在进 execute 之后**按 output.schema 校验返回值**，
+  // 多一个未声明的键 = 整个调用失败（不是被裁剪）。2026-10-17 memory_browse 就是这么整条不可用的
+  // （见 schema-parity.test.mjs 头注释）。本工具的 schema-parity 守卫只覆盖 recall / memory_browse，
+  // remember 的返回值不在它视野里 ⇒ v0.35.1 新增 sourceNotice 必须自带一条。
+  const { sources, byName, exec } = setupE2E()
+  const plan = await sources.create({ scope: WID, type: 'master', location: 'session:s-plan#5' })
+  const remember = byName.get('remember')
+  const declared = new Set(Object.keys(remember.output.schema.properties))
+  const undeclaredOf = (value) => Object.keys(value).filter((key) => !declared.has(key))
+
+  // ① 带提示的形态（新键 sourceNotice 走的就是这一支）
+  const withNotice = await remember.execute({ text: '# 有提示\n正文', sourceIds: [plan.id] }, exec)
+  assert.deepEqual(undeclaredOf(withNotice), [], '返回了 output schema 未声明的键 ⇒ 线上整条拒收（工具不可用）')
+  // ★ 夹具自证：没走到带 notice 的分支，上一条断言对该键就恒真了
+  assert.ok('sourceNotice' in withNotice, '夹具没走到带 notice 的分支 ⇒ 本判据对 sourceNotice 无分辨力')
+
+  // ② 干净的形态：不得凭空多键
+  const clean = await remember.execute({ text: '# 干净\n正文', provenance: 'master', sourceIds: [plan.id] }, exec)
+  assert.deepEqual(undeclaredOf(clean), [])
+  assert.equal(clean.sourceNotice, undefined, '正常的形状不该带提示（提示在正常路径亮 = 噪音）')
 })
 
 test('S4 反查完整：按来源恰好列出引用它的条目（不多不少）', async () => {

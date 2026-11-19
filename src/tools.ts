@@ -353,7 +353,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       sourceIds: {
         type: 'array',
         items: { type: 'string' },
-        description: '来源实体引用（v0.35 · 方案 §5.2）：引用的**来源实体 id**（`SOURCE-0001` 形态）。与 `evidenceRefs` 分工：那个是坐标串，这个连到可复用的来源对象（类型 / 可靠度 / 权限只记一处，不在每条记忆上复制）。**给本字段必须同时给 `provenance`**，且每个来源的 `type` 必须与它一致——不一致当场拒绝（两个真源冲突不静默覆盖）。',
+        description: '来源实体引用（v0.35.1 · 方案 §5.2）：引用的**来源实体 id**（`SOURCE-0001` 形态）。与 `evidenceRefs` 分工：那个是坐标串，这个连到可复用的来源对象（类型 / 可靠度 / 权限只记一处，不在每条记忆上复制）。**与 `provenance` 正交**（v0.35.1 裁决）：provenance 答「这条归属谁」，本字段答「能去哪核」——我读主人的方案得出的结论应是 `provenance=self` + 引用 master 来源，**不要为了对齐而改归属**。引用了不存在的来源会**被拒**；引用已停用来源、或有依据没标归属只在回执里**点名**，不阻断。',
       },
       dryRun: { type: 'boolean', description: '预检（v0.19.1 · lh-0f54524a）：**只跑近重复检测、返回候选与强度，不落库**。⚠ 2026-11-12 起这是这条检测器**唯一**的入口（写入路径不再自动跑它，见 `src/dedupe.ts` 顶部证据）。它**宁滥勿缺**：会列出一批字面相关的条目供你自己筛，`强度` 是绝对计数、**不代表语义相似**。仍值得走它而不是先 `recall`，因为两者候选集**不同源**（实测：先 recall 搜「测试期望写错」返回 96 条却不含真正的母条目，而这条检测器报出了它）。' },
     },
@@ -370,6 +370,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
           dryRun: { type: 'boolean', description: 'true = 只做了近重复检测、**未落库**；此时 id / action 均不出现' },
           similar: { type: 'array', items: { type: 'string' }, description: '（**仅 dryRun 形态**）字面相关候选（`id — 标题（强度 N）`；有内容时附一行「节：小节标题 / …」，让人不必再去读正文就能判断覆盖范围）；无候选时省略该键' },
           hint: { type: 'string', description: '（**仅 dryRun 形态**）与候选无关的补充警告（如「库已满」）；无内容时省略该键' },
+          sourceNotice: { type: 'array', items: { type: 'string' }, description: '（**仅写入形态**）来源元数据提示：有依据没标归属（缺 provenance）/ 引用了已停用来源。⚠ 它**不阻断写入**——条目已落库，这只是「元数据不全」的点名，不是失败。无内容时省略该键。' },
         },
       },
       render: (args, value) => {
@@ -394,10 +395,11 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
           return [{ type: 'text', text: '⚠ remember 返回缺 id / action（非 dryRun 形态必须有这两个字段）——内部契约破损，不要把这个当成功。' }]
         }
         // 写入形态的回执只报结果本身：`similar` / `hint` / 欠账计数都是 dryRun 形态的东西（2026-11-12 起）
-        return [{
-          type: 'text',
-          text: `已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`,
-        }]
+        // ⚠ 但 sourceNotice 是写入形态的（v0.35.1）：它不阻断写入，只点名元数据不全——必须印出来，
+        // 否则「有依据没标归属」这类提示等于没发生（条目已落库，用户只有这一次机会看到）。
+        const lines = [`已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`]
+        for (const note of value.sourceNotice ?? []) lines.push(`⚠ ${note}`)
+        return [{ type: 'text', text: lines.join('\n') }]
       },
     },
     async execute(args, exec) {
@@ -479,27 +481,35 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       if (wouldCreate && active.length >= config.maxEntries) {
         throw new Error(`remember: ${writeScope} 已达 max_entries(${config.maxEntries})，请先 forget 归档旧条目或调高配置`)
       }
-      // 来源实体引用（v0.35 · 方案 §5.2）：S3——`provenance` 与来源 `type` 冲突**不静默覆盖**。
-      // 两者是同一件事的两个真源（「谁说的」），揉在一起就再也分不清哪个对。
+      // 来源实体引用（v0.35.1 · 方案 §5.2）：S3 裁决（2026-11-19）——`provenance` 与来源 `type`
+      // **正交**，不是同一件事的两个真源：`provenance` 答「这条结论归属谁」（谁说的算），
+      // `sourceIds` 答「这条结论能去哪核」（依据）。知识生产最日常的形状恰恰跨类——我读了主人
+      // 给的方案、得出他没说过的结论（归属 self / 依据 master）。v0.35.0 初版要求两者相等，
+      // 把这种**正常形状**判成错误，且没有替代路径（§8.3 同一种病：把正常当错 ⇒ 判据没有分辨力）。
+      //
+      // 保留两档，把「错」与「不全」分开：
+      //   · 错 ⇒ 拒：来源库未接线、引用了不存在的来源——数据完整性，不是语义判断
+      //   · 不全 ⇒ 过 + 点名：有依据没标归属、引用了已停用来源。后者恰恰是**要记录的事实**
+      //     （「那条依据已被撤销/下线」），拒掉它等于让这件事无法被记下。
       const sourceIds = Array.isArray(args.sourceIds)
         ? args.sourceIds.map((item) => String(item).trim()).filter((item) => item !== '')
         : undefined
+      const sourceNotice: string[] = []
       if (sourceIds !== undefined && sourceIds.length > 0) {
         if (deps.sources === undefined) {
           throw new Error('remember.sourceIds: 来源库未接线（deps.sources 缺失）——不能引用不存在的来源实体')
-        }
-        if (provenance === undefined) {
-          throw new Error('remember.sourceIds: 给了 sourceIds 就必须同时给 provenance——来源的类型就是它的权威归属，两者不能只有一个')
         }
         for (const sourceId of sourceIds) {
           const source = deps.sources.find(writeScope, sourceId)
           if (source === undefined) {
             throw new Error(`remember.sourceIds: 来源 "${sourceId}" 不存在（先用 memory_source 建档）`)
           }
-          if (source.type !== provenance) {
-            throw new Error(`remember.sourceIds: 来源 "${sourceId}" 的类型是 ${source.type}，而本条 provenance=${provenance}——两个真源冲突，不静默覆盖：改 provenance 或换来源，二选一`
-              + (source.status === 'retired' ? '（该来源已停用，本来也不该再被新记忆引用）' : ''))
+          if (source.status === 'retired') {
+            sourceNotice.push(`来源 ${sourceId} 已停用——新记忆仍引用了它。若「这条依据已被撤销」正是要记下的事就保留；否则换一个在用的来源。`)
           }
+        }
+        if (provenance === undefined) {
+          sourceNotice.push('本条有依据（sourceIds）但没标归属（provenance）——provenance 是判断题、没有默认值，缺了「这条结论算谁的」以后就查不到。')
         }
       }
       const written = await deps.store.remember({
@@ -546,6 +556,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       return {
         id: written.id,
         action: written.action,
+        // 来源元数据提示（v0.35.1）：**不阻断写入**——它们是「不全」不是「错」，见上方裁决注释。
+        ...(sourceNotice.length > 0 ? { sourceNotice } : {}),
       }
     },
   })
@@ -590,7 +602,7 @@ export const DIMENSION_ITEM_FIELDS = {
   sourceIds: {
     type: 'array',
     items: { type: 'string' },
-    description: '来源实体引用（v0.35 · 方案 §5.2）：引用的**来源实体 id**（`SOURCE-0001` 形态）。与 `evidenceRefs` 分工：那个是坐标串，这个连到可复用的来源对象（类型 / 可靠度 / 权限只记一处，不在每条记忆上复制）。**给本字段必须同时给 `provenance`**，且每个来源的 `type` 必须与它一致——不一致当场拒绝（两个真源冲突不静默覆盖）。',
+    description: '来源实体引用（v0.35.1 · 方案 §5.2）：引用的**来源实体 id**（`SOURCE-0001` 形态）。与 `evidenceRefs` 分工：那个是坐标串，这个连到可复用的来源对象（类型 / 可靠度 / 权限只记一处，不在每条记忆上复制）。**与 `provenance` 正交**（v0.35.1 裁决）：provenance 答「这条归属谁」，本字段答「能去哪核」——我读主人的方案得出的结论应是 `provenance=self` + 引用 master 来源，**不要为了对齐而改归属**。引用了不存在的来源会**被拒**；引用已停用来源、或有依据没标归属只在回执里**点名**，不阻断。',
   },
   memType: {
     type: 'string',
