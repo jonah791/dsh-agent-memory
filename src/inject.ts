@@ -27,6 +27,7 @@ import { supersededByTag } from './succession.ts'
 import { expiryTag } from './temporal-dual.ts'
 import { isInjectable } from './lifecycle.ts'
 import { deriveSensitivity, isAutoInjectable } from './sensitivity.ts'
+import { neutralizeControlTags, wrapInjectionBlock } from './inject-boundary.ts'
 
 /**
  * 注入面准入（v0.47 · 方案 §11.2）：在生命周期准入之上叠敏感分级——`L2`/`L3` **不进自动注入**。
@@ -104,7 +105,7 @@ export function buildMemoryDigest(
   // v0.27.0：注入只给 `isInjectable()` 的条目——`pending` 待审核**不进上下文**（候选区未过审核
   // 就自己挤进注入，等于跳过了候选区这个设计本身）；`archived` / `deleted` 同理。
   const facts = globalFacts.filter((e) => e.kind === 'fact' && isInjectableEntry(e))
-  for (const entry of facts) lines.push(lineOf(entry))
+  for (const entry of facts) lines.push(neutralizeControlTags(lineOf(entry)))
 
   // 概要层：summary 条目按 bucket 降序（高密度索引优先）
   const summaries = scopeEntries.filter((e) => e.kind === 'summary' && isInjectableEntry(e))
@@ -120,7 +121,7 @@ export function buildMemoryDigest(
       omitted += 1
       continue
     }
-    lines.push(lineOf(entry))
+    lines.push(neutralizeControlTags(lineOf(entry)))
   }
 
   if (lines.length > 0) sections.push('【记忆速览】', ...lines)
@@ -132,7 +133,7 @@ export function buildMemoryDigest(
     body = body.slice(0, Math.max(0, opts.maxBytes - hint.length)) + hint
   }
   if (body.length === 0) return ''
-  return `<system-reminder>\n从记忆库加载的相关记忆（dsh-agent-memory）：\n\n${body}\n</system-reminder>`
+  return wrapInjectionBlock('从记忆库加载的相关记忆', body)
 }
 
 /**

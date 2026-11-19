@@ -53,7 +53,11 @@ test('digest：maxBytes 截断', () => {
   const many = Array.from({ length: 50 }, (_, i) =>
     entry({ id: 'e' + i, title: '长条目'.repeat(10) + i, createdAt: '2026-08-01T00:00:00.000Z', kind: 'episodic' }))
   const text = buildMemoryDigest([], many, { maxBytes: 200, maxEntries: 100 })
-  assert.ok(text.length <= 200 + 80) // 帧开销少量余量
+  // 帧开销上界 = `<system-reminder>` 标签 + header + `（dsh-agent-memory）：` + 数据边界声明 + 空行。
+  // v0.48 起含方案 §11.3 的数据定性声明，上界由 80 抬到 110——**它仍是守门人**：
+  // 再抬就该回答「是不是又往帧里加了东西、为什么」。不改成「跟随实现自动推导」，
+  // 那等于让被守的东西自己守自己。
+  assert.ok(text.length <= 200 + 110, `帧开销超界：实测 ${text.length - 200}`)
   assert.ok(text.includes('预算截断'))
 })
 

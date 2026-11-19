@@ -37,6 +37,7 @@ import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
 import { recallEntries } from './search.ts'
 import { classifyMessage, thresholdForScene } from './scene.ts'
+import { neutralizeControlTags, wrapInjectionBlock } from './inject-boundary.ts'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -172,14 +173,17 @@ export function buildAutoRecallDigest(
     const payload = useCue
       ? `◎${cueFirst.length > SNIPPET_MAX ? cueFirst.slice(0, SNIPPET_MAX).trimEnd() + '…' : cueFirst}`
       : snippet
-    lines.push(`- ${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}] ${r.title}（${date}${score}）：${payload}`)
+    // v0.48（方案 §11.3）：标题与正文是**记忆数据**，不许携带能改写注入块结构的控制标签。
+    // 中和只失效结构、不改语义（见 inject-boundary.ts 头注：不做指令检测器，那个无样本可标定）。
+    lines.push(`- ${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}] ${neutralizeControlTags(r.title)}（${date}${score}）：${neutralizeControlTags(payload)}`)
   }
-  let body = `【相关记忆（auto-recall）】\n${lines.join('\n')}`
+  // 块内不再重复标题：块首的 header 已说明这块是什么（v0.48 起帧由 wrapInjectionBlock 统一）。
+  let body = lines.join('\n')
   if (body.length > opts.maxBytes) {
     const hint = '\n（已按预算截断，可用 recall 展开全文）'
     body = body.slice(0, Math.max(0, opts.maxBytes - hint.length)) + hint
   }
-  return `<system-reminder>\n按当前消息自动检索的相关记忆（dsh-agent-memory）：\n\n${body}\n</system-reminder>`
+  return wrapInjectionBlock('按当前消息自动检索的相关记忆', body)
 }
 
 /**
