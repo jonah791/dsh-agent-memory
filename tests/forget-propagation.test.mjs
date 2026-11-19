@@ -10,12 +10,12 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { UNOWNED_SURFACES, mergeForgetPlans, planForget } from '../lib/forget.js'
+import { UNOWNED_SURFACES, archiveRefDescendants, mergeForgetPlans, planForget } from '../lib/forget.js'
 import { MemoryStore } from '../lib/store.js'
 import { createMemoryTools } from '../lib/tools.js'
 import { workspaceIdOf } from '../lib/scope.js'
 
-const EMPTY = { entryId: 'e-1', derivedSummaries: [], liveRelations: [] }
+const EMPTY = { entryId: 'e-1', derivedEntries: [], liveRelations: [] }
 
 test('F0a 四个自有面恒在且顺序稳定（本体 → 派生 → 关系 → 侧车）', () => {
   const plan = planForget(EMPTY)
@@ -32,12 +32,37 @@ test('F0b 本体面不许给「已删干净」的错觉（不做硬删除的理�
   assert.doesNotMatch(entry.action, /已彻底删除|已永久删除/, '出现这种措辞就是撒谎——本插件删不到那两层')
 })
 
-test('F2a 派生面：计数进 count，且**不删概要本体**（只清 archiveRef 引用）', () => {
-  const plan = planForget({ ...EMPTY, derivedSummaries: ['s-1', 's-2'] })
+test('F2a 派生面：直接与嵌套后代都计入，且不自动归档', () => {
+  const plan = planForget({
+    ...EMPTY,
+    derivedEntries: [{ id: 's-1', depth: 1, disposition: 'review-required' }, { id: 's-2', depth: 2, disposition: 'review-required' }],
+  })
   const derived = plan.surfaces.find((item) => item.surface === 'derived')
-  assert.equal(derived.count, 2, '引用条数必须进 count——只写「已处理」等于没报数')
+  assert.equal(derived.count, 2, '直接与嵌套后代都计数')
   assert.match(derived.action, /archiveRef/)
-  assert.match(derived.action, /本体保留|由你判断/, '概要是独立结论，不能连带删掉；含派生内容的部分要交人判断')
+  assert.match(derived.action, /直接 1.*嵌套 1/)
+  assert.match(derived.action, /不自动归档|待判断/)
+  assert.deepEqual(plan.derivedEntries, [
+    { id: 's-1', depth: 1, disposition: 'review-required' },
+    { id: 's-2', depth: 2, disposition: 'review-required' },
+  ])
+})
+
+test('F7 archiveRef 后代闭包：找全嵌套链、去重、排除无关项并防环', () => {
+  const entries = [
+    { id: 'A', archiveRef: ['B'] }, // 与 B 构成环；起点不能重新出现
+    { id: 'B', archiveRef: ['A'] },
+    { id: 'C', archiveRef: ['A'] },
+    { id: 'D', archiveRef: ['A', 'missing'] }, // 多原料仍只计一条派生条目
+    { id: 'E', archiveRef: ['C'] }, // 嵌套后代
+    { id: 'F', archiveRef: ['unrelated'] },
+  ]
+  assert.deepEqual(archiveRefDescendants(entries, ['A']), [
+    { id: 'B', depth: 1, disposition: 'review-required' },
+    { id: 'C', depth: 1, disposition: 'review-required' },
+    { id: 'D', depth: 1, disposition: 'review-required' },
+    { id: 'E', depth: 2, disposition: 'review-required' },
+  ])
 })
 
 test('F2b 关系面：退役不是删除（措辞必须提 validTo，否则读者会以为记录没了）', () => {
@@ -49,7 +74,7 @@ test('F2b 关系面：退役不是删除（措辞必须提 validTo，否则读�
 })
 
 test('F2c access-trace 恒为 0 且必在列表里（沉默地不列它 = 让读者以为漏了一处）', () => {
-  for (const plan of [planForget(EMPTY), planForget({ ...EMPTY, derivedSummaries: ['s'], liveRelations: ['r'] })]) {
+  for (const plan of [planForget(EMPTY), planForget({ ...EMPTY, derivedEntries: [{ id: 's', depth: 1 }], liveRelations: ['r'] })]) {
     const trace = plan.surfaces.find((item) => item.surface === 'access-trace')
     assert.ok(trace !== undefined, '侧车面必须出现在结果里')
     assert.equal(trace.count, 0, '侧车只存 {atMs, ids}，不含内容 ⇒ 要处理的条数恒为 0')
@@ -85,16 +110,20 @@ test('F4b 未覆盖面是副本不是共享引用（调用方改它不该污染�
   assert.notEqual(second.unowned[0].why, '被改坏了', '返回内部常量会让一次调用污染所有后续')
 })
 
-test('F5 合并：计数求和、未覆盖面只留一份、processed = 条目数', () => {
+test('F5 合并：重叠派生后代按 id 去重并取最短深度', () => {
   const merged = mergeForgetPlans([
-    planForget({ ...EMPTY, entryId: 'e-1', liveRelations: ['r-1'] }),
-    planForget({ ...EMPTY, entryId: 'e-2', liveRelations: ['r-2', 'r-3'], derivedSummaries: ['s-1'] }),
+    planForget({ ...EMPTY, entryId: 'e-1', liveRelations: ['r-1'], derivedEntries: [{ id: 'shared', depth: 2, disposition: 'review-required' }] }),
+    planForget({ ...EMPTY, entryId: 'e-2', liveRelations: ['r-2', 'r-3'], derivedEntries: [{ id: 'shared', depth: 1, disposition: 'review-required' }, { id: 'unique', depth: 2, disposition: 'review-required' }] }),
   ])
   assert.equal(merged.processed, 2)
   const byName = new Map(merged.surfaces.map((item) => [item.surface, item]))
   assert.equal(byName.get('entry').count, 2)
   assert.equal(byName.get('relations').count, 3)
-  assert.equal(byName.get('derived').count, 1)
+  assert.equal(byName.get('derived').count, 2)
+  assert.deepEqual(merged.derivedEntries, [
+    { id: 'shared', depth: 1, disposition: 'review-required' },
+    { id: 'unique', depth: 2, disposition: 'review-required' },
+  ])
   assert.equal(byName.get('access-trace').count, 0)
   assert.equal(merged.unowned.length, UNOWNED_SURFACES.length, '未覆盖面是常量，不该按条数翻倍')
 })
@@ -152,6 +181,41 @@ function setupE2E() {
   const exec = { agent: { session: { id: 'session-forget', header: { cwd: CWD } } } }
   return { store, certs, byName, exec }
 }
+
+test('F7 工具端到端：预览和实跑同列多层后代，且只归档目标', async () => {
+  const { store, byName, exec } = setupE2E()
+  const seed = (title, kind, archiveRef = []) => store.remember({
+    kind,
+    title,
+    body: `${title}正文`,
+    scope: WID,
+    level: null,
+    bucket: null,
+    ...(archiveRef.length > 0 ? { archiveRef } : {}),
+  })
+  const source = await seed('F7 source', 'fact')
+  const direct = await seed('F7 direct summary', 'summary', [source.id])
+  const nested = await seed('F7 nested summary', 'summary', [direct.id])
+  const unrelated = await seed('F7 unrelated summary', 'summary')
+  const beforeDirect = store.get(WID, direct.id)
+  const beforeNested = store.get(WID, nested.id)
+  const beforeUnrelated = store.get(WID, unrelated.id)
+
+  const forget = byName.get('forget')
+  const preview = await forget.execute({ id: source.id, dryRun: true }, exec)
+  const expected = [direct.id, nested.id].sort()
+  assert.deepEqual(preview.derivedEntries.map((item) => item.id).sort(), expected)
+  assert.deepEqual(preview.derivedEntries, preview.derivedEntries.slice().sort((a, b) => a.depth - b.depth || a.id.localeCompare(b.id)))
+  assert.match(preview.surfaces.find((line) => line.startsWith('[derived]')), /直接 1.*嵌套 1/)
+
+  const done = await forget.execute({ id: source.id, reason: 'F7 fixture' }, exec)
+  assert.deepEqual(done.derivedEntries, preview.derivedEntries, 'dryRun 与实跑必须给同一派生清单')
+  assert.equal(done.archivedCount, 1, '派生后代不自动归档')
+  assert.equal(store.get(WID, source.id).archived, true)
+  assert.deepEqual(store.get(WID, direct.id), beforeDirect)
+  assert.deepEqual(store.get(WID, nested.id), beforeNested)
+  assert.deepEqual(store.get(WID, unrelated.id), beforeUnrelated)
+})
 
 test('F3 凭证最小化：有面/计数/id，但**拿不到被删内容**（可对账、不可反推）', async () => {
   const { byName, certs, exec } = setupE2E()

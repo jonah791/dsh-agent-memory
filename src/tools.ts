@@ -58,7 +58,7 @@ import {
   R7_CUMULATIVE_CAP,
 } from './misuse.ts'
 import { credibilityReport } from './credibility.ts'
-import { mergeForgetPlans, planForget } from './forget.ts'
+import { archiveRefDescendants, mergeForgetPlans, planForget } from './forget.ts'
 import type { ForgetCertificate } from './forget.ts'
 import { randomUUID } from 'node:crypto'
 import {
@@ -1873,6 +1873,8 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
           notes: { type: 'array', required: true, items: { type: 'string' } },
           processed: { type: 'integer', description: '本次被处理的条目数（= 传播计划覆盖的条目数）' },
           surfaces: { type: 'array', items: { type: 'string' }, description: '逐面传播结果（v0.36 · 方案 §10.4）：本体 / 派生概要 / 关系边 / 用量侧车。每行形如 `[面] 条数 · 动作`' },
+          derivedEntries: { type: 'array', required: true, items: { type: 'object', additionalProperties: false, properties: { id: { type: 'string', required: true }, depth: { type: 'integer', required: true }, disposition: { type: 'string', enum: ['review-required'], required: true } } }, description: '按 archiveRef 从目标递归发现的全部派生后代；每项含最短深度与处置状态（review-required，不代表已删除）' },
+          derivedCoverage: { type: 'string', enum: ['caller-readable-view'], required: true, description: '派生后代清单仅覆盖调用者当前可读视野，不代表插件全库' },
           unowned: { type: 'array', items: { type: 'string' }, description: '**本插件不拥有的传播面**与其原因（宿主会话日志 / 备份层 / 实体档）。⚠ 这一格省掉，读者就会以为九处都处理了——它是最容易被省、也最不能省的一格' },
           certId: { type: 'string', description: '删除凭证 id（侧车 `memory-forget-certificates.jsonl`）。凭证**不含被删内容**：只有面、计数、id 与理由——可回查，不可反推' },
         },
@@ -1898,6 +1900,16 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
         if (unowned.length > 0) {
           lines.push('⚠ 本插件不拥有、因而没有处理的面（要处理得去对应那层）：')
           for (const line of unowned) lines.push(`  - ${line}`)
+        }
+        // 派生后代逐条印出来（v0.54 · 方案 §6.2）：只印计数会让「发现了 3 条」看起来
+        // 像「处理了 3 条」。⚠ 上限 20 行：超过就只报数并指向返回体，避免刷屏掩盖结论。
+        const derived = value.derivedEntries ?? []
+        if (derived.length > 0) {
+          lines.push(`派生后代（${derived.length} 条 · 覆盖=${value.derivedCoverage ?? '未声明'} · 均为待判断，未归档）：`)
+          for (const item of derived.slice(0, 20)) {
+            lines.push(`  - ${item.id}（depth=${item.depth} · ${item.disposition}）`)
+          }
+          if (derived.length > 20) lines.push(`  - ……余 ${derived.length - 20} 条见结构化返回`)
         }
         if (typeof value.certId === 'string' && value.certId.length > 0) {
           lines.push(`凭证 ${value.certId} 已写入 memory-forget-certificates.jsonl（只记面 / 计数 / id / 理由，不含被删内容）`)
@@ -2002,9 +2014,7 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
       const idField = singleMode && args.id !== undefined ? { id: args.id } : {}
       // 传播计划（v0.36 · 方案 §10.4）：在写之前算好，dryRun 与实跑走**同一份计划**——
       // 否则「预览说会动 3 条边、实跑动了 5 条」这种偏差永远查不出来。
-      const summariesOf = (id: string): string[] => universe
-        .filter((entry) => entry.kind === 'summary' && (entry.archiveRef ?? []).includes(id))
-        .map((entry) => entry.id)
+      const derivedEntriesOf = (id: string) => archiveRefDescendants(universe, [id])
       const liveRelationsOf = (id: string): string[] => {
         if (deps.relations === undefined) return []
         const now = Date.now()
@@ -2016,7 +2026,7 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
       const relPlanOf = new Map(targets.map((target) => [target.id, liveRelationsOf(target.id)]))
       const feedback = mergeForgetPlans(targets.map((target) => planForget({
         entryId: target.id,
-        derivedSummaries: summariesOf(target.id),
+        derivedEntries: derivedEntriesOf(target.id),
         liveRelations: relPlanOf.get(target.id) ?? [],
       })))
       const surfaceLines = feedback.surfaces.map((item) => `[${item.surface}] ${item.count} · ${item.action}`)
@@ -2034,6 +2044,8 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
           notes,
           processed: feedback.processed,
           surfaces: surfaceLines,
+          derivedEntries: feedback.derivedEntries,
+          derivedCoverage: feedback.derivedCoverage,
           unowned: unownedLines,
         }
       }
@@ -2075,6 +2087,8 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
           mode,
           scope: writeScope,
           surfaces: feedback.surfaces,
+          derivedEntries: feedback.derivedEntries,
+          derivedCoverage: feedback.derivedCoverage,
           ids,
           ...(reason !== undefined ? { reason } : {}),
           reasonType,
@@ -2108,6 +2122,8 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
         notes,
         processed: feedback.processed,
         surfaces: surfaceLines,
+        derivedEntries: feedback.derivedEntries,
+        derivedCoverage: feedback.derivedCoverage,
         unowned: unownedLines,
         ...(deps.recordForget !== undefined ? { certId } : {}),
       }

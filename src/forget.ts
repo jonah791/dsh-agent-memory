@@ -35,18 +35,66 @@ export interface UnownedSurface {
   why: string
 }
 
-/** 一次性单条遗忘的输入：调用方先把三处数据取好（它们是四个 Store 的东西，纯函数不碰 IO）。 */
+/** 派生条目所需的最小投影；调用者传入已受读权限过滤的集合。 */
+export interface ArchiveRefNode {
+  id: string
+  archiveRef?: readonly string[]
+}
+
+/**
+ * 从权威 `archiveRef` 字段按需求目标的后代闭包。
+ * 只读取调用者传入的可读视图，不落盘第二份图；循环与多原料边由 visited 集合去重。
+ */
+export function archiveRefDescendants(
+  entries: readonly ArchiveRefNode[],
+  targetIds: readonly string[],
+): DerivedDescendant[] {
+  const seen = new Set(targetIds)
+  let frontier = new Set(targetIds)
+  const found: DerivedDescendant[] = []
+  let depth = 0
+
+  while (frontier.size > 0) {
+    depth += 1
+    const next = new Set<string>()
+    for (const entry of entries) {
+      if (seen.has(entry.id)) continue
+      if ((entry.archiveRef ?? []).some((sourceId) => frontier.has(sourceId))) next.add(entry.id)
+    }
+    if (next.size === 0) break
+    for (const id of next) {
+      seen.add(id)
+      found.push({ id, depth, disposition: 'review-required' })
+    }
+    frontier = next
+  }
+
+  return found.sort((a, b) => a.depth - b.depth || a.id.localeCompare(b.id))
+}
+
+/** 一次遗忘的输入：调用方先把可读条目与关系边取好，纯函数不碰 IO。 */
+export interface DerivedDescendant {
+  /** 派生后代条目 id（只从调用者当前可读的条目集合中派生） */
+  id: string
+  /** 沿 `archiveRef` 从本次目标到此后代的最短边数；1=直接引用 */
+  depth: number
+  /** 发现不是删除：仍需人工检查是否重压或保留 */
+  disposition: 'review-required'
+}
+
 export interface ForgetPlanInput {
   /** 被遗忘的条目 id */
   entryId: string
-  /** `archiveRef` 里含 `entryId` 的概要条目 id（派生数据，需要清引用） */
-  derivedSummaries: string[]
+  /** 当前可读条目集合内，经 `archiveRef` 求得的全部派生后代（直接与嵌套） */
+  derivedEntries: DerivedDescendant[]
   /** `from` / `to` 命中 `entryId` 且**仍有效**的关系边 id（需要退役，不是删除） */
   liveRelations: string[]
 }
 
 export interface ForgetPlan {
   surfaces: ForgetSurface[]
+  derivedEntries: DerivedDescendant[]
+  derivedCoverage: 'caller-readable-view'
   unowned: UnownedSurface[]
 }
 
@@ -66,6 +114,10 @@ export interface ForgetCertificate {
   scope: string
   /** 逐面结果。⚠ 空数组不是「没有传播面」，是「没跑传播」——两者必须可区分。 */
   surfaces: ForgetSurface[]
+  /** 当次发现的派生后代审计快照，不是另一份血缘真源。 */
+  derivedEntries: DerivedDescendant[]
+  /** 派生清单仅覆盖调用者当前可读视野。 */
+  derivedCoverage: 'caller-readable-view'
   /** 命中条目的 id（随机 uuid，无内容）。不存标题 / 正文 / 来源。 */
   ids: string[]
   reason?: string
@@ -101,7 +153,18 @@ export const UNOWNED_SURFACES: readonly UnownedSurface[] = Object.freeze([
  * @param input - 已取好的三处数据
  * @returns 逐面结果 + 未覆盖面；`surfaces` 的顺序稳定（本体 → 派生 → 关系 → 侧车）
  */
+function derivedAction(derivedEntries: readonly DerivedDescendant[]): string {
+  const direct = derivedEntries.filter((item) => item.depth === 1).length
+  const nested = derivedEntries.length - direct
+  return derivedEntries.length > 0
+    ? `当前可读视野中发现 ${derivedEntries.length} 条 archiveRef 派生后代（直接 ${direct} / 嵌套 ${nested}）；派生内容可能同时依赖其他原料，不自动归档，待判断`
+    : '当前可读视野中未发现 archiveRef 派生后代'
+}
+
 export function planForget(input: ForgetPlanInput): ForgetPlan {
+  const derivedEntries = input.derivedEntries
+    .map((item) => ({ ...item }))
+    .sort((a, b) => a.depth - b.depth || a.id.localeCompare(b.id))
   const surfaces: ForgetSurface[] = [
     {
       surface: 'entry',
@@ -113,10 +176,8 @@ export function planForget(input: ForgetPlanInput): ForgetPlan {
     },
     {
       surface: 'derived',
-      action: input.derivedSummaries.length > 0
-        ? `${input.derivedSummaries.length} 条概要的 archiveRef 引用了它——archiveRef 是**压缩历史**，不篡改；概要正文可能含该条目的派生内容，是否重压由你判断（memory_recompress / 手动处理）`
-        : '无概要引用它',
-      count: input.derivedSummaries.length,
+      action: derivedAction(derivedEntries),
+      count: derivedEntries.length,
     },
     {
       surface: 'relations',
@@ -132,13 +193,20 @@ export function planForget(input: ForgetPlanInput): ForgetPlan {
       count: 0,
     },
   ]
-  return { surfaces, unowned: UNOWNED_SURFACES.map((item) => ({ ...item })) }
+  return {
+    surfaces,
+    derivedEntries,
+    derivedCoverage: 'caller-readable-view',
+    unowned: UNOWNED_SURFACES.map((item) => ({ ...item })),
+  }
 }
 
 /** 反馈形状：逐面 + 总量 + 未覆盖面。三样缺一，读者就会把「没报」当成「没这回事」。 */
 export interface ForgetFeedback {
   processed: number
   surfaces: ForgetSurface[]
+  derivedEntries: DerivedDescendant[]
+  derivedCoverage: 'caller-readable-view'
   unowned: UnownedSurface[]
 }
 
@@ -153,6 +221,7 @@ export interface ForgetFeedback {
  */
 export function mergeForgetPlans(plans: ForgetPlan[]): ForgetFeedback {
   const bySurface = new Map<ForgetSurfaceName, ForgetSurface>()
+  const derivedById = new Map<string, DerivedDescendant>()
   for (const plan of plans) {
     for (const item of plan.surfaces) {
       const current = bySurface.get(item.surface)
@@ -164,11 +233,24 @@ export function mergeForgetPlans(plans: ForgetPlan[]): ForgetFeedback {
         current.action = item.count > 0 ? item.action : current.action
       }
     }
+    for (const item of plan.derivedEntries) {
+      const current = derivedById.get(item.id)
+      if (current === undefined || item.depth < current.depth) derivedById.set(item.id, { ...item })
+    }
+  }
+  const derivedEntries = [...derivedById.values()]
+    .sort((a, b) => a.depth - b.depth || a.id.localeCompare(b.id))
+  const derivedSurface = bySurface.get('derived')
+  if (derivedSurface !== undefined) {
+    derivedSurface.count = derivedEntries.length
+    derivedSurface.action = derivedAction(derivedEntries)
   }
   const first = plans[0]
   return {
     processed: plans.length,
     surfaces: [...bySurface.values()],
+    derivedEntries,
+    derivedCoverage: 'caller-readable-view',
     unowned: first === undefined ? UNOWNED_SURFACES.map((item) => ({ ...item })) : first.unowned,
   }
 }
