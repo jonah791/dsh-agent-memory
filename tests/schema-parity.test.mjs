@@ -124,6 +124,23 @@ async function seedFull(store) {
     // v0.27.0：生命周期状态（两态写入）。带 `disputed` 让派生读法 `lifecycle` 取到非默认值，
     // 否则 A117 对 lifecycle 只验到 'active' 这一个取值（分辨力减半）。
     status: 'disputed',
+    // v0.47 敏感分级（§11.2）。⚠ 主条目用 `L1`：它必须留在**默认检索面**里（A119 等既有渲染
+    // 判据靠它取条目）；`L2`/`L3` 的「默认面不返回」路径由下面另造的 L2 条目 + includeSensitive
+    // 视图覆盖——两条各司其职，合成一条会让既有判据静默失效。
+    sensitivity: 'L1',
+  })
+  // v0.47：另造一条 `L2` 条目——主条目必须「默认面可见」（既有渲染判据靠它），
+  // 而 `L2`/`L3` 的「默认面不返回」路径只有 `includeSensitive: true` 才走得到。
+  // 没有这一条，A117 的 includeSensitive 视图就是在比对一个空集。
+  await store.remember({
+    kind: 'knowledge',
+    title: 'L2 敏感分级的条目',
+    body: '这条标为 L2，用来让 includeSensitive 视图里真的出现 sensitivity 键',
+    tags: ['schema-parity'],
+    scope: WID,
+    level: null,
+    bucket: null,
+    sensitivity: 'L2',
   })
   // v0.21.0：`archival`（返回弧）只在**已归档**条目上出现 ⇒ 另造一条并归档，
   // 否则 A117 对 archival 恒真（「返回里没有该键」不构成证据）。
@@ -183,7 +200,8 @@ test('A117 ★ schema 一致性：execute 返回的每个键都被 output schema
   //   警告的「枚举式守卫在命名空间扩张时静默失效」。改成从真源出发，加字段自动被覆盖。
   const recallTool = byName.get('recall')
   // includeArchive: true —— `archival` 只在归档条目上出现，默认视图里看不到它
-  const recallValue = await recallTool.execute({ includeArchive: true }, EXEC)
+  // includeSensitive: true —— v0.47 起 `L2`/`L3` 不进默认检索面，不带它就对 sensitivity 恒真
+  const recallValue = await recallTool.execute({ includeArchive: true, includeSensitive: true }, EXEC)
   assert.ok(recallValue.results.length > 0, '夹具没落盘条目')
   assert.ok(Object.keys(DIMENSION_ITEM_FIELDS).length > 0, '前提：维度常量不得为空（否则本循环恒真）')
   for (const field of Object.keys(DIMENSION_ITEM_FIELDS)) {
@@ -199,7 +217,7 @@ test('A117 ★ schema 一致性：execute 返回的每个键都被 output schema
     // 两种视图都验：默认（无 archival）与 includeArchive（有 archival）。
     // 只验一种会让「只在另一种视图出现的键」逃过 schema 校验 —— 2026-10-17 的
     // memory_browse 事故就是这一类（工具整条被拒收）。
-    for (const args of [{}, { includeArchive: true }]) {
+    for (const args of [{}, { includeArchive: true }, { includeSensitive: true }]) {
       const tool = byName.get(name)
       const value = await tool.execute(args, EXEC)
       const problems = []

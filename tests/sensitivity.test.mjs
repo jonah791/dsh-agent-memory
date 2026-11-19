@@ -316,3 +316,29 @@ test('E6 ★无回退：不给 sensitivity 时检索行为与既有版本逐位�
   )
   assert.equal(plain.results[0].sensitivity, undefined, '未标注不透出 sensitivity 键（不猜成 L0）')
 })
+
+test('E7 ★结果项的新字段必须已在两个 output schema 声明（线上实测踩过：宿主整条拒收）', async () => {
+  const { byName, exec } = setup()
+  await byName.get('remember').execute({ text: 'L2 的结果项字段测试条目', sensitivity: 'L2' }, exec)
+
+  // recall：投影层透出 + schema 声明，缺任一处 ⇒ 宿主报 "is not a declared property"
+  const recall = byName.get('recall')
+  const recallValue = await recall.execute({ includeSensitive: true }, exec)
+  assert.equal(recallValue.results.length, 1)
+  const recallItem = recallValue.results[0]
+  assert.equal(recallItem.sensitivity, 'L2', '投影层必须透出派生读数')
+  const recallProps = new Set(Object.keys(recall.output.schema.properties.results.items.properties))
+  for (const key of Object.keys(recallItem)) {
+    assert.ok(recallProps.has(key), `recall 结果键 ${key} 未在 output.schema 声明 ⇒ 宿主会整条拒收`)
+  }
+
+  // memory_browse：同一条纪律（两个 schema 共用 DIMENSION_ITEM_FIELDS，一处漏即两处漏）
+  const browse = byName.get('memory_browse')
+  const browseValue = await browse.execute({ includeSensitive: true }, exec)
+  const browseItems = browseValue.groups.flatMap((group) => group.items)
+  assert.ok(browseItems.length > 0, 'browse 必须能返回该条目')
+  const browseProps = new Set(Object.keys(browse.output.schema.properties.groups.items.properties.items.items.properties))
+  for (const key of Object.keys(browseItems[0])) {
+    assert.ok(browseProps.has(key), `browse 结果键 ${key} 未在 output.schema 声明 ⇒ 宿主会整条拒收`)
+  }
+})

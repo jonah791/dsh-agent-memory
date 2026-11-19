@@ -796,6 +796,11 @@ export const DIMENSION_ITEM_FIELDS = {
     enum: ['personal', 'project', 'domain', 'system'],
     description: '空间归属（v0.27.0 · 方案 §3.2 四空间）：个人 / 项目 / 领域 / 系统——这条知识属于**谁的疆域**。与 `scope`（存储分区与准入）正交：scope 答「放哪、谁看得见」，本字段答「属于谁的疆域」，服务独立授权（`role.spaces`）与检索分区。未标注的条目省略该键（⚠ 省略 = 不知道；设了 spaces 的授权策略对它 fail-closed）。',
   },
+  sensitivity: {
+    type: 'string',
+    enum: ['L0', 'L1', 'L2', 'L3'],
+    description: '敏感分级（v0.47 · 方案 §11.2 四档）：**派生读数**——显式标注优先，正文含完整私钥块时派生成 `L3`。`L2`/`L3` 不进自动注入与默认检索面（取回需 `includeSensitive`）。未标注的条目省略该键（⚠ 省略 = **没判断过**，不是 `L0`）。',
+  },
 } as const
 
 /**
