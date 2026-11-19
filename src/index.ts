@@ -18,6 +18,7 @@ import { MemoryStore } from './store.ts'
 import { RelationStore } from './relations.ts'
 import { ConceptStore } from './thesaurus.ts'
 import { EntityStore } from './entities.ts'
+import { SourceStore } from './sources.ts'
 import { TimelineCompressor, type SummarizeFn } from './timeline.ts'
 import { summarizeEntries, type SummarizerConfig } from './summarizer.ts'
 import { registerMemoryTools, type MemoryToolDeps } from './tools.ts'
@@ -32,7 +33,7 @@ import { appendDedupeTrace, readDedupeTrace as readDedupeTraceFromSidecar } from
 import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import type { Concept, Entity, Entry, Grounding, Relation, Subject } from './types.ts'
+import type { Concept, Entity, Entry, Grounding, Relation, Source, Subject } from './types.ts'
 import { normalizeSubject } from './subject.ts'
 import { normalizeGrounding } from './grounding.ts'
 import { normalizeReviewAfter, normalizeWatchFor } from './temporal.ts'
@@ -286,7 +287,36 @@ export const entitySchema = zod.object({
   })).optional(),
 })
 
-/** 记忆域声明：条目表 + 关系表 + 概念表 + 实体表，key = `<scope>:<kind|relation|concept|entity>:<id>`（domain 即命名空间，规格 §2.2） */
+/**
+ * 来源实体（v0.35 · 方案 §5.2）：独立表，`SOURCE-0001` 每 scope 递增。
+ *
+ * 与 `entitySchema` 同一条纪律：**未声明的字段会在写入边界被静默剥掉而写入仍返回成功**
+ * （同一个坑第十五次）。`reliability` / `permissions` **刻意不带默认值**——它们缺省是
+ * 「未标注」，与「中等可靠」「无限制」是两件事（契约 S2）。
+ */
+export const sourceSchema = zod.object({
+  id: zod.string(),
+  scope: zod.string(),
+  type: zod.enum(['master', 'web', 'self', 'measured']),
+  location: zod.string(),
+  collectedAt: zod.string(),
+  owner: zod.string().optional(),
+  reliability: zod.string().optional(),
+  permissions: zod.array(zod.string()).optional(),
+  label: zod.string().optional(),
+  status: zod.enum(['active', 'retired']).optional(),
+  retiredNote: zod.string().optional(),
+  createdAt: zod.string(),
+  updatedAt: zod.string(),
+  revisions: zod.array(zod.object({
+    at: zod.string(),
+    action: zod.string(),
+    detail: zod.string(),
+    reason: zod.string().optional(),
+  })).optional(),
+})
+
+/** 记忆域声明：条目表 + 关系表 + 概念表 + 实体表 + 来源表，key = `<scope>:<kind|relation|concept|entity|source>:<id>`（domain 即命名空间，规格 §2.2） */
 export const memoryDomainSpec = defineDomain({
   name: 'agent_memory', // DSH 域名限制 /^[a-z][a-z0-9_]*$/（不允许连字符）
   version: 1,
@@ -306,6 +336,10 @@ export const memoryDomainSpec = defineDomain({
     // 存量文件里没有 `entities` 键 ⇒ 读出空表（判据：重启后 memory_stats.entities.total 为 0
     // 且不报 version-mismatch）。
     entities: domainTable<string, Entity>(entitySchema),
+    // 来源表（v0.35 · 方案 §5.2 独立来源记录）：同 `relations` / `concepts` / `entities`——
+    // 加表不抬 version，存量文件里没有 `sources` 键 ⇒ 读出空表（判据：重启后
+    // memory_stats.sources.total 为 0 且不报 version-mismatch）。
+    sources: domainTable<string, Source>(sourceSchema),
   },
 })
 
@@ -405,6 +439,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const concepts = new ConceptStore(domain.table('concepts'))
   // 实体权威档（v0.30.0 · 方案 §4.3）：独立表，撞名/合并/引用由 EntityStore 校验
   const entities = new EntityStore(domain.table('entities'))
+  // 来源实体（v0.35 · 方案 §5.2）：独立表；类型/位置必填、可靠度与权限**无默认值**
+  const sources = new SourceStore(domain.table('sources'))
 
   // 侧车用量轨迹（v0.6 价值体检器的用量信号）——**只追加 / 吞错 / 按体积轮转**，绝不改条目。
   // 路径约定与既有插件同源：`<DSH_HOME>/<plugin>-trace.jsonl`。
@@ -612,7 +648,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolveEvidence: NonNullable<MemoryToolDeps['resolveEvidence']> = (sessionId) =>
     lastSeqBySession.get(sessionId)
 
-  registerMemoryTools(ctx, { store, relations, concepts, entities, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
+  registerMemoryTools(ctx, { store, relations, concepts, entities, sources, loadConfig, compress, recompress, recordAccess, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })

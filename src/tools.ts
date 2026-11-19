@@ -68,6 +68,7 @@ import {
   type EntityDraft,
   type EntityStore,
 } from './entities.ts'
+import type { SourceStore } from './sources.ts'
 
 /** 概要重压的外部结果（工具层回报用；与 timeline.RecompressResult 解耦，界面只认这几个读数） */
 export interface RecompressOutcome {
@@ -183,6 +184,13 @@ export interface MemoryToolDeps {
    * 未接线时两个实体工具与 `memory_stats.entities` **响亮报错 / 明确标注**，不假装成功。
    */
   entities?: EntityStore
+  /**
+   * 来源实体（v0.35 · 方案 §5.2）：来源档案存储。
+   *
+   * 与 `entities` 同形的可选依赖（既有测试构造 deps 时不带它）；未接线时两个来源工具
+   * 与 `memory_stats.sources` **响亮报错 / 明确标注 `wired: false`**，不假装成功。
+   */
+  sources?: SourceStore
 }
 
 /** 缺省配置加载器：读取 .dsh/memory.yml，缺失走默认，非法 fail loud */

@@ -228,6 +228,73 @@ export interface EntityRevision {
 }
 
 /**
+ * 来源实体（v0.35 · 方案 §5.2 · 契约 `docs/semantic.md` §5.28）：**来源这个对象**，不是坐标。
+ *
+ * 与另三种载体的分工：
+ * - 条目 `source{}`：轻量写入的快捷方式，只有坐标与一句理由
+ * - `evidenceRefs`：证据的**精确坐标**字符串（某条消息 / 某个压缩块）
+ * - `sourced-from` 边：连到库内节点的关系
+ * - 本实体：来源的**身份与属性**，可被多条记忆复用
+ *
+ * 为什么需要它：前三者都只回答「在哪」，不回答「谁提供 / 多可靠 / 什么权限」——
+ * 方案 §5.2 的七项里只有 Location 与 Time 有落点。
+ */
+export interface Source {
+  /** 来源 ID：`SOURCE-0001` 形态（每 scope 递增，可口头引用） */
+  id: string
+  /** 存储分区（与条目 / 实体 / 概念同源：global 或 workspaceId） */
+  scope: string
+  /**
+   * 来源类型：与条目 `provenance` **共用同一枚举**（不立第二套词表）。
+   * 必填——「这条信息从哪来」没有合理的缺省值。
+   */
+  type: 'master' | 'web' | 'self' | 'measured'
+  /**
+   * 位置：`session:<id>#<seq>` / `url:<地址>` / `file:<路径>` / `compaction:<id>#<cid>`。
+   * 必填——来源必须有可回查的落点，否则它只是一句形容词。
+   */
+  location: string
+  /** 首次采集时刻（ISO）。复用时**不变**——它不是「最后访问时间」 */
+  collectedAt: string
+  /**
+   * 提供方：谁给的。与 `type` **正交**——`type` 答「哪类来源」，`owner` 答「谁提供的」。
+   * 自由文本不枚举：同一类来源的提供方无法穷举。
+   */
+  owner?: string
+  /**
+   * 可靠度：**无默认值**。不填 = 未标注，**不是「中等」**。
+   * 取值形态未定（契约 §5.28 未决），故用自由文本占位，不在这里发明一套档位。
+   */
+  reliability?: string
+  /**
+   * 权限：**本阶段只存不判**。§11.1 的四类权限（读/写/改/管）未建；
+   * 在来源层先发明一套授权语义，等权限层建好时两套必须合并，而合并代价永远高于当初不写。
+   */
+  permissions?: string[]
+  /** 人读的一句话说明 */
+  label?: string
+  /** 状态；**无默认值**（未给 = 适用中）。停用不删除（与概念、实体同纪律） */
+  status?: 'active' | 'retired'
+  /** 停用理由（仅 `status: 'retired'`） */
+  retiredNote?: string
+  createdAt: string
+  updatedAt: string
+  /** 变更记录：最近 MAX_SOURCE_REVISIONS 条 */
+  revisions?: SourceRevision[]
+}
+
+/** 来源的变更记录（与实体 / 概念 / 条目的 `revisions` 同形） */
+export interface SourceRevision {
+  at: string
+  /** 动作：create / update / retire */
+  action: string
+  /** 变更内容的人类可读说明 */
+  detail: string
+  /** 为什么改（可选；不填就是「没记原因」，不假装有） */
+  reason?: string
+}
+
+/**
  * 主体层（v0.13.0）：条目**关于谁**——`self`（我，爱丽丝）/ `master`（主人）。
  *
  * 与 `role`（条目归属，v0.5）**正交**：role 答「谁写的」，subject 答「关于谁的」。
