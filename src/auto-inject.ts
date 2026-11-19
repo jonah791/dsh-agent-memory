@@ -31,7 +31,8 @@ import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
 import { supersededByTag } from './succession.ts'
 import { expiryTag } from './temporal-dual.ts'
-import { isInjectable } from './lifecycle.ts'
+import { isInjectable, lifecycleTag } from './lifecycle.ts'
+import { provenanceTag } from './archive.ts'
 import { deriveSensitivity, isAutoInjectable } from './sensitivity.ts'
 import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
@@ -175,7 +176,13 @@ export function buildAutoRecallDigest(
       : snippet
     // v0.48（方案 §11.3）：标题与正文是**记忆数据**，不许携带能改写注入块结构的控制标签。
     // 中和只失效结构、不改语义（见 inject-boundary.ts 头注：不做指令检测器，那个无样本可标定）。
-    lines.push(`- ${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}] ${neutralizeControlTags(r.title)}（${date}${score}）：${neutralizeControlTags(payload)}`)
+    // v0.50（方案 §16.2）：补齐两处**只在 recall 侧打过、注入侧漏掉**的标记——
+    // `provenance=web/self`（外部/自推）与 `lifecycle=disputed`（存疑）。方案要「每种记忆不同调用
+    // 规则」，而「存疑信息不该被当确定事实说出来」这条在注入面此前没有任何标记可依（注入是每条
+    // 主人消息都跑的路径，正是最该看见它的地方）。两处 tag 都遵循同一条信噪比纪律：只在有值时出现。
+    const provenanceNote = provenanceTag(r.provenance)
+    const lifecycleNote = lifecycleTag(r.lifecycle)
+    lines.push(`- ${lifecycleNote}${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${provenanceNote}${projectNote}[${kind}] ${neutralizeControlTags(r.title)}（${date}${score}）：${neutralizeControlTags(payload)}`)
   }
   // 块内不再重复标题：块首的 header 已说明这块是什么（v0.48 起帧由 wrapInjectionBlock 统一）。
   let body = lines.join('\n')

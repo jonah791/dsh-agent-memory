@@ -25,7 +25,8 @@ import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
 import { supersededByTag } from './succession.ts'
 import { expiryTag } from './temporal-dual.ts'
-import { isInjectable } from './lifecycle.ts'
+import { isInjectable, lifecycleOf, lifecycleTag } from './lifecycle.ts'
+import { provenanceTag } from './archive.ts'
 import { deriveSensitivity, isAutoInjectable } from './sensitivity.ts'
 import { neutralizeControlTags, wrapInjectionBlock } from './inject-boundary.ts'
 
@@ -80,7 +81,14 @@ function lineOf(entry: Entry): string {
   // 改变我的判断（少数情形）；recall / memory_browse 里都能看到（同 auto-inject 不注入
   // watchFor 的理由：预算要花在会改变动作的信息上）。
   const supersededNote = supersededByTag(entry.supersededBy)
-  return `- ${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${projectNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
+  // v0.50（方案 §16.2「每种记忆应当采用不同的调用规则」）：补齐 **recall 侧早就有、注入侧漏掉**
+  // 的两处标记——`lifecycle=disputed`（❓存疑）与 `provenance=web/self`（[外部]/[自推]）。
+  // 为什么这里最要紧：速览是每个会话最先看到的文本，而「存疑信息不该被当作确定事实说出来」
+  // 此前在注入面**没有任何标记可依**（`lifecycle.ts` 的表格写着它可注入且该打标，
+  // 实际只接在 tools.ts 一侧）。两处 tag 都遵循同一条信噪比纪律：只在有值时才出现。
+  const lifecycleNote = lifecycleTag(lifecycleOf(entry))
+  const provenanceNote = provenanceTag(entry.provenance)
+  return `- ${lifecycleNote}${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${provenanceNote}${projectNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
 }
 
 /**
