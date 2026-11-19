@@ -542,7 +542,7 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   let scored = filtered.map((entry) => ({
     entry,
     score: v2Tokens !== undefined && v2Idf !== undefined && v2Df !== undefined
-      ? scoreEntryV2(entry, v2Tokens, v2Idf, v2Df, filtered.length, tuning.coverageWeight)
+      ? scoreEntryV2(entry, v2Tokens, v2Idf, v2Df, filtered.length, tuning.coverageWeight, tuning.fieldAgg, tuning.smoothPower)
       : weighted !== undefined
         ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen, tuning, query.entityMatches)
         : scoreEntry(entry, tokens, idf, avgBodyLen, tuning, query.entityMatches),
@@ -716,18 +716,38 @@ function scoreEntryV2(
   df: ReadonlyMap<string, number>,
   total: number,
   coverageWeight: number,
+  fieldAgg: 'sum' | 'max' = 'sum',
+  smoothPower = 1,
 ): number {
   const view = lowerOf(entry)
   let score = 0
   const apply = (term: string, coefficient: number): void => {
-    if (view.aliases.some((alias) => alias.includes(term))) score += V2_FIELD_WEIGHTS.alias * coefficient
+    const onAlias = view.aliases.some((alias) => alias.includes(term))
+    if (fieldAgg === 'max') {
+      // 只取**最靠入口的那一次命中**：一个词的证据强度由它最强的字段决定，不按命中字段数放大。
+      // 与 `sum` 的差别正是「一个泛词在四字段都命中就拿 6.5 倍」这条结构缺陷的治法。
+      const best = onAlias
+        ? V2_FIELD_WEIGHTS.alias
+        : view.tags.some((tag) => tag.includes(term))
+          ? V2_FIELD_WEIGHTS.tag
+          : view.title.includes(term)
+            ? V2_FIELD_WEIGHTS.title
+            : view.body.includes(term)
+              ? V2_FIELD_WEIGHTS.body
+              : 0
+      score += best * coefficient
+      return
+    }
+    if (onAlias) score += V2_FIELD_WEIGHTS.alias * coefficient
     if (view.tags.some((tag) => tag.includes(term))) score += V2_FIELD_WEIGHTS.tag * coefficient
     if (view.title.includes(term)) score += V2_FIELD_WEIGHTS.title * coefficient
     if (view.body.includes(term)) score += V2_FIELD_WEIGHTS.body * coefficient
   }
   for (const term of tokens.l1) {
     const base = idf.get(term) ?? 1
-    const smooth = total > 0 ? 1 / (1 + (df.get(term) ?? 0) / total) : 1
+    const ratio = total > 0 ? (df.get(term) ?? 0) / total : 0
+    // `smoothPower = 0` ⇒ 不做平滑，直用 IDF（幂零次恒 1，不必特判分支）
+    const smooth = 1 / (1 + ratio) ** smoothPower
     apply(term, base * smooth)
   }
   for (const term of tokens.l2) apply(term, (idf.get(term) ?? 1) * coverageWeight)
@@ -965,6 +985,10 @@ interface ResolvedTuning {
   scorer: 'v1' | 'v2'
   /** v2 的 L2 覆盖层系数（v0.34）；设计值 0.35，实测必须扫描 */
   coverageWeight: number
+  /** v2 的 L1 字段聚合方式（v0.35）；`sum` = 现行行为 */
+  fieldAgg: 'sum' | 'max'
+  /** v2 的 L1 平滑幂次（v0.35）；`1` = 现行行为，`0` = 不做平滑 */
+  smoothPower: number
 }
 
 /**
@@ -985,6 +1009,9 @@ function resolveTuning(tuning?: RecallTuning): ResolvedTuning {
     dropQuestionFrames: tuning?.dropQuestionFrames ?? false,
     scorer: tuning?.scorer ?? 'v1',
     coverageWeight: tuning?.coverageWeight ?? V2_COVERAGE_WEIGHT,
+    fieldAgg: tuning?.fieldAgg ?? 'sum',
+    // ⚠ `??` 而不是 `||`：`0` 是合法取值（= 关掉平滑，直用 IDF）
+    smoothPower: tuning?.smoothPower ?? 1,
   }
 }
 
