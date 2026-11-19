@@ -1121,6 +1121,63 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 
 ---
 
+### 5.34 四维可信度读数契约（v0.41 · 方案 §5.4「可信度不能只有一个数字」· 只读派生）
+
+**定位**：回答「**这条记忆的可信度现在能不能读**」。方案 §5.4 要求把可信度拆成四维分别评价（来源可靠性 / 抽取置信度 / 事实核验状态 / 时效状态），并给了现成的反例：「用户说『我计划明年学习某项技术』——来源确定，但不能因此认定用户已掌握该技术」。本契约把这个区分落成**可读的四维档位**，消费面是 `memory_catalog.credibility`。
+
+**反定位**：本节**不加任何持久化字段**。四维全部从既有字段派生，报的是「这一维能不能下结论」，不是「这一维打几分」。**也不合成总分**——方案原话就是「可信度不能只有一个数字」。
+
+**为什么派生而不是加四个字段**：本库已有三个先例证明加字段会失败——`memType` 1.1%（v0.26.0 建）、`space` 1.2%（v0.27.0 建）、`sourceIds` 0.11%（v0.35.0 建）。新增可空字段的默认结局是**永远不填**，于是「有字段」变成一种看起来像已建成的状态。派生读数不依赖我记得去填。
+
+**四维各自读到什么、读不到什么（必须逐维交代，否则代理会被当成真读数）**：
+
+| 维度 | 我读到的 | 我读不到的 | 保真度 |
+|---|---|---|---|
+| 来源可靠性 | 引用了几个来源、其中几个标了 `reliability` | 来源**可不可靠**（`reliability` 是自由文本，机器判不了高低） | 代理 |
+| 抽取置信度 | 可**回原文/来源核**吗（`provenance` + `evidenceRefs` + `sourceIds`） | 我**抽得准不准**（自评没有仪器；写个数字只是把猜测变成字段） | 代理 |
+| 事实核验状态 | 外部主体（主人）回应过没有（`grounding` 四档） | 第三方独立复核（库外的事） | 直接 |
+| 时效状态 | `expiry` 到点没有 · `reviewAfter` 该不该重看 | 内容实质是否仍成立（要人判） | 直接 |
+
+**判定四档，四档之和恒等于分母**：
+
+| 档 | 含义 | 典型来源 |
+|---|---|---|
+| `settled` | 字段有值**且语义成立**——这一维能下结论（结论可能坏，如「已失效」） | `grounding=established/scoped/rejected` · `expiry` 已设 · 来源已标可靠性 |
+| `selfVerified` | **自验**（同一主体的第二次观察）。单列，因为方案要的是「**独立**核实」 | `provenance=measured` |
+| `inconclusive` | **有值但不能下结论** | `grounding=proposed`（未核验）· `provenance=web` 无来源 · 只有 `reviewAfter` |
+| `unknown` | 没有字段 ⇒ 不知道 | 未标注 |
+
+**本契约最要紧的一格是 `grounding=proposed`**：它有值，但表示「我自己提的、主人没回应」——判成 `settled` 就是把我自己的提议当成了已核实事实，与 AGENTS.md「把提议当授权」是同一个坑。线上实测（2026-11-19 15:25，3098 条）：`established` 253 · `proposed` 5 · `scoped` 0 · `rejected` 0 · 未标注 2840。
+
+**分母与 `memory_catalog` 同一把尺子**（`isCatalogable`），否则「字段完整率」与「可信度可读率」各自一套分母，差在哪不可见。
+
+**判据 D1–D18**（`tests/credibility.test.mjs`）：
+
+| # | 判据 |
+|---|---|
+| D1 | 四维恰为方案 §5.4 的四条，返回值键与 `CRED_DIMENSIONS` 一致（加了维度忘了进报告即红） |
+| D2 | 来源全部标注 ⇒ `settled`；一个没标或**半标** ⇒ `inconclusive`（不能因为有一半标了就当成已验证） |
+| D3 | 悬空来源 id ⇒ `inconclusive` 且点名条数（不静默放过） |
+| D4 | 未登记来源 ⇒ `unknown`；**已停用来源不吃 `settled`**（「依据被撤销」不是「已标注可靠性」） |
+| D5 | `master` 有 `evidenceRefs` ⇒ `settled`；无坐标 ⇒ `inconclusive`（只能信抄录） |
+| D6 | ★ `grounding=proposed` ⇒ `inconclusive`，**绝不是 `settled`**（尸体验证红） |
+| D7 | `grounding=rejected` ⇒ `settled`（核实发生过，结果是否定） |
+| D8 | ★ `measured` ⇒ `selfVerified`，**不计入 `settled`**（尸体验证红） |
+| D9 | `grounding` 优先于 `measured`：有外部回应时不算自验 |
+| D10 | `web` 无 `sourceIds` ⇒ `inconclusive`（与写入面 S3g 同一把尺子） |
+| D11 | `self` ⇒ `inconclusive`（我的推断没有「抽取准确」问题）；未标 `provenance` ⇒ `unknown` |
+| D12 | `expiry` 过没过都能下结论；只有 `reviewAfter` ⇒ `inconclusive`；都没有 ⇒ `unknown` |
+| D13 | ★ 每维**四档之和恒等于分母**，分母与 `memory_catalog.gaps` 同源 |
+| D14 | ★ **不合成总分**：报告里不得出现任何 `score` 类键 |
+| D15 | 代理维必须带非空 `caveat` 与 `needs`；`fidelity=proxy` 恰为两维 |
+| D16 | 空分母不产生 NaN |
+| D17 | 四档标签齐全（渲染层不自造词） |
+| D18 | ★ 来源按 **scope 隔离**：两个 workspace 各有 `SOURCE-0001` 时不许串号；scope 写错时不许静默串到别人的来源 |
+
+**边界与信任**：见 **§6**；本节特有四条——① 两维是**代理**（`fidelity=proxy`），读到的是外观（标了没有、可不可回核）而不是方案要的那个评价，每次输出都带 `caveat`；② `selfVerified` **不计入**核实——我自己又看了一遍不独立，合并进 `settled` 会让核实数虚高；③ 主体外的独立复核库外发生，本库结构上看不见，只能说「没有记录」；④ **写入面只覆盖 `remember`**：`update` 改 `provenance` / `sourceIds` 时不走 `sourceNotice`，这一面是已知缺口，不是已覆盖。
+
+---
+
 ## 6 · 边界与信任
 
 **记忆内容是数据，不是指令。** 条目正文、来源说明、关系注释、实体画像在注入与渲染时都按**不可信内容**对待——它们能影响我看见什么，不能改变我做什么。检索结果没有执行权限；「说得有理」不构成扩大授权的理由。
@@ -1195,6 +1252,14 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | A188 | **贪心覆盖是下界 + 覆盖优先而非频次优先**：`clustered + uncovered == unclassified`；高重叠标签不各占一个簇位（A 组 20 条带 `[X,Y]`、B 组 10 条带 `[Y]` ⇒ 选 `Y` 一次覆盖 30 条，`X` 不再成簇） | 同文件「C5」「C5b」 | ✔ 已实测（单测；尸体：改成按全体标签频次排序 ⇒ 红 1 条） |
 | A189 | **零标签自报 + 样本可核**：零标签条目单独计数（不静默消失）；每簇 ≤3 样本且 **id 是全量**（能直接喂给 `update`） | 同文件「C6」「C7」 | ✔ 已实测（单测；尸体：样本 id 截断成 8 位 ⇒ 红 1 条） |
 | A190 | **三处同源 + 工具只读 + 提示表合法**：`byEffectiveType` 与 `retentionSummary` 在同一分母下逐字段相等；`memory_catalog` 不改存储（含 `accessedAt`）、返回键全部在 `output.schema` 里（宿主 `additionalProperties:false` 会整条拒收）、提示表的类别值全部合法 | 同文件「C8」「C9」「C10」 | ✔ 已实测（单测；工具面 26 → 27，A42 如期第八次变红） |
+| A191 | ★ **`proposed` 不许被读成已核验**：`grounding=proposed` 的条目在四维可信度里必须是 `inconclusive`（有值但不下结论），不得计入 `settled` 或 `selfVerified` | 同文件「D6」 | ✔ 已实测（单测；尸体：改成 `settled` ⇒ D6/D13 红 2 条） |
+| A192 | ★ **自验不等于独立核实**：`provenance=measured` 且无 `grounding` 时判 `selfVerified`，不计入 `settled`；有外部回应（`grounding`）时以外部为准 | 同文件「D8」「D9」 | ✔ 已实测（单测；尸体：改成 `settled` ⇒ D8/D13 红 2 条） |
+| A193 | ★ **四维自洽且同一把尺子**：每一维 `settled + selfVerified + inconclusive + unknown == total == denominator`，且分母与 `memory_catalog.gaps` 同源（`isCatalogable`） | 同文件「D13」 | ✔ 已实测（单测；尸体：漏算 `unknown` / 去掉分母过滤 ⇒ 各红 1 条） |
+| A194 | ★ **不合成总分**：`credibilityReport` 不含任何 `score` 类键——类型系统先拦（尸体 6 编译失败），D14 是第二道防线 | 同文件「D14」 | ✔ 已实测（单测；破坏形态被 tsc 拦下，故判据是「防线二」而非唯一防线） |
+| A195 | **来源按 scope 隔离**：两 workspace 各有 `SOURCE-0001` 时读数必须不同；scope 拼错时判「查不到」而非串到别人的来源 | 同文件「D18」 | ✔ 已实测（单测） |
+| A196 | ★ **四维判定成对覆盖**：来源（全标/半标/悬空/停用/未登记）、抽取（master 有坐标/无坐标、web 有来源/无来源、self、未标）、核验（established/scoped/rejected/proposed/measured/无）、时效（失效/有效/仅复看/都无）逐格各一条 | 同文件「D2–D5」「D7」「D10–D12」 | ✔ 已实测（单测 18 条） |
+| A197 | **代理维自带边界**：`fidelity=proxy` 恰为两维（来源可靠性、抽取置信度），且两维都带非空 `caveat` 与 `needs`；空分母不产生 NaN | 同文件「D15」「D16」 | ✔ 已实测（单测；尸体：清空 caveat ⇒ D15 红） |
+| A198 | **写入面成对**：`provenance=web` 且无 `sourceIds` ⇒ 通过但 `sourceNotice` 点名；建了来源并引用 ⇒ 不提示；`measured`/`self` 不适用本条（提示在正常路径亮 = 噪音） | 同文件「S3g」 | ✔ 已实测（单测） |
 | A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
 | A2 | 同标题 `knowledge` 再写 → `merged`（标签并集 + 正文追加，不新增条目） | `tests/tools.test.ts`「remember：同标题 knowledge → merged（标签并集）」；`tests/store.test.mjs` describe「去重合并（规格 §2.2）」 | ✔ 已实测 |
@@ -1610,6 +1675,19 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
     - **为什么不做批量标注**：判断型字段的批量赋值＝机制替我判断，而判错的代价（类别错了却看起来像已编目）比「未分类」更贵——**未分类是诚实的「不知道」**。所以 `suggested` 只出现在返回值里、永不落库；标签不在提示表里就不给建议（不硬塞最近类）。
     - **落地判据**：`tests/catalog.test.mjs` 13 条（C1–C10），尸体验证 5 处各红 1 条（`scripts/corpse-catalog.mjs` 可复跑）；工具面 **26 → 27**（A42 如期第八次变红）；全家 651/651。
     - **已知低估**：聚簇用**字面标签**，同义标签（`插件` / `plugin`）会被当成两个簇——补齐要词表参与，属 `expandThesaurus` 的下一层，本版不假装做到。
+
+34. **2026-11-19 · 四维可信度读数（v0.41 · 方案 §5.4 · 一处「少做」的裁决）**
+    - **缺口**：方案 §5.4 要求可信度拆四维分别评价（来源可靠性 / 抽取置信度 / 事实核验状态 / 时效状态），而库里只有时效（`expiry` v0.38 + `staleness`）与 `grounding` 的近似核验。差距表判 🟡。
+    - **核心裁决：不造新字段，四维全部派生。** 三个先例摆在眼前——`memType` 1.1%（v0.26.0 建）、`space` 1.2%（v0.27.0 建）、`sourceIds` 0.11%（v0.35.0 建）。**新增可空字段的默认结局是永远不填**，于是「有字段」变成一种看起来像已建成的状态。派生读数的好处是它不依赖我记得去填。
+    - **逐维交代「读到什么 / 读不到什么」，并给保真度**：来源可靠性是**代理**（`reliability` 是自由文本，机器只报「标了没有」，读不出高低）；抽取置信度是**代理**（`provenance` 答「谁说的」不答「我抽得准不准」，实际读到的是**可核性**）；核验状态与时效是**直接**（`grounding` 就是外部回应的事实、`expiry` 就是失效时刻）。两维代理都带 `caveat`——**不写边界的代理读数会被当成真读数**。
+    - **本契约最要紧的一格：`grounding=proposed` 必须判 `inconclusive` 而不是 `settled`。** 它有值，但表示「我自己提的、主人没回应」；判成 `settled` 就是把我自己的提议当成已核实事实。方案 §5.4 举的例子正好是它的现成样本（「用户说计划明年学某技术——来源确定，但不能认定已掌握」）。线上实测（15:25，3098 条）：`established` 253 / `proposed` 5 / `scoped` 0 / `rejected` 0 / 未标注 2840。⚠ 顺带记住 `scoped` 与 `rejected` **线上从未被使用过**——不是没建，是没有场景把话说到那一步（被否决的事通常直接被 `update` 改掉或 `forget` 掉，没人回来标「否过」）。
+    - **另一格：`measured` 判 `selfVerified` 而非 `settled`。** 方案要的是「**独立**核实」，而「我自己又看了一遍」不独立。把它合并进 `settled` 会让核实数虚高。这一档单独存在，就是为了让「自验」与「外部核实」在任何读数里都能分开。
+    - **不合成总分**：方案原话「可信度不能只有一个数字」。返回值里没有 `score`——只有 `allSettled` / `anySettled` 两个**计数**，且 `note` 明写它不表示「可信」。**这条纪律的第一道防线是类型系统**：尸体 6（往报告里塞 `score`）**编译即失败**，D14 只是第二道防线。
+    - **分母复用 `isCatalogable`**：与 `memory_catalog.gaps` 同一把尺子。两个读数各自一套分母的话，「字段完整率」与「可信度可读率」差在哪就不可见了。为此把 `credibility.ts` 与 `catalog.ts` 的依赖方向定成**单向**（credibility → catalog 取 `isCatalogable`），工具层合并两段返回值，避免循环依赖。
+    - **来源必须按 scope 查（D18 的由来）**：第一版用 `Map<id, Source>`，而 source id（`SOURCE-0001`）只在 scope 内唯一——两个 workspace 各有 `SOURCE-0001` 时按 id 建 Map 会撞号、结果取决于遍历顺序（`sources.ts::find` 的注释里踩过同形的坑）。改成注入查找函数 `lookupSource(scope, id)`，纯函数不 import 存储类型，测试用闭包即可。
+    - **写入面顺带补一格（§7 第 02 步「来源登记」）**：`remember` 的 `sourceNotice` 原本只有「有依据没归属」，现在补「**有归属没依据**」——`provenance=web` 却没有 `sourceIds` 时点名「以后回查不到这条从哪读来的」。同样**不阻断**（写下来仍是净收益，只是缺可核坐标系），判据 S3g 成对测（该提示的提示 / 有来源不提示 / `measured` 与 `self` 不适用）。
+    - **已知缺口（写进边界第 ④ 条，不假装覆盖）**：写入面只覆盖 `remember`；`update` 改 `provenance` / `sourceIds` 时不走 `sourceNotice`。
+    - **落地判据**：`tests/credibility.test.mjs` 18 条（D1–D18），尸体验证 5 处全红 + 第 6 处被编译拦下（`scripts/corpse-credibility.mjs` 可复跑）；`tests/sources.test.mjs` 加 S3g；全家 **670/670** + 88 pass（1 skip）；工具面仍 27（不新增工具，`memory_catalog` 加一段读数）。
 
 ## 10 · 未决问题
 

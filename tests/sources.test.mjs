@@ -253,6 +253,25 @@ test('S3f 写入形态返回值不越 output.schema（线上 additionalPropertie
   assert.equal(clean.sourceNotice, undefined, '正常的形状不该带提示（提示在正常路径亮 = 噪音）')
 })
 
+test('S3g ★ 标了 web 却没有来源登记 ⇒ 通过但点名（§7 第 02 步的写入面载体）', async () => {
+  const { sources, byName, exec } = setupE2E()
+  const remember = byName.get('remember')
+  const notesOf = async (args) => (await remember.execute(args, exec)).sourceNotice ?? []
+
+  // ① 外部资料、没建来源 ⇒ 点名「以后回查不到从哪读来的」
+  const bare = await notesOf({ text: '# 读到一个网页\n正文', provenance: 'web' })
+  assert.match(bare.join('\n'), /sourceIds/, '外部依据缺来源登记必须点名')
+
+  // ② 建了来源并引用 ⇒ 不提示（提示在正常路径亮 = 噪音，与 S3a 同一条纪律）
+  const page = await sources.create({ scope: WID, type: 'web', location: 'url:https://example.com/a' })
+  const registered = await notesOf({ text: '# 有来源的外部资料\n正文', provenance: 'web', sourceIds: [page.id] })
+  assert.equal(registered.length, 0, '有来源登记时不该提示')
+
+  // ③ 这条提示只管「外部资料」：我的实测与我的推断都不适用
+  assert.equal((await notesOf({ text: '# 我实测的读数\n正文', provenance: 'measured' })).length, 0)
+  assert.equal((await notesOf({ text: '# 我的推断\n正文', provenance: 'self' })).length, 0)
+})
+
 test('S4 反查完整：按来源恰好列出引用它的条目（不多不少）', async () => {
   const { sources, byName, exec } = setupE2E()
   const src = await sources.create({ scope: WID, type: 'master', location: 'session:s-1#7' })

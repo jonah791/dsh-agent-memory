@@ -46,6 +46,7 @@ import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, par
 import { auditMemory } from './audit.ts'
 import { retentionSummary } from './retention.ts'
 import { catalogReport } from './catalog.ts'
+import { credibilityReport } from './credibility.ts'
 import { mergeForgetPlans, planForget } from './forget.ts'
 import type { ForgetCertificate } from './forget.ts'
 import { randomUUID } from 'node:crypto'
@@ -612,6 +613,12 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         if (provenance === undefined) {
           sourceNotice.push('本条有依据（sourceIds）但没标归属（provenance）——provenance 是判断题、没有默认值，缺了「这条结论算谁的」以后就查不到。')
         }
+      } else if (provenance === 'web') {
+        // §7 第 02 步「来源登记」的写入面载体（v0.41）：外部资料没有来源记录，以后查不到从哪读来的。
+        // 与上一条对称：那条是「有依据没归属」，这条是「有归属没依据」。
+        // ⚠ 同样**不阻断**——写下来仍是净收益，只是缺了可核的坐标系（与 §5.34 抽取置信度的判定同一把尺子：
+        // web 无 sourceIds ⇒ 抽取置信度 inconclusive）。
+        sourceNotice.push('标了 provenance=web（外部资料）但没给 sourceIds——以后回查不到这条是从哪读来的。要可核就先 memory_source 建档再引用；若只是一句转述，保留本条说明即可。')
       }
       const written = await deps.store.remember({
         kind,
@@ -4602,6 +4609,40 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
           uncovered: { type: 'integer', required: true },
           zeroTag: { type: 'integer', required: true },
           byEffectiveType: { type: 'object', additionalProperties: true, required: true },
+          // §5.4 四维可信度（v0.41）：与上面四维缺口**是两件事**——上面报「字段填了没有」，
+          // 这里报「这些字段合起来能不能回答一个问题」。四档之和恒等于 denominator。
+          credibility: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              denominator: { type: 'integer', required: true, description: '与顶层 denominator 同一把尺子（isCatalogable）' },
+              dimensions: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    dimension: { type: 'string', required: true },
+                    label: { type: 'string', required: true },
+                    fidelity: { type: 'string', required: true, description: 'direct = 字段直接答了这一维；proxy = 只是代理' },
+                    settled: { type: 'integer', required: true },
+                    selfVerified: { type: 'integer', required: true },
+                    inconclusive: { type: 'integer', required: true },
+                    unknown: { type: 'integer', required: true },
+                    total: { type: 'integer', required: true },
+                    readableRate: { type: 'number', required: true, description: 'settled / total——是「能读的比例」，不是可信度' },
+                    needs: { type: 'array', required: true, items: { type: 'string' }, description: '这一维成立需要哪些字段（缺口可行动）' },
+                    caveat: { type: 'string', required: true, description: '代理边界与已知盲区（proxy 维必读）' },
+                  },
+                },
+              },
+              allSettled: { type: 'integer', required: true },
+              anySettled: { type: 'integer', required: true },
+              note: { type: 'string', required: true },
+            },
+          },
         },
       },
       render: (_args, value) => {
@@ -4619,6 +4660,25 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
           const samples = cluster.samples.map((s) => `${s.id.slice(0, 8)} ${s.title.slice(0, 28)}`).join(' / ')
           lines.push(`  - [${cluster.tag}] ×${cluster.count} ${hint}｜样本 ${samples}`)
         }
+        // §5.4 四维可信度——**与上面四维缺口不是同一件事**：那报「字段填了没有」，
+        // 这报「这些字段合起来能不能回答一个问题」。四档之和恒等于分母（不留静默残留）。
+        const cred = value.credibility
+        const credParts = cred.dimensions.map((d) => {
+          const parts = [`${d.label} 能读 ${pct(d.settled, d.total)}`]
+          if (d.selfVerified > 0) parts.push(`自验 ${d.selfVerified}`)
+          if (d.unknown > 0) parts.push(`不知道 ${d.unknown}`)
+          if (d.fidelity === 'proxy') parts.push('〔代理〕')
+          return parts.join(' · ')
+        })
+        lines.push(`四维可信度（§5.4，**不含总分**）：${credParts.join('｜')}`)
+        lines.push(
+          `  四维全通 **${cred.allSettled}** 条 · 至少一维能读 **${cred.anySettled}** 条 · 分母 ${cred.denominator}（与上同一把尺子）`,
+        )
+        lines.push(`  ⚠ ${cred.note}`)
+        for (const d of cred.dimensions) {
+          if (d.fidelity !== 'proxy') continue
+          lines.push(`  ⚠ ${d.label}（代理，需 ${d.needs.join(' + ')}）：${d.caveat}`)
+        }
         lines.push('⚠ 建议是**提问不是答案**（标签可能同时指两类）；「覆盖不到」的那批是长尾，只能逐条判。本工具不改任何条目。')
         return [{ type: 'text', text: lines.join('\n') }]
       },
@@ -4633,10 +4693,30 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
         view,
         explicitScope: args.scope,
       })
-      return catalogReport(entries, {
+      const report = catalogReport(entries, {
         ...(args.maxClusters !== undefined ? { maxClusters: args.maxClusters } : {}),
         ...(args.minClusterSize !== undefined ? { minClusterSize: args.minClusterSize } : {}),
       })
+      // §5.4 四维可信度（在 catalog.ts 之外调，避免 catalog ⇄ credibility 循环依赖）。
+      // 来源表未接线时不给查找器：那时有 `sourceIds` 一律判「查不到」（如实），
+      // 不把「装配缺陷」静默成「来源都正常」。
+      const store = deps.sources
+      const lookupSource =
+        store === undefined
+          ? undefined
+          : (scope: string, id: string) => {
+              const source = store.find(scope, id)
+              if (source === undefined) return undefined
+              return {
+                id: source.id,
+                ...(source.reliability !== undefined ? { reliability: source.reliability } : {}),
+                ...(source.status === 'retired' ? { retired: true } : {}),
+              }
+            }
+      return {
+        ...report,
+        credibility: credibilityReport(entries, lookupSource === undefined ? {} : { lookupSource }),
+      }
     },
   })
 }
