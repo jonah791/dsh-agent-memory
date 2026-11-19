@@ -2064,7 +2064,7 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
             properties: {
               byEffectiveType: { type: 'object', additionalProperties: true, required: true, description: '生效类别分布：七类 + unknown（类未知）。⚠ 与 `byMemType` **不是同一件事**——那个只统计我写的值，这个含按 `kind` 推导的部分。' },
               bySource: { type: 'object', additionalProperties: true, required: true, description: '类别来源三档：explicit（我写的）/ derived-from-kind（按 `kind` 语义同构推导）/ unknown（推不出，不猜）。' },
-              needsAction: { type: 'object', additionalProperties: true, required: true, description: '各类「该看一眼」的条数（episodic 超 90 天 / semantic 已失效 / procedural 复查死线已过 / operational 超 14 天且无观察条件）。`unknown` 不计——它没有类别节奏。' },
+              needsAction: { type: 'object', additionalProperties: true, required: true, description: '各类「该看一眼」的**信号**条数（episodic 超 90 天 / semantic 已失效 / procedural 复查死线已过 / operational 超 14 天且无观察条件）。`unknown` 不计——它没有类别节奏。⚠ **它是信号数不是改档数**：基础档已经比目标档更需人看时，信号存在而档位不变（实测 `needsAction.episodic=47` 而 `policyApplied=0`——那 47 条基础档已是 ARCHIVE，修正层不把 ARCHIVE 降回 DEMOTE）。两个数回答不同问题：这个答「有多少条该按类别节奏看一眼」，`memory_audit.retention.policyApplied` 答「有多少条的档位真的被改了」。' },
             },
           },
         },
@@ -2110,7 +2110,11 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
             : '未接线（recordAudit 缺失）——此处的 0 不代表没有动作'}`
           // 七类保留策略（v0.39 · 方案 §10.1）：单独一行——`needsAction` 非零就是行动信号；
           // `bySource` 三档让「我写的」与「按 kind 推的」不混在一起（后者不是覆盖率）。
-          + `\n保留策略：类别来源 explicit ${value.retention.bySource.explicit} / 按 kind 推导 ${value.retention.bySource['derived-from-kind']} / 类未知 ${value.retention.byEffectiveType['unknown']}｜各类该看一眼：${Object.entries(value.retention.needsAction as Record<string, number>).filter(([, n]) => n > 0).map(([type, n]) => `${type} ${n}`).join(' · ') || '（无）'}`,
+          // ⚠ 线上验收（2026-11-19 15:06 实测）抓到：`needsAction` 与改档数并列会被读成矛盾——
+          // 库里 `needsAction.episodic=47` 而 `policyApplied=0`，因为那 47 条的基础档**已是 ARCHIVE**，
+          // 而修正层不把 ARCHIVE 降回 DEMOTE。两个数必须各自标明口径，否则读数自己在制造疑问。
+          + `\n保留策略：类别来源 explicit ${value.retention.bySource.explicit} / 按 kind 推导 ${value.retention.bySource['derived-from-kind']} / 类未知 ${value.retention.byEffectiveType['unknown']}`
+          + `\n该看一眼（**信号数，不等于改档数**——基础档已更需人看时信号不产生改档）：${Object.entries(value.retention.needsAction as Record<string, number>).filter(([, n]) => n > 0).map(([type, n]) => `${type} ${n}`).join(' · ') || '（无）'}`,
       }],
     },
     async execute(args, exec) {
@@ -4391,7 +4395,11 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
           // 七类保留策略（v0.39 · 方案 §10.1）：分布只说明「有多少条归了哪类」，
           // `policyApplied` 才说明「策略真的改了什么」——两个都印，否则「按七类定策略」
           // 与「什么都没做」在报告上长得一样。
-          `保留策略：类未知 ${value.retention.byEffectiveType['unknown']} 条 · 类别来源 explicit ${value.retention.bySource.explicit} / 按 kind 推导 ${value.retention.bySource['derived-from-kind']}｜类别修正改档 ${value.retention.policyApplied.total} 条${value.retention.policyApplied.total > 0 ? `（${Object.entries(value.retention.policyApplied.byCode).map(([code, n]) => `${code} ${n}`).join(' · ')}）` : '（未触发任何类别策略）'}`,
+          `保留策略：类未知 ${value.retention.byEffectiveType['unknown']} 条 · 类别来源 explicit ${value.retention.bySource.explicit} / 按 kind 推导 ${value.retention.bySource['derived-from-kind']}`,
+          // ⚠ 线上验收（2026-11-19 15:06 实测）：`needsAction 47` 与 `改档 0` 并列会被读成矛盾。
+          // 实际是同一件事的两面——那 47 条的基础档**已经是 ARCHIVE**，而修正层不把 ARCHIVE
+          // 降回 DEMOTE（「只往更需要人看的方向推」）。两个数分开印并各自标明口径。
+          `类别修正：改档 ${value.retention.policyApplied.total} 条${value.retention.policyApplied.total > 0 ? `（${Object.entries(value.retention.policyApplied.byCode).map(([code, n]) => `${code} ${n}`).join(' · ')}）` : '（无档位被改）'}｜该看一眼的**信号数**（不是改档数）：${Object.entries(value.retention.needsAction as Record<string, number>).filter(([, n]) => n > 0).map(([type, n]) => `${type} ${n}`).join(' · ') || '（无）'}`,
         ]
         for (const candidate of value.candidates.slice(0, 10)) {
           const title = candidate.title.length > 42 ? candidate.title.slice(0, 41) + '…' : candidate.title

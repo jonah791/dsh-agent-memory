@@ -1061,10 +1061,11 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 |---|---|
 | `memory_audit` 候选的 `reasons` | 类别修正命中时追加理由码（`E-decay` / `S-expired` / `P-verify` / `F-hold` / `O-stale`）；**未命中时不出现**（R6：正常路径不噪音） |
 | `memory_audit.retention` 段 | `byEffectiveType` / `bySource` / `policyApplied`（改档计数）+ `notes[]`——「类别修正到底改了谁」可核 |
-| `memory_stats.retention` 块 | `byEffectiveType`（七类 + `unknown`）/ `bySource`（三档）/ `needsAction`（各类该看一眼的条数） |
+| `memory_stats.retention` 块 | `byEffectiveType`（七类 + `unknown`）/ `bySource`（三档）/ `needsAction`（各类该看一眼的**信号**条数） |
+| ⚠ **`needsAction` ≠ `policyApplied`（两个数回答不同问题）** | `needsAction` 答「有多少条该按类别节奏看一眼」，`policyApplied` 答「有多少条的档位**真的被改了**」。二者不相等是常态而非缺陷：线上实测（2026-11-19 15:06）`needsAction.episodic=47` 而 `policyApplied=0`——那 47 条基础档**已是 `ARCHIVE`**，而修正层不把 `ARCHIVE` 降回 `DEMOTE`（硬约束 1）。⇒ **两个数必须分开印、各自标口径**（R11）；把它们并列成一个「处理了 N 条」会自己制造疑问 |
 | `forget({ tier })` | 读的是**修正后**档位（它重跑 audit）；效果是 `tier=ARCHIVE` 不再含 `profile` 类——这是修正层的安全副作用，不是特例，也不额外实现 |
 
-**判据 R1–R8**（`tests/retention.test.mjs`）：
+**判据 R1–R11**（`tests/retention.test.mjs`）：
 
 | # | 判据 |
 |---|---|
@@ -1076,6 +1077,9 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | R6 | **正常路径不噪音**：显式分类 + 未触发任何策略 ⇒ `reasons` 里不出现类别判据码 |
 | R7 | **两处同口径**：`memory_stats.retention.byEffectiveType` 与 `memory_audit.retention.byEffectiveType` 在同一输入下逐字段相等（第二把尺子 = 造出两个真源） |
 | R8 | **只读仍成立**：跑 audit 前后存储文件字节级一致、`accessedAt` 不变（类别层不得破 §5.9 硬约束） |
+| R9 | **判据码自洽**：五个码各自可触发，且理由行**点名它自己**（只看散文、拼不回判据码的文案不合格） |
+| R10 | **时间语义**：边界是严格大于（恰好 90 天不触发）· 未设 `expiry` 是「不知道」不是「还没失效」· 写了 `watchFor` 就不按时间催（我已设好锚点） |
+| R11 | ★**信号数与改档数可区分**：`needsAction` 有读数时 `policyApplied` 仍可为 0，且条目档位不变——两个数回答不同问题，**并列成一个「处理了 N 条」会让读数自己制造疑问**（线上实测 47 / 0 就是这个形态） |
 
 **边界与信任**：见 **§6**；本节特有**三条**——① `effectiveMemType` 的推导**不是**给条目补字段（存储里 `memType` 仍为空，只有读取口径不同），所以它不能用来「事后声称覆盖率达标」；② `profile` 永不自动归档**只约束自动建议**，我仍可显式 `forget({id})` 归档任一条目；③ **`E-decay` 的可达性由基础档参数决定**（实测出来的耦合）：缺省 `audit.archive_min_age_days = 14`，所以 age > 90 且无 `role` / `refs` 的条目基础档**已经是 `ARCHIVE`**，而修正层不把 `ARCHIVE` 降到 `DEMOTE`（硬约束 1）⇒ `E-decay` 实际只对**有归属或承重**的老情景记忆生效。这不是缺陷（老而无归属的情景本就该归档），但改 `archive_min_age_days` 时必须连带重看本节——**调大它会让 `E-decay` 覆盖更广**，而这两处改动的耦合不会报错。
 
@@ -1147,6 +1151,7 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | A180 | ★**正常路径不噪音 + 记账只记真实变更**：未触发策略 ⇒ `reasons` 里不出现类别判据码、候选不带 `retentionCode`、`policyApplied.total == 0`；改档才计入且按判据码分桶 | 同文件「R6」「R6b」 | ✔ 已实测（单测） |
 | A181 | ★**两处同口径**：`memory_stats.retention` 与 `memory_audit.retention` 的 `byEffectiveType` / `bySource` / `needsAction` 在同一批输入下**逐字段相等**（`retentionSummary` 是唯一实现——两处各写一遍必然漂移，而漂移不会报错） | 同文件「R7」 | ✔ 已实测（单测） |
 | A182 | **只读 + 判据码自洽**：跑 `memory_audit` / `memory_stats` 前后存储**逐字节不变**（含 `accessedAt`）；五个判据码各自可触发且理由行点名它自己；时间语义（严格大于、未设 ≠ 未失效、有观察条件就不按时间催） | 同文件「R8」「R9」「R10」 | ✔ 已实测（单测；尸体：删掉判据码文案 ⇒ 红 2 条） |
+| A183 | ★**信号数与改档数可区分**：`needsAction` 有读数时 `policyApplied` 仍可为 0（`aged(100)` 的情景条目信号 1 条、改档 0 条、档位仍是 `ARCHIVE`）——两个数回答不同问题，**并列成一个「处理了 N 条」就是读数自己在制造疑问** | 同文件「R11」 | ✔ 已实测（单测；**线上验收抓到的形态**：库里 47 / 0） |
 | A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
 | A2 | 同标题 `knowledge` 再写 → `merged`（标签并集 + 正文追加，不新增条目） | `tests/tools.test.ts`「remember：同标题 knowledge → merged（标签并集）」；`tests/store.test.mjs` describe「去重合并（规格 §2.2）」 | ✔ 已实测 |
@@ -1551,7 +1556,8 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
     - **回退口径只认语义同构**：`kind='episodic'`→`episodic`、`kind='fact'`→`semantic` 允许推导（同一个词的两种写法 / 方案定义里同一类）；`kind='knowledge'` 可被五类解释 ⇒ `unknown`，**推不出就不推**。三档 `source`（`explicit` / `derived-from-kind` / `unknown`）始终可辨——推导**不是**给条目补字段，存储里 `memType` 仍为空。
     - **实测出来的配置耦合（写进 §5.32 边界第 ③ 条）**：缺省 `audit.archive_min_age_days = 14`，所以 age>90 且无 `role`/`refs` 的条目基础档已是 `ARCHIVE`，而修正层不把 `ARCHIVE` 降到 `DEMOTE` ⇒ `E-decay` 实际只对有**归属或承重**的老情景记忆生效。改那个参数会连带改变本节的覆盖面，而耦合不会报错——所以两处必须一起看。
     - **判据纪律上的一处收获**：首次尸体验证时「去掉 `unknown` 零修正」全绿——不是判据没分辨力，而是它的四条夹具**全都「不触发任何策略」**，所以「给 unknown 塞默认类别」也不会红。补了一条带 `expiry` 的知识条目后，该破坏形态立刻红 4 条。**夹具只覆盖「不触发」的路径，等于没覆盖「不许触发」这条纪律。**
-    - **落地判据**：`tests/retention.test.mjs` 14 条（R1–R10），尸体验证 5 处各红 1–4 条（复跑脚本 `scripts/corpse-retention.mjs`）；全家 **637/637** + 88 pass（1 skip）；工具面仍 26（无新工具，只加读数块与渲染行）。
+    - **落地判据**：`tests/retention.test.mjs` 15 条（R1–R11），尸体验证 5 处各红 1–4 条（复跑脚本 `scripts/corpse-retention.mjs`）；全家 **637/637** + 88 pass（1 skip）；工具面仍 26（无新工具，只加读数块与渲染行）。
+    - **线上验收（15:05–15:07，两次重启）**：① `memory_stats.retention` 出现且 `explicit 24 + 按 kind 推导 830 + 类未知 2243 = 3097 = total`（口径自洽）；② `needsAction.episodic = 47`——**真实行动信号**（47 条情景记忆超 90 天）；③ `policyApplied = 0`，原因是配置耦合（那 47 条基础档已是 `ARCHIVE`）。⚠ **第 ③ 项暴露一个读数缺陷并当场修掉**：`needsAction 47` 与 `改档 0` 并列显示会被读成「47 条处理了、0 条改档」的矛盾——两个数回答不同问题，必须各自标明口径。改渲染（拆两行 + 标「信号数，不等于改档数」）、改两处 schema description、加判据 R11 把该形态钉成契约（A183）。**这是线上验收第三次抓到单测看不见的东西**（前两次：v0.37 的 ENOENT 误报与短 id 零区分度）——共同点是**读数层自身的表达缺陷**，而单测只验数值不验「数值放在一起会不会被误读」。
 
 ## 10 · 未决问题
 

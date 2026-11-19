@@ -369,6 +369,29 @@ test('R9 五个判据码各自可触发，且理由行点名它自己', () => {
   }
 })
 
+// ---------- R11 信号数与改档数可区分 ----------
+
+test('R11 ★信号数与改档数可区分：needsAction 有读数时 policyApplied 仍可为 0', () => {
+  // 线上实测形态（2026-11-19 15:06）：库里 needsAction.episodic=47 而 policyApplied=0。
+  // 不是 bug，是同一条配置耦合的两面：age>90 且无 role/refs ⇒ 基础档已 ARCHIVE，
+  // 而修正层的 E-decay 目标是 DEMOTE（更低）⇒ 不改档。两个数回答不同问题。
+  const result = auditMemory({
+    entries: [
+      aged(100, { id: 'sig', kind: 'episodic' }),
+      aged(400, { id: 'arc', title: '归档对照臂', kind: 'knowledge' }),
+    ],
+    config: DEFAULT_AUDIT_CONFIG,
+    now: NOW,
+  })
+  assert.equal(result.retention.needsAction.episodic, 1, '信号必须被计到（该按情景节奏看一眼）')
+  assert.equal(result.retention.policyApplied.total, 0, '基础档已是 ARCHIVE ⇒ 没有任何档位被改')
+  assert.equal(
+    result.candidates.find((c) => c.id === 'sig').bucket,
+    'ARCHIVE',
+    '条目本身仍落 ARCHIVE——信号存在不等于档位要变',
+  )
+})
+
 // ---------- R10 时间语义 ----------
 
 test('R10 时间语义：边界是严格大于、未设 ≠ 未失效、有锚点就不按时间催', () => {
