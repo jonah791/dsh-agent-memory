@@ -16,6 +16,7 @@ import { lifecycleOf } from './lifecycle.ts'
 import { collapseFamilies, renderFamilyNote } from './family.ts'
 import { transcriptiveFlagOf } from './origin.ts'
 import { archivalOf } from './archive.ts'
+import { deriveSensitivity } from './sensitivity.ts'
 
 /** 检索默认截断条数（未显式给 limit 时） */
 export const DEFAULT_RECALL_LIMIT = 20
@@ -1151,6 +1152,8 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
   // 归档因果归一（v0.21.0）：读一次、下面透出两格（存量条目要走 source.reason 回退，
   // 重复调用会让「归一口径」出现两个调用点）。
   const archival = archivalOf(entry)
+  // 敏感分级（v0.47 · 方案 §11.2）——投影层是 recall / memory_browse 的共用点，逐条只算一次
+  const sensitivity = deriveSensitivity(entry)
   return {
     id: entry.id,
     kind: entry.kind,
@@ -1212,6 +1215,9 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     ...(entry.sourceIds !== undefined && entry.sourceIds.length > 0
       ? { sourceIds: entry.sourceIds }
       : {}),
+    // 敏感分级（v0.47 · 方案 §11.2）——**同一投影点、同一教训**（第八次在这里补字段）。
+    // 透出**派生读数**（显式 > 私钥块派生 L3 > 未标注）：未标注不写键，不猜成 L0。
+    ...(sensitivity.level !== undefined ? { sensitivity: sensitivity.level } : {}),
     // 归档因果（v0.21.0）：只对**已归档**条目出现。经 `archivalOf` 归一而不是直取存储字段
     // ——存量 1260 条的归档原因还在 `source.reason` 里（零迁移方案，理由见 archive.ts 决定 1），
     // 不归一就会出现「老条目查不到为什么没了」。

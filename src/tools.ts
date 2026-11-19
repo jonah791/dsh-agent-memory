@@ -38,6 +38,7 @@ import { countByStaleness, cueTag, filterByStaleness, parseReviewAfterArg, parse
 import { transcriptiveTag } from './origin.ts'
 import { countByMemType, filterByMemType, memTypeTag, parseMemTypeArg, parseMemTypeFilterArg } from './memType.ts'
 import { countBySpace, filterBySpace, parseSpaceArg, parseSpaceFilterArg, spaceTag } from './space.ts'
+import { countBySensitivity, detectCredential, deriveSensitivity, filterBySensitivity, parseSensitivity, requiresExplicitConsent, stricterSensitivity } from './sensitivity.ts'
 import { countByLifecycle, filterByLifecycle, lifecycleTag, parseLifecycleFilterArg, parseStatusArg } from './lifecycle.ts'
 import { evidenceTag, formatEvidenceRef, parseEvidenceRefsArg } from './evidence.ts'
 import { archivalOf, archiveReasonTag, countByArchiveReason, countByProvenance, filterByProvenance, parseArchiveReasonTypeArg, parseProvenanceArg, provenanceTag, PROVENANCE_TYPES } from './archive.ts'
@@ -471,6 +472,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         items: { type: 'string' },
         description: '来源实体引用（v0.35.1 · 方案 §5.2）：引用的**来源实体 id**（`SOURCE-0001` 形态）。与 `evidenceRefs` 分工：那个是坐标串，这个连到可复用的来源对象（类型 / 可靠度 / 权限只记一处，不在每条记忆上复制）。**与 `provenance` 正交**（v0.35.1 裁决）：provenance 答「这条归属谁」，本字段答「能去哪核」——我读主人的方案得出的结论应是 `provenance=self` + 引用 master 来源，**不要为了对齐而改归属**。引用了不存在的来源会**被拒**；引用已停用来源、或有依据没标归属只在回执里**点名**，不阻断。',
       },
+      sensitivity: { type: 'string', enum: ['L0', 'L1', 'L2', 'L3'], description: '敏感分级（v0.47 · 方案 §11.2 四档）：`L0` 一般公开信息 / `L1` 普通个人工作信息 / `L2` 私人或敏感个人信息（**不进自动注入与默认检索面**，取回需 `includeSensitive`）/ `L3` 高风险信息（**写入需 `allowSensitive: true`**）。**没有默认值**：不填 = 未标注（≠ `L0`）——未标注按既有行为处理（可见、进注入），机制不替你判断敏感性。⚠ 判断型字段：由我判断后标；不从 `memType`/`space`/标签推断（那些答「关于什么」，不答「多敏感」）。' },
+      allowSensitive: { type: 'boolean', description: '显式放行敏感写入（v0.47）：① 正文命中**凭据形态**（完整私钥块 / GitHub token / AWS access key / Anthropic key / Slack token）时的唯一放行开关；② `sensitivity=L3` 的必要条件。⚠ 放行会计入操作审计；**凭据本体仍不该进记忆库**——记忆只记「key 在哪、何时验活」，值放凭据保管库。真实用例只有「脱敏样例 / 格式说明」。' },
       dryRun: { type: 'boolean', description: '预检（v0.19.1 · lh-0f54524a）：**只跑近重复检测、返回候选与强度，不落库**。⚠ 2026-11-12 起这是这条检测器**唯一**的入口（写入路径不再自动跑它，见 `src/dedupe.ts` 顶部证据）。它**宁滥勿缺**：会列出一批字面相关的条目供你自己筛，`强度` 是绝对计数、**不代表语义相似**。仍值得走它而不是先 `recall`，因为两者候选集**不同源**（实测：先 recall 搜「测试期望写错」返回 96 条却不含真正的母条目，而这条检测器报出了它）。' },
     },
     output: {
@@ -487,6 +490,7 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
           similar: { type: 'array', items: { type: 'string' }, description: '（**仅 dryRun 形态**）字面相关候选（`id — 标题（强度 N）`；有内容时附一行「节：小节标题 / …」，让人不必再去读正文就能判断覆盖范围）；无候选时省略该键' },
           hint: { type: 'string', description: '（**仅 dryRun 形态**）与候选无关的补充警告（如「库已满」）；无内容时省略该键' },
           sourceNotice: { type: 'array', items: { type: 'string' }, description: '（**仅写入形态**）来源元数据提示：有依据没标归属（缺 provenance）/ 引用了已停用来源。⚠ 它**不阻断写入**——条目已落库，这只是「元数据不全」的点名，不是失败。无内容时省略该键。' },
+          sensitivityNotice: { type: 'array', items: { type: 'string' }, description: '（**仅写入形态**）敏感分级提示：`L2` 的调用规则后果（不进默认路径）/ 凭据形态被 `allowSensitive` 放行的提醒。⚠ 同样不阻断写入；无内容时省略该键。' },
         },
       },
       render: (args, value) => {
@@ -515,6 +519,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         // 否则「有依据没标归属」这类提示等于没发生（条目已落库，用户只有这一次机会看到）。
         const lines = [`已${ACTION_TEXT[value.action]}记忆条目 ${value.id}（${args.kind ?? 'knowledge'}）`]
         for (const note of value.sourceNotice ?? []) lines.push(`⚠ ${note}`)
+        // 敏感分级提示（v0.47）：只在真发生时印——`L2` 与「放行了凭据形态」两种，都必须可见
+        for (const note of value.sensitivityNotice ?? []) lines.push(`⚠ ${note}`)
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
@@ -571,6 +577,38 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       const taskId = execPos.taskId
       const { writeScope } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
       const { title, body } = splitText(text)
+      // 隐私与安全检查（v0.47 · 方案 §7 第 04 步 + §11.2）——两道，**互相正交**：
+      //   ① 形态硬闸：命中极窄凭据形态 ⇒ 默认拒绝。防的是「我没意识到自己在写凭据」；
+      //      五类形态在活库 1,796 条实测命中 0（宽形态假阳 100%，见 docs/design/aml-sensitivity.md §2）。
+      //   ② 等级字段：`L3`（高风险）写入需 allowSensitive 明确确认；`L2` 照写但只走显式检索面。
+      // 未标注不猜（≠ L0）——存量 100% 未标注，若一律当敏感则全部从默认路径消失。
+      const sensitivity = parseSensitivity(args.sensitivity)
+      const credentialHits = detectCredential(`${title}\n${body}`)
+      const sensitivityReadout = deriveSensitivity({ title, body, ...(sensitivity !== undefined ? { sensitivity } : {}) })
+      if (args.allowSensitive !== true) {
+        if (credentialHits.length > 0) {
+          throw new Error(
+            `remember: 正文命中凭据形态（${credentialHits.map((hit) => hit.kind).join(' / ')}，长度已隐藏）。`
+            + '凭据不进配置 / 记忆库 / 仓库 / 聊天（AGENTS.md §1.2 硬约束）——把值写进凭据保管库，记忆里只记「key 在哪、何时验活」。'
+            + '若这段确为脱敏样例（不是真凭据），加 allowSensitive: true 放行（放行会计入操作审计）。',
+          )
+        }
+        if (requiresExplicitConsent(sensitivityReadout)) {
+          throw new Error(
+            'remember: sensitivity=L3（高风险信息）默认禁止进入长期记忆库（方案 §11.2）。'
+            + '确需保存加 allowSensitive: true——注意 L2/L3 不进自动注入与默认检索面，`recall`/`memory_browse` 需 `includeSensitive: true` 才取得到。',
+          )
+        }
+      }
+      // 写入值 = 显式与派生的**较严者**：我不能同时说「这是 L0」和「正文里有私钥块」
+      const writtenSensitivity = stricterSensitivity(sensitivity, sensitivityReadout.level)
+      const sensitivityNotice: string[] = []
+      if (writtenSensitivity === 'L2') {
+        sensitivityNotice.push('本条标为 L2（私人或敏感个人信息）——不进自动注入与默认检索面，`recall`/`memory_browse` 需 `includeSensitive: true` 才取得到。')
+      }
+      if (credentialHits.length > 0) {
+        sensitivityNotice.push(`本条命中凭据形态（${credentialHits.map((hit) => hit.kind).join(' / ')}）但已 allowSensitive 放行——请确认它是脱敏样例而不是真凭据。`)
+      }
       // max_entries 守卫：仅当会新建时拦截（更新/合并不受限）
       const active = deps.store.list(writeScope)
       const wouldCreate = !(
@@ -664,6 +702,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         ...(provenance !== undefined ? { provenance } : {}),
         // 来源实体引用（v0.35 · 方案 §5.2）：已在上方校验过存在性、provenance 必给、类型一致
         ...(sourceIds !== undefined && sourceIds.length > 0 ? { sourceIds } : {}),
+        // 敏感分级（v0.47 · 方案 §11.2）：只有**判断过**才写（未标注不写键，不猜成 L0）
+        ...(writtenSensitivity !== undefined ? { sensitivity: writtenSensitivity } : {}),
         // 生效时间（v0.24.0）：只在新建时盖章（store 层同形处理——命中已有条目时保留原值）。
         ...(validAfter !== undefined ? { validAfter } : {}),
         ...(occurredAt !== undefined ? { occurredAt } : {}),
@@ -696,6 +736,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         action: written.action,
         // 来源元数据提示（v0.35.1）：**不阻断写入**——它们是「不全」不是「错」，见上方裁决注释。
         ...(sourceNotice.length > 0 ? { sourceNotice } : {}),
+        // 敏感分级提示（v0.47）：`L2` 的调用规则后果必须当场说清（条目已落库，只有这一次机会）
+        ...(sensitivityNotice.length > 0 ? { sensitivityNotice } : {}),
       }
     },
   })
@@ -791,6 +833,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       memType: { type: 'array', items: { type: 'string', enum: ['episodic', 'semantic', 'procedural', 'profile', 'project', 'relational', 'operational'] }, description: '内容分类过滤（v0.26.0 · 方案 §3.1 七类）：只看某几类馆藏（可多选）——`semantic` 语义 / `procedural` 程序 / `project` 项目 / `operational` 运行 / `profile` 画像 / `relational` 关系 / `episodic` 情景。缺省 = 不过滤。⚠ 未分类条目在任何取值下都不返回（它们的类型是「不知道」，不是某一类）。' },
       space: { type: 'array', items: { type: 'string', enum: ['personal', 'project', 'domain', 'system'] }, description: '空间过滤（v0.27.0 · 四空间）：只看某几个空间的条目。缺省 = 不过滤。⚠ 未标注空间的条目在任何取值下都不返回（它的空间是「不知道」）。' },
       status: { type: 'array', items: { type: 'string', enum: ['active', 'pending', 'disputed', 'superseded', 'archived', 'deleted'] }, description: '生命周期过滤（v0.27.0 · 六态）：只看处于某几态的条目。缺省 = 不过滤。取值是派生读法（lifecycleOf），不是存储字段直读。⚠ 按 `archived`/`deleted` 过滤时**自动包含归档**（不必再传 includeArchive）。' },
+      includeSensitive: { type: 'boolean', description: '是否包含敏感条目（v0.47 · 方案 §11.2）：缺省 **false** ⇒ `L2`（私人/敏感）与 `L3`（高风险）**不返回**。设 true 才有。⚠ 未标注的条目**始终照常返回**（它们不是 L0，是「没判断过」——若把未标注当敏感，全部存量会从默认路径消失，见 docs/semantic.md §5.38）。' },
       project: { type: 'string', description: '执行位置过滤（v0.23.0）：只看某个**项目**的条目（如 `alice` / `pp`）。缺省 = 不过滤。用途：① 换到别的目录干活时取回「那个项目的经验」② 自查「这个项目的结论都有哪些」。⚠ 可选筛子，不是可见性边界。' },
       taskId: { type: 'string', description: '执行位置过滤（v0.23.0）：精确到某个**任务**（`dsh-project-state` 的任务 id）。**必须与 project 同时给**（任务 id 只在项目内唯一，单给会报错）。用途：取回「这个任务一路留下的经验」= 按执行路径聚合，而不是按内容相似度捞。' },
       grounding: { type: 'string', description: '约定状态过滤（v0.14.0）：`proposed` = **只看我自己提的、主人未回应的事**——自查「我有没有把提议当成定论」时用它；`rejected` = 只看主人否决过的（防我旧事重提）；`established` = 只看主人明确说过的。缺省 = 不过滤。⚠ 同为**可选筛子**，不是可见性边界。' },
@@ -1073,7 +1116,9 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           }
         }
       }
-      const result = recallEntries(filterByLifecycle(filterBySpace(filterByMemType(entries, memTypes), spaces), statuses), {
+      // 敏感度过滤（v0.47 · 方案 §11.2）：`L2`/`L3` 不进**默认**检索面（未标注照旧通过——不猜成 L2，
+      // 否则 100% 存量会消失）。`includeSensitive: true` 是唯一入口，且它不会改变摘要/正文的呈现。
+      const result = recallEntries(filterBySensitivity(filterByLifecycle(filterBySpace(filterByMemType(entries, memTypes), spaces), statuses), args.includeSensitive === true), {
         query: effectiveQuery.length > 0 ? effectiveQuery : undefined,
         kind: args.kind,
         tags: args.tags,
@@ -1998,6 +2043,27 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           byMemType: { type: 'object', additionalProperties: true, required: true, description: '内容分类分布（v0.26.0 · 方案 §3.1 七类）：episodic / semantic / procedural / profile / project / relational / operational / **unclassified**（未分类）。⚠ unclassified 与任何一类都是两件事——它是「还没判断」，不是「属于某类」；之和恒等于 total。' },
           bySpace: { type: 'object', additionalProperties: true, required: true, description: '空间归属分布（v0.27.0 · 方案 §3.2 四空间）：personal（个人）/ project（项目）/ domain（领域）/ system（系统）/ **unclassified**（未标注）。⚠ unclassified 是「还没判断」，不是某个空间；之和恒等于 total。' },
           byLifecycle: { type: 'object', additionalProperties: true, required: true, description: '生命周期分布（v0.27.0 · 方案 §3.3 六态）：active / pending / disputed / superseded / archived / deleted。**派生读法**（lifecycleOf 优先级 deleted > archived > superseded > disputed > pending > active），六态之和恒等于 total。' },
+          bySensitivity: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            description: '敏感分级分布（v0.47 · 方案 §11.2 四档）：byLevel 为 L0/L1/L2/L3，unlabeled 为**未标注**。⚠ unlabeled 不是 L0——L0 是「判断过这是公开信息」，未标注是「没判断」；四档 + unlabeled 之和恒等于 total。未标注长期≈总数说明这一维还没被用起来（判据见 docs/semantic.md §5.38）。',
+            properties: {
+              total: { type: 'integer', required: true },
+              unlabeled: { type: 'integer', required: true, description: '未标注（≠ L0：没判断过，按既有行为可见）' },
+              byLevel: {
+                type: 'object',
+                additionalProperties: false,
+                required: true,
+                properties: {
+                  L0: { type: 'integer', required: true, description: 'L0 一般公开信息' },
+                  L1: { type: 'integer', required: true, description: 'L1 普通个人工作信息' },
+                  L2: { type: 'integer', required: true, description: 'L2 私人或敏感个人信息（不进默认路径）' },
+                  L3: { type: 'integer', required: true, description: 'L3 高风险（不进默认路径；写入需允许）' },
+                },
+              },
+            },
+          },
           relations: {
             type: 'object',
             additionalProperties: false,
@@ -2119,6 +2185,9 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           // 空间归属 / 生命周期（v0.27.0）：同上——未标注长期≈总数说明这一维没被用起来，
           // 生命周期是六态派生读法（六态之和 == total）
           + `\n空间归属：${JSON.stringify(value.bySpace)}；生命周期：${JSON.stringify(value.byLifecycle)}`
+          // 敏感分级（v0.47 · 方案 §11.2）：四档 + 未标注单独一行——`unlabeled` 不是 L0，
+          // 未标注长期≈总数说明这一维没被用起来（与内容分类/空间归属同一判读方式）
+          + `\n敏感分级：L0 ${value.bySensitivity.byLevel.L0} / L1 ${value.bySensitivity.byLevel.L1} / L2 ${value.bySensitivity.byLevel.L2} / L3 ${value.bySensitivity.byLevel.L3} / 未标注 ${value.bySensitivity.unlabeled}（分母 ${value.bySensitivity.total}）`
           // 关系层（v0.28.0）：单独一行——wired=false 必须看得见（「没接线」≠「零条」）
           + `\n关系层：${value.relations.wired
             ? `${value.relations.total} 条类型化边（有效 ${value.relations.live} / 已退役 ${value.relations.expired}；覆盖 ${value.relations.nodesCovered} 个条目；来源 ${JSON.stringify(value.relations.byProvenance)}；可信度 ${value.relations.withConfidence} 条 / 有效期 ${value.relations.withValidity} 条）`
@@ -2191,6 +2260,19 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
         // 空间归属 / 生命周期（v0.27.0）：与 byMemType 同一批样本（**之和 == total**）
         bySpace: countBySpace(entries),
         byLifecycle: countByLifecycle(entries),
+        // 敏感分级（v0.47 · 方案 §11.2）：四档 + 未标注，**之和 == total**。
+        // ⚠ `unlabeled` 是「还没判断」，不是 `L0`——两者在默认路径上行为相同（都出现），
+        // 但含义相反：`L0` 是判断过「公开信息」，未标注是没判断。见 semantic.md §5.38。
+        // 显式构造对象字面量（不是展开 SensitivityDistribution）：output schema 推断要求
+        // 可赋给 `Record<string, JsonValue>`，接口类型没有索引签名会被 tsc 拒。
+        bySensitivity: (() => {
+          const dist = countBySensitivity(entries)
+          return {
+            total: dist.total,
+            byLevel: { L0: dist.byLevel.L0, L1: dist.byLevel.L1, L2: dist.byLevel.L2, L3: dist.byLevel.L3 },
+            unlabeled: dist.unlabeled,
+          }
+        })(),
         // 七类保留策略（v0.39 · 方案 §10.1）：与 `memory_audit.retention` **同源同口径**
         // （`retentionSummary` 是唯一实现）——`needsAction` 是各类「该看一眼」的条数，
         // 它是「让 memType 有后果」这件事在读数层的入口。
@@ -2329,6 +2411,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       staleness: { type: 'array', items: { type: 'string', enum: ['expired', 'due-soon', 'fresh'] }, description: '时效维过滤（v0.15.0）：只看某档时效状态的条目——`expired`（**已过复查死线**）/ `due-soon`（7 天内到期）/ `fresh`。用于**按时间线**翻「哪些结论该重看了」（recall 要查询词，这里不要）。缺省 = 不过滤。⚠ 只筛「设了死线」的条目——未设死线的条目时效状态是「不知道」，不是「有效」。' },
       expiryState: { type: 'array', items: { type: 'string', enum: ['active', 'expired', 'unset'] }, description: '失效状态过滤（v0.38 · 方案 §9.3）：只看某几档——`expired` **已失效**（时间到了，别再当事实用）/ `active` 还没到 / `unset` 未设失效时刻。⚠ 与 `staleness` **互不干扰**：那个筛「复查死线」（提醒维），这个筛「内容是否已失效」（事实维），可同时用。缺省 = 不过滤。' },
       superseded: { type: 'string', description: '替代状态筛（v0.24.0）：`current`（还没被替代）/ `superseded`（已被替代）。缺省 = 不过滤，**已过时条目默认仍会出现**（对照是它的全部价值）。用途：翻档案时只挑「已经作废的那批」看演替史。' },
+      includeSensitive: { type: 'boolean', description: '是否包含敏感条目（v0.47 · 方案 §11.2）：缺省 **false** ⇒ `L2`/`L3` 不返回。与 recall 同一口径——未标注条目**始终照常返回**（它们不是 L0，是「没判断过」）。' },
     },
     output: {
       schema: {
@@ -2477,7 +2560,8 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
         statuses,
       )
       // 失效过滤（v0.38）：可选筛子，未给 = 零拷贝透传
-      const entriesByExpiry = filterByExpiryState(entries, expiryStates ?? [], new Date())
+      // 敏感度过滤（v0.47 · 方案 §11.2）：与 recall 同一口径——`L2`/`L3` 不进默认面，未标注照旧通过
+      const entriesByExpiry = filterBySensitivity(filterByExpiryState(entries, expiryStates ?? [], new Date()), args.includeSensitive === true)
       const result = browseEntries(entriesByExpiry, {
         kind: args.kind,
         tags: args.tags,

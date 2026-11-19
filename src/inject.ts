@@ -26,6 +26,17 @@ import { stalenessTag } from './temporal.ts'
 import { supersededByTag } from './succession.ts'
 import { expiryTag } from './temporal-dual.ts'
 import { isInjectable } from './lifecycle.ts'
+import { deriveSensitivity, isAutoInjectable } from './sensitivity.ts'
+
+/**
+ * 注入面准入（v0.47 · 方案 §11.2）：在生命周期准入之上叠敏感分级——`L2`/`L3` **不进自动注入**。
+ *
+ * 自动路径不经调用方判断（同 `misuse.ts` 的 C1 零容忍：这条路上出错我无从察觉），
+ * 所以宁可少注入。未标注照旧进（不猜成 `L2`——那会让全部存量消失，见 `semantic.md` §5.38）。
+ */
+function isInjectableEntry(entry: Entry): boolean {
+  return isInjectable(entry) && isAutoInjectable(deriveSensitivity(entry))
+}
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
@@ -92,15 +103,15 @@ export function buildMemoryDigest(
   // 常驻层：global fact 全量（数量少，预算内优先）
   // v0.27.0：注入只给 `isInjectable()` 的条目——`pending` 待审核**不进上下文**（候选区未过审核
   // 就自己挤进注入，等于跳过了候选区这个设计本身）；`archived` / `deleted` 同理。
-  const facts = globalFacts.filter((e) => e.kind === 'fact' && isInjectable(e))
+  const facts = globalFacts.filter((e) => e.kind === 'fact' && isInjectableEntry(e))
   for (const entry of facts) lines.push(lineOf(entry))
 
   // 概要层：summary 条目按 bucket 降序（高密度索引优先）
-  const summaries = scopeEntries.filter((e) => e.kind === 'summary' && isInjectable(e))
+  const summaries = scopeEntries.filter((e) => e.kind === 'summary' && isInjectableEntry(e))
   summaries.sort((a, b) => (a.bucket ?? a.createdAt) < (b.bucket ?? b.createdAt) ? 1 : -1)
 
   // 近期明细：非 summary 按 updatedAt 降序
-  const recents = scopeEntries.filter((e) => e.kind !== 'summary' && isInjectable(e))
+  const recents = scopeEntries.filter((e) => e.kind !== 'summary' && isInjectableEntry(e))
   recents.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
 
   const budgeted = [...summaries, ...recents]
@@ -154,7 +165,7 @@ export function installMemoryInject(ctx: Context, deps: MemoryInjectDeps): void 
     const scopes = narrowReadScopes([GLOBAL_SCOPE, scope], view, undefined)
     const globalFacts = scopes.includes(GLOBAL_SCOPE)
       ? applyRoleView(
-        deps.store.list(GLOBAL_SCOPE).filter((entry) => entry.kind === 'fact' && isInjectable(entry)),
+        deps.store.list(GLOBAL_SCOPE).filter((entry) => entry.kind === 'fact' && isInjectableEntry(entry)),
         view,
       )
       : []

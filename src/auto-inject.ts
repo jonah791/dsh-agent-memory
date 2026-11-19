@@ -32,6 +32,7 @@ import { stalenessTag } from './temporal.ts'
 import { supersededByTag } from './succession.ts'
 import { expiryTag } from './temporal-dual.ts'
 import { isInjectable } from './lifecycle.ts'
+import { deriveSensitivity, isAutoInjectable } from './sensitivity.ts'
 import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
 import { recallEntries } from './search.ts'
@@ -285,7 +286,8 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
     const scopes = narrowReadScopes([scope, GLOBAL_SCOPE], view, undefined)
     const merged = applyRoleView(scopes.flatMap((s) => deps.store.list(s)), view)
       // v0.27.0：注入只给 `isInjectable()` 的条目——`pending` 待审核不进上下文（同 inject.ts）
-      .filter(isInjectable)
+      // v0.47：叠敏感分级——`L2`/`L3` 不进自动注入（该路径不经调用方判断，见 `docs/semantic.md` §5.38）
+      .filter((entry) => isInjectable(entry) && isAutoInjectable(deriveSensitivity(entry)))
     // v0.8 会话级去重：先剔除本会话已注入过的条目——只有新信息才值得占上下文。
     // 全部命中都是旧的 ⇒ 静默跳过（不注入任何东西，零 token 浪费）。
     let injected = injectedIds.get(sessionId)

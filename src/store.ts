@@ -75,6 +75,13 @@ export interface EntryDraft {
    */
   sourceIds?: Entry['sourceIds']
   /**
+   * 敏感分级（v0.47 · 方案 §11.2）：**只在新建时生效**（与 `subject` / `memType` 同形）。
+   *
+   * 不填就不写这个键（未标注 ≠ `L0`，无损 JSON 纪律）；命中已有条目时保留原标注——
+   * 显式纠正走 `update({ sensitivity })`。
+   */
+  sensitivity?: Entry['sensitivity']
+  /**
    * 角色归属（v0.5）：**只在新建时生效**——命中已有条目（key 覆盖 / 标题合并）时
    * 保留原条目的归属，写入不得静默转移分区（转移需要显式路径，本轮不提供）。
    */
@@ -446,6 +453,8 @@ export class MemoryStore {
       // 来源实体引用（v0.35 · 方案 §5.2）：去空去重后写入；全空 ⇒ 不写这个键
       // （S5「不给 sourceIds 时逐位相同」——不写键与写空数组不是一回事，旧判定会看出差异）
       ...(sourceIdsOf(draft.sourceIds) ?? {}),
+      // 敏感分级（v0.47 · 方案 §11.2）：只在**有值**时写入（未标注不写键——不猜成 L0）
+      ...(draft.sensitivity !== undefined ? { sensitivity: draft.sensitivity } : {}),
     }
     await this.kv.put(memoryKey(scope, kind, entry.id), entry)
     return { id: entry.id, action: 'created' }

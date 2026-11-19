@@ -205,6 +205,14 @@ export const entrySchema = zod.object({
    */
   space: zod.enum(['personal', 'project', 'domain', 'system']).optional(),
   status: zod.enum(['pending', 'disputed']).optional(),
+  /**
+   * 敏感分级（v0.47 · 方案 §11.2 四档）。
+   *
+   * ⚠ **必须在此声明**（同一个坑**第十四次**）：storage-domain 在写入边界用本 schema 校验，
+   * 未声明的字段会被静默剥掉而写入**仍返回成功**——那会让「凭据不进记忆库」这道闸看起来
+   * 装了却什么都没拦住。
+   */
+  sensitivity: zod.enum(['L0', 'L1', 'L2', 'L3']).optional(),
 })
 
 /**

@@ -30,6 +30,19 @@ export type MemType = 'episodic' | 'semantic' | 'procedural' | 'profile' | 'proj
 export type Space = 'personal' | 'project' | 'domain' | 'system'
 
 /**
+ * 敏感分级（v0.47 · 方案 §11.2 四档）。
+ *
+ * 决定「这条内容能不能出现在**默认路径**上」（自动注入 / 默认 `recall` / 默认 `browse`）。
+ * 与 `space`（谁的疆域）、`role`（谁能读）**三者正交**：一条 `L3` 条目仍可以是「我的领域空间 +
+ * 主人可读」，敏感度只管默认路径，不管归属与准入。
+ *
+ * **无默认值**：不填 = 未标注（≠ `L0`）。未标注按既有行为处理——把未标注当敏感会让 100% 的
+ * 存量从默认路径消失，那是灾难不是保护。契约、实测与取舍见 `docs/semantic.md` §5.38 与
+ * `docs/design/aml-sensitivity.md`。
+ */
+export type SensitivityLevel = 'L0' | 'L1' | 'L2' | 'L3'
+
+/**
  * 条目自带的生命周期状态（v0.27.0 · 方案 §3.3）——**只收没有载体的两态**。
  *
  * `superseded` 由 `supersededBy` 表达、`archived` 由 `archived:true` 表达、
@@ -586,6 +599,14 @@ export interface Entry {
    * 不会在各条目上复制成互相矛盾的副本。存量条目没有本字段——**不回填、不猜**，读取侧按 `[]` 处理。
    */
   sourceIds?: string[]
+  /**
+   * 敏感分级（v0.47 · 方案 §11.2）：`L0`–`L3`，**无默认值**。
+   *
+   * 调用规则见 `SensitivityLevel` 与 `docs/semantic.md` §5.38：`L2`/`L3` 不进自动注入与默认
+   * 检索面（需 `includeSensitive`）；`L3` 写入需 `allowSensitive` 显式确认。
+   * 未标注 = 按既有行为（可见、进注入）——不是 `L0`，是「没判断过」。
+   */
+  sensitivity?: SensitivityLevel
   /** summary → 原始条目 id 列表 */
   archiveRef?: string[]
   /**
@@ -1310,6 +1331,11 @@ export interface RecallResultItem {
    * 与 `provenance`（权威归谁）互补：那个答「谁说的」，这个答「去哪核」。
    */
   evidenceRefs?: string[]
+  /**
+   * 敏感分级（v0.47；仅当条目显式标注或可派生时出现）——
+   * `L2`/`L3` 不会出现在默认检索面（需 `includeSensitive`），见 `docs/semantic.md` §5.38。
+   */
+  sensitivity?: SensitivityLevel
   /** 来源类型（v0.21.0；仅当条目设了时出现在结果里）——`master` / `web` / `self` / `measured` */
   provenance?: Provenance
   /**
