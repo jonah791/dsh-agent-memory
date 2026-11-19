@@ -108,6 +108,35 @@ test('C1b 一条 summary 挂在库里不改变覆盖率（分母纯度）', () =
     '加一条概要后覆盖率必须逐字不变，否则分母被污染')
 })
 
+test('C1c ★分项相加 ≠ 净排除：四项有交集，只有 net 能减出分母', () => {
+  // 一条「已归档的 summary」会同时进 archived 与 summary 两个分项——这正是线上那 422 条重叠的形状。
+  // 2026-11-19 实测：全量 3101 − 应编目 1771 = 净排除 1330，而四项相加 1752 ⇒ 旧渲染把它们
+  // 并列成「分母排除：…」，读者相减得 1349，比真分母小 422。
+  const entries = [
+    entry({ id: 'live1' }),
+    entry({ id: 'live2' }),
+    entry({ id: 'archOnly', archived: true }),
+    entry({ id: 'sumOnly', kind: 'summary', level: 'day' }),
+    entry({ id: 'archSum', archived: true, kind: 'summary', level: 'week' }), // 重叠：归档 + 概要
+  ]
+  const report = catalogReport(entries)
+  assert.equal(report.denominator, 2, '只有两条 live 该编目')
+  assert.equal(report.excluded.considered, 5, 'considered 是传入集合全量，不是分母')
+  assert.equal(report.excluded.net, 3, '净排除 = considered 5 − denominator 2')
+  assert.equal(report.excluded.archived, 2, 'archOnly + archSum')
+  assert.equal(report.excluded.summary, 2, 'sumOnly + archSum')
+
+  // 核心断言：分项相加必然 ≥ 净排除，等号只在样本无重叠时成立 ⇒ 用它证明「不可相加」
+  const naiveSum =
+    report.excluded.archived +
+    report.excluded.coldCheckpoint +
+    report.excluded.compaction +
+    report.excluded.summary
+  assert.equal(naiveSum, 4)
+  assert.equal(naiveSum - report.excluded.net, 1, '重叠 1 条 ⇒ 分项相加比净排除大 1；两者相等说明样本没有重叠，这条断言就空转了')
+  assert.equal(report.excluded.considered - report.denominator, report.excluded.net, 'net 必须与「全量 − 分母」恒等')
+})
+
 // ---------- C2 四维各自独立 ----------
 
 test('C2 ★四维各自独立：只缺 space 的条目不污染其他三维', () => {
@@ -287,4 +316,27 @@ test('C11 ★ credibility 的口径必须印在渲染里（同数并列时的误
 
   // ④ 两段分母必须是同一个数（各报一个会让「差在哪」不可见）
   assert.equal(value.credibility.denominator, value.denominator)
+})
+
+test('C12 ★分项不可相加的口径必须进渲染（读数层表达缺陷·第五次同形）', async () => {
+  const { byName, exec } = setup()
+  const tool = byName.get('memory_catalog')
+  await byName.get('remember').execute({ text: '分母口径判据用的种子条目，什么都不标', kind: 'knowledge' }, exec)
+  const value = await tool.execute({}, exec)
+  const text = tool.output.render({}, value).map((c) => c.text).join('\n')
+
+  // ① 净排除必须是显式的数——让读者自己把四个分项相减，正是那 422 条误差的来源
+  assert.equal(typeof value.excluded.net, 'number', 'net 必须显式给')
+  assert.equal(typeof value.excluded.considered, 'number', 'considered 必须显式给')
+  assert.match(text, /净排除/, '净排除是唯一可减的数，必须渲染')
+
+  // ② ★ 并列四个分项就必须同时给「它们不能相加」的理由：并列而无警告，读法上就在诱导相加
+  assert.match(text, /不可相加/, '分项并列时必须显式标不可相加')
+  assert.match(text, /交集/, '说清为什么不可相加（有交集）')
+
+  // ③ 可核性：三个数之间必须自洽，渲染层不得自己重算一个。
+  //    ⚠ 这条断言在本样本（无排除项）上**恒成立**——四项和与净排除都是 0，它抓不到「用四项相加算 net」
+  //    这个错（尸体验证 2026-11-19：注入该错后只有 C1c 红，本格仍绿）。真正判交集与自洽的是 C1c；
+  //    这里的分工只是「防止渲染层偏离结构化返回」，不要把它当成覆盖了自洽性。
+  assert.equal(value.excluded.considered, value.denominator + value.excluded.net)
 })

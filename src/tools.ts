@@ -4523,6 +4523,12 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
             required: true,
             additionalProperties: false,
             properties: {
+              considered: { type: 'integer', required: true, description: '传入集合的全量条数（= denominator + net）' },
+              net: {
+                type: 'integer',
+                required: true,
+                description: '净排除 = considered − denominator。**唯一可减的数**；下列四项是各自独立计数、彼此有交集，不可相加',
+              },
               archived: { type: 'integer', required: true },
               coldCheckpoint: { type: 'integer', required: true },
               compaction: { type: 'integer', required: true },
@@ -4651,7 +4657,12 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
           `${label} 覆盖 ${pct(gap.total - gap.missing, gap.total)}（缺 ${gap.missing}）`
         const lines = [
           `编目工作面（只读）：应编目 **${value.denominator}** 条`,
-          `分母排除：归档 ${value.excluded.archived} · 冷存档 ${value.excluded.coldCheckpoint} · compaction ${value.excluded.compaction} · **概要 ${value.excluded.summary}**（压缩桶，不属于七类任何一类）`,
+          `分母口径：全量 **${value.excluded.considered}** − 应编目 **${value.denominator}** = 净排除 **${value.excluded.net}**`,
+          // ⚠ 分项相加 ≠ 净排除：`isCatalogable` 只有三条排除，而下面四项各自在全量上独立计数，
+          // 一条归档的 summary 会同时在 archived 与 summary 各计一次。2026-11-19 线上实测：
+          // 净排除 1330，四项相加 1752（重叠 422）——旧渲染把四项并列在「分母排除：」后面，
+          // 读法上诱导相加，算出的分母比真值小 422。并列四个数就必须同时给出它们不能相加的理由。
+          `  分项（**各自在全量上独立计数，有交集、不可相加**）：归档 ${value.excluded.archived} · 冷存档 ${value.excluded.coldCheckpoint} · compaction ${value.excluded.compaction} · **概要 ${value.excluded.summary}**（压缩桶，不属于七类任何一类）`,
           `四维缺口（各自独立，不合成分数）：${gapLine('memType', value.gaps.memType)}｜${gapLine('space', value.gaps.space)}｜${gapLine('provenance', value.gaps.provenance)}｜${gapLine('sourceIds', value.gaps.sourceIds)}`,
           `未分类 **${value.unclassified}** 条：${value.clusters.length} 个簇覆盖 ${value.clustered}（${pct(value.clustered, value.unclassified)}）· 覆盖不到 **${value.uncovered}** · 其中零标签 ${value.zeroTag}`,
         ]

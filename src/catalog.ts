@@ -100,8 +100,20 @@ export interface CatalogCluster {
 export interface CatalogReport {
   /** 应编目分母 */
   readonly denominator: number
-  /** 被排除的部分（自报，否则「为什么只有这么少」不可见） */
+  /**
+   * 被排除的部分（自报，否则「为什么只有这么少」不可见）。
+   *
+   * ⚠ **`net` 是唯一可减的数**：`isCatalogable` 只有三条排除（归档 / 压缩产物 / summary），
+   * 而下面四项是**各自在全量上的独立计数**，彼此有交集（一条归档的 summary 在 `archived`
+   * 与 `summary` 各计一次）。2026-11-19 实测：全量 3101 − 应编目 1771 = 净排除 1330，
+   * 而四项相加是 1752（重叠 422）——旧渲染把它们并列成「分母排除：…」，
+   * 读法上诱导相加，得出的分母比真值小 422。**分项相加 ≠ 净排除，这个数不报就不自洽。**
+   */
   readonly excluded: {
+    /** 传入集合的全量条数（= 分母 + 净排除） */
+    readonly considered: number
+    /** 净排除 = `considered − denominator`。**唯一可减的数**；四项分项不可相加 */
+    readonly net: number
     readonly archived: number
     readonly coldCheckpoint: number
     readonly compaction: number
@@ -247,6 +259,9 @@ export function clusterByTag(
 export function catalogReport(entries: readonly Entry[], options: ClusterOptions = {}): CatalogReport {
   const denominator = entries.filter(isCatalogable)
   const excluded = {
+    considered: entries.length,
+    // 净排除必须由「全量 − 分母」算出来，不能用四项相加：四项是独立计数、彼此有交集
+    net: entries.length - denominator.length,
     archived: entries.filter((entry) => entry.archived).length,
     coldCheckpoint: entries.filter((entry) => (entry.tags ?? []).includes(COLD_CHECKPOINT_TAG)).length,
     compaction: entries.filter((entry) => (entry.tags ?? []).includes(COMPACTION_TAG)).length,
