@@ -1063,6 +1063,7 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | `memory_audit.retention` 段 | `byEffectiveType` / `bySource` / `policyApplied`（改档计数）+ `notes[]`——「类别修正到底改了谁」可核 |
 | `memory_stats.retention` 块 | `byEffectiveType`（七类 + `unknown`）/ `bySource`（三档）/ `needsAction`（各类该看一眼的**信号**条数） |
 | ⚠ **`needsAction` ≠ `policyApplied`（两个数回答不同问题）** | `needsAction` 答「有多少条该按类别节奏看一眼」，`policyApplied` 答「有多少条的档位**真的被改了**」。二者不相等是常态而非缺陷：线上实测（2026-11-19 15:06）`needsAction.episodic=47` 而 `policyApplied=0`——那 47 条基础档**已是 `ARCHIVE`**，而修正层不把 `ARCHIVE` 降回 `DEMOTE`（硬约束 1）。⇒ **两个数必须分开印、各自标口径**（R11）；把它们并列成一个「处理了 N 条」会自己制造疑问 |
+| ⚠ **两处分母不同（刻意，不是漂移）** | `memory_stats.retention` 吃**全量**（含归档），`memory_audit.retention` 吃**本次集合**（默认剔归档、跳过冷存档）——与两处 `byMemType` / `bucket` 的既有口径一致。所以同一时刻 stats 报 `needsAction.episodic=47` 而 audit 报「（无）」是正常的：那 47 条是**已归档**的老情景记忆。⇒ 读这两个数之前先问「谁是分母」；**R7 的「逐字段相等」只对同一批输入成立**，不是对「同一时刻的两个工具」成立 |
 | `forget({ tier })` | 读的是**修正后**档位（它重跑 audit）；效果是 `tier=ARCHIVE` 不再含 `profile` 类——这是修正层的安全副作用，不是特例，也不额外实现 |
 
 **判据 R1–R11**（`tests/retention.test.mjs`）：
