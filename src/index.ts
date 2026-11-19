@@ -180,6 +180,12 @@ export const entrySchema = zod.object({
    */
   evidenceRefs: zod.array(zod.string()).optional(),
   /**
+   * 来源实体引用（v0.35 · 方案 §5.2）：`SOURCE-0001` 形态的 id 列表。
+   * 与 `evidenceRefs` 分工：那个是坐标字符串，这个连到可复用的来源对象。
+   * 同一条纪律：**未声明就会被静默剥掉**。
+   */
+  sourceIds: zod.array(zod.string()).optional(),
+  /**
    * 内容分类（v0.26.0 · 方案 §3.1 七类）。
    *
    * ⚠ **必须在此声明**（同一个坑**第十一次**）：storage-domain 在写入边界用本 schema 校验，

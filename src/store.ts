@@ -68,6 +68,13 @@ export interface EntryDraft {
    */
   evidenceRefs?: Entry['evidenceRefs']
   /**
+   * 来源实体引用（v0.35 · 方案 §5.2）：`SOURCE-0001` 形态的 id 列表。
+   *
+   * 与 `evidenceRefs` 的分工：那个是坐标字符串（消息 / 压缩块的精确位置），
+   * 这个连到**可复用的来源对象**。只在新建时写入；`update` 不改它（沿用原值）。
+   */
+  sourceIds?: Entry['sourceIds']
+  /**
    * 角色归属（v0.5）：**只在新建时生效**——命中已有条目（key 覆盖 / 标题合并）时
    * 保留原条目的归属，写入不得静默转移分区（转移需要显式路径，本轮不提供）。
    */
@@ -426,6 +433,9 @@ export class MemoryStore {
       ...(draft.status !== undefined ? { status: draft.status } : {}),
       // 证据引用（v0.25.0）：新建路径原样写入（去重与上限在 mergeEvidence 一处实现）
       ...(mergeEvidence(undefined, draft.evidenceRefs) ?? {}),
+      // 来源实体引用（v0.35 · 方案 §5.2）：去空去重后写入；全空 ⇒ 不写这个键
+      // （S5「不给 sourceIds 时逐位相同」——不写键与写空数组不是一回事，旧判定会看出差异）
+      ...(sourceIdsOf(draft.sourceIds) ?? {}),
     }
     await this.kv.put(memoryKey(scope, kind, entry.id), entry)
     return { id: entry.id, action: 'created' }
@@ -674,6 +684,26 @@ export function mergeEvidence(
     if (out.length >= MAX_EVIDENCE_REFS) break
   }
   return out.length > 0 ? { evidenceRefs: out } : undefined
+}
+
+/**
+ * 来源实体引用归一（v0.35 · 方案 §5.2）：去空白、去重、保序。
+ *
+ * 全空时返回 `undefined`——**不写这个键**。S5 要求「不给 `sourceIds` 时逐位相同」，
+ * 而「不写键」与「写空数组」在既有判定里是两种形状（前者逐字节不变，后者多一个空数组）。
+ */
+export function sourceIdsOf(incoming: readonly string[] | undefined): { sourceIds: string[] } | undefined {
+  const out: string[] = []
+  const seen = new Set<string>()
+  for (const id of incoming ?? []) {
+    if (typeof id !== 'string') continue
+    const trimmed = id.trim()
+    if (trimmed === '') continue
+    if (seen.has(trimmed)) continue
+    seen.add(trimmed)
+    out.push(trimmed)
+  }
+  return out.length > 0 ? { sourceIds: out } : undefined
 }
 
 /**

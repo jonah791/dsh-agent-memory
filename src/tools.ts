@@ -68,7 +68,7 @@ import {
   type EntityDraft,
   type EntityStore,
 } from './entities.ts'
-import type { SourceStore } from './sources.ts'
+import type { SourcePatch, SourceStore, SourceType } from './sources.ts'
 
 /** 概要重压的外部结果（工具层回报用；与 timeline.RecompressResult 解耦，界面只认这几个读数） */
 export interface RecompressOutcome {
@@ -2644,6 +2644,16 @@ function entityStoreOf(deps: MemoryToolDeps): EntityStore {
   return deps.entities
 }
 
+function sourceStoreOf(deps: MemoryToolDeps): SourceStore {
+  if (deps.sources === undefined) {
+    throw new Error(
+      '来源实体未接线（deps.sources 缺失）——来源实体（v0.35 · 方案 §5.2）需要 index.ts 装配 '
+      + '`new SourceStore(domain.table("sources"))`。这是装配缺陷，不是「来源库里没有它」。',
+    )
+  }
+  return deps.sources
+}
+
 /** 实体档的标识符数组参数（fail-loud：非字符串数组不猜） */
 function parseStringArrayArg(value: unknown, field: string): string[] | undefined {
   if (value === undefined) return undefined
@@ -3016,6 +3026,251 @@ function buildEntities(deps: MemoryToolDeps): ToolDefinition {
         .sort((a, b) => a.canonicalName.localeCompare(b.canonicalName))
         .slice(0, limit)
       return { ok: true, mode: 'list', total: out.length, ambiguous: false, entities: out.map((entity) => viewOf(entity, false)) }
+    },
+  })
+}
+
+/** 构建 memory_source 工具（v0.35 · 方案 §5.2）：维护来源实体 */
+function buildSource(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_source',
+    deferLoading: true,
+    description: '维护**来源实体**（v0.35 · 方案 §5.2）：新建 / 修改 / 停用。'
+      + '一个来源 = 唯一 ID（`SOURCE-0001`）+ 类型 + 位置 + 采集时刻 + 提供方 + 可靠度 + 权限 + 说明 + 状态。'
+      + '**为什么要有它**：现有三种来源载体（条目的 `source{}`、`evidenceRefs` 坐标串、`sourced-from` 边）都只回答「在哪」，不回答「谁提供 / 多可靠 / 什么权限」。'
+      + '**可靠度与权限没有默认值**：不填 = 未标注，不是「中等」或「无限制」。'
+      + '**停用不删除**：停用后不进候选，但按 id 直查仍能取回——历史引用不会变成悬空。',
+    parameters: {
+      id: { type: 'string', description: '来源 id（`SOURCE-0001`）：**给了就是修改**（或停用对象）；不给 = 新建。' },
+      type: { type: 'string', description: '来源类型（新建必填）：master（主人说的）/ web（网页·论文）/ self（我推的·我提的）/ measured（我实测的）——与条目 provenance 同一枚举。' },
+      location: { type: 'string', description: '位置（新建必填）：`session:<id>#<seq>` / `url:<地址>` / `file:<路径>` / `compaction:<id>#<cid>`。' },
+      collectedAt: { type: 'string', description: '采集时刻（ISO；新建缺省 = 此刻）。复用它时应显式给原时刻——它不是「最后写入时间」。' },
+      owner: { type: 'string', description: '提供方（与 type 正交）：谁给的。自由文本。' },
+      reliability: { type: 'string', description: '可靠度——**不给就是未标注**，不是「中等」。' },
+      permissions: { type: 'array', items: { type: 'string' }, description: '权限（整体替换）：本阶段只存不判，不构成准入。' },
+      label: { type: 'string', description: '人读说明。' },
+      retire: { type: 'boolean', description: '`true` = 停用该来源（需同时给 `id` 与 `reason`）。停用不删除。' },
+      reason: { type: 'string', description: '为什么改 / 为什么停用（可选，但记下来才有复核价值）。' },
+      scope: { type: 'string', description: '作用域（缺省当前 workspace；来源与条目同一套存储分区）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          action: { type: 'string', required: true, description: 'created / updated / retired / unchanged' },
+          id: { type: 'string', required: true },
+          type: { type: 'string', required: true },
+          location: { type: 'string', required: true },
+          scope: { type: 'string', required: true },
+          status: { type: 'string', description: 'retired 时出现（未给 = 适用中）' },
+          reliability: { type: 'string', description: '未标注时**不出现**这个键' },
+          revisionCount: { type: 'integer', required: true, description: '该来源保留的变更记录条数' },
+        },
+      },
+      render: (_a, v) => [{
+        type: 'text',
+        text: v.action === 'created'
+          ? `已建来源「${v.location}」(id=${v.id}，类型 ${v.type})${v.reliability !== undefined ? `，可靠度：${v.reliability}` : '，可靠度**未标注**'}。`
+          : v.action === 'retired'
+            ? `已停用来源 ${v.id}——记录保留，按 id 直查仍可回。`
+            : v.action === 'updated'
+              ? `已更新来源 ${v.id}，变更记录 ${v.revisionCount} 条。`
+              : `来源 ${v.id} 无变化（给的字段与现值相同）。`,
+      }],
+    },
+    async execute(args, exec) {
+      const sources = sourceStoreOf(deps)
+      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { writeScope } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      const reason = typeof args.reason === 'string' ? args.reason : undefined
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      const pick = (source: { id: string; type: string; location: string; scope: string; status?: 'active' | 'retired'; reliability?: string; revisions?: unknown[] }) => ({
+        id: source.id,
+        type: source.type,
+        location: source.location,
+        scope: source.scope,
+        ...(source.status !== undefined ? { status: source.status } : {}),
+        ...(source.reliability !== undefined ? { reliability: source.reliability } : {}),
+        revisionCount: (source.revisions ?? []).length,
+      })
+
+      if (args.retire === true) {
+        if (id.length === 0) throw new Error('memory_source: retire 需要 id')
+        if (reason === undefined || reason.trim().length === 0) {
+          throw new Error('memory_source: retire 需要 reason（为什么不再采信它）')
+        }
+        const result = await sources.retire(writeScope, id, reason)
+        return { action: result.changed ? 'retired' : 'unchanged', ...pick(result.source) }
+      }
+
+      if (id.length > 0) {
+        const before = sources.find(writeScope, id)
+        if (before === undefined) throw new Error(`memory_source: 未找到 id="${id}"（scope=${writeScope}）`)
+        const patch: SourcePatch = {
+          ...(typeof args.type === 'string' && args.type.trim() !== '' ? { type: args.type.trim() as SourceType } : {}),
+          ...(typeof args.location === 'string' ? { location: args.location } : {}),
+          ...(typeof args.owner === 'string' ? { owner: args.owner } : {}),
+          ...(typeof args.reliability === 'string' ? { reliability: args.reliability } : {}),
+          ...(Array.isArray(args.permissions) ? { permissions: args.permissions.map((item) => String(item)) } : {}),
+          ...(typeof args.label === 'string' ? { label: args.label } : {}),
+        }
+        const updated = await sources.update(writeScope, id, patch, reason)
+        // Store 的 update 在无变化时返回原对象（`updatedAt` 不动）——用它判 unchanged，
+        // 而不是对比前后两个对象引用（KV 读取返回副本，引用永不相等）。
+        return { action: updated.updatedAt === before.updatedAt ? 'unchanged' : 'updated', ...pick(updated) }
+      }
+
+      const type = typeof args.type === 'string' ? args.type.trim() : ''
+      if (type === '') throw new Error('memory_source: 新建需要 type（master / web / self / measured）')
+      const created = await sources.create({
+        scope: writeScope,
+        type: type as SourceType,
+        location: typeof args.location === 'string' ? args.location : '',
+        ...(typeof args.collectedAt === 'string' && args.collectedAt.trim() !== '' ? { collectedAt: args.collectedAt } : {}),
+        ...(typeof args.owner === 'string' ? { owner: args.owner } : {}),
+        ...(typeof args.reliability === 'string' ? { reliability: args.reliability } : {}),
+        ...(Array.isArray(args.permissions) ? { permissions: args.permissions.map((item) => String(item)) } : {}),
+        ...(typeof args.label === 'string' ? { label: args.label } : {}),
+      })
+      return { action: 'created', ...pick(created) }
+    },
+  })
+}
+
+/** 构建 memory_sources 工具（v0.35 · 方案 §5.2）：查来源 + 按来源反查引用它的条目 */
+function buildSources(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_sources',
+    deferLoading: true,
+    description: '查**来源实体**（v0.35 · 方案 §5.2）：按 id 看详情 + 反查引用它的条目；或按类型 / 提供方 / 状态列表。'
+      + '**反查只认显式引用**（条目 `sourceIds` 里写了它），不做「正文里提到了这个网址」这种猜测——那是另一回事，混进来会让「可追溯」这个词失去意义。'
+      + '**未标注可靠度能单独筛**（`unlabeledReliability=true`）：判断型字段的「不知道」必须能看见，不能被并进某个默认档。'
+      + '**停用的来源按 id 直查仍能取回**（列表模式默认不含）。',
+    parameters: {
+      id: { type: 'string', description: '来源 id：给了就看详情 + 反查引用它的条目。' },
+      type: { type: 'string', description: '只看该类型（列表模式过滤）。' },
+      owner: { type: 'string', description: '只看该提供方（列表模式过滤）。' },
+      status: { type: 'string', description: '`active` / `retired`（缺省不过滤）。' },
+      unlabeledReliability: { type: 'boolean', description: '只看**未标注可靠度**的来源。' },
+      withEntries: { type: 'boolean', description: '是否反查引用它的条目（缺省**是**）。' },
+      limit: { type: 'integer', description: '条数上限（缺省 20）。' },
+      scope: { type: 'string', description: '作用域覆盖（global 或 workspaceId）；缺省当前 workspace + global。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          mode: { type: 'string', required: true, description: 'detail / list' },
+          total: { type: 'integer', required: true },
+          sources: {
+            type: 'array',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                type: { type: 'string', required: true },
+                location: { type: 'string', required: true },
+                scope: { type: 'string', required: true },
+                collectedAt: { type: 'string', required: true },
+                owner: { type: 'string' },
+                reliability: { type: 'string', description: '未标注时**不出现**' },
+                permissions: { type: 'array', items: { type: 'string' } },
+                label: { type: 'string' },
+                status: { type: 'string' },
+                retiredNote: { type: 'string' },
+                revisions: { type: 'integer', description: '变更记录条数（详情模式）' },
+                citedBy: {
+                  type: 'array',
+                  description: '显式引用它的条目（`entry.sourceIds` 包含该 id）',
+                  items: {
+                    type: 'object',
+                    additionalProperties: false,
+                    properties: {
+                      id: { type: 'string', required: true },
+                      title: { type: 'string', required: true },
+                      kind: { type: 'string', required: true },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      render: (_a, v) => {
+        const list = v.sources ?? []
+        if (list.length === 0) {
+          return [{ type: 'text', text: '来源库：没有匹配的来源。\n用 memory_source 建档（type + location）；可靠度与权限**可以不给**（= 未标注，不是默认值）。' }]
+        }
+        const lines = list.map((source) => {
+          const parts: string[] = [`- ${source.id}（${source.type}）${source.location}`]
+          if (source.status === 'retired') parts.push(`**已停用**${source.retiredNote !== undefined ? `：${source.retiredNote}` : ''}`)
+          if (source.owner !== undefined) parts.push(`提供方：${source.owner}`)
+          parts.push(source.reliability !== undefined ? `可靠度：${source.reliability}` : '**可靠度未标注**')
+          if (source.revisions !== undefined) parts.push(`变更记录 ${source.revisions} 条`)
+          const cited = source.citedBy ?? []
+          if (cited.length > 0) parts.push(`被 ${cited.length} 条引用：${cited.map((entry) => `${entry.title}(id=${entry.id})`).join('；')}`)
+          return parts.join('；')
+        })
+        return [{ type: 'text', text: `来源库（${v.mode}）：${list.length} 条\n` + lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const sources = sourceStoreOf(deps)
+      const { config, cwd, view } = await resolveRuntime(exec, deps)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      const withEntries = args.withEntries !== false
+      const limit = typeof args.limit === 'number' && args.limit > 0 ? Math.floor(args.limit) : 20
+      // 引用方只在**可见集合**里找（视野外的条目不得因为「引用过某个来源」而泄露存在性）
+      const readable = withEntries
+        ? gatherReadable(deps, { readScopes, includeArchive: false, view, explicitScope: args.scope }).entries
+        : []
+      const citedByOf = (sourceId: string): Array<{ id: string; title: string; kind: string }> =>
+        readable
+          .filter((entry) => (entry.sourceIds ?? []).includes(sourceId))
+          .map((entry) => ({ id: entry.id, title: entry.title, kind: entry.kind }))
+      const viewOf = (source: ReturnType<SourceStore['all']>[number], detail: boolean) => ({
+        id: source.id,
+        type: source.type,
+        location: source.location,
+        scope: source.scope,
+        collectedAt: source.collectedAt,
+        ...(source.owner !== undefined ? { owner: source.owner } : {}),
+        ...(source.reliability !== undefined ? { reliability: source.reliability } : {}),
+        ...((source.permissions ?? []).length > 0 ? { permissions: source.permissions } : {}),
+        ...(source.label !== undefined ? { label: source.label } : {}),
+        ...(source.status !== undefined ? { status: source.status } : {}),
+        ...(source.retiredNote !== undefined ? { retiredNote: source.retiredNote } : {}),
+        ...(detail ? { revisions: (source.revisions ?? []).length } : {}),
+        ...(withEntries ? { citedBy: citedByOf(source.id) } : {}),
+      })
+
+      const id = typeof args.id === 'string' ? args.id.trim() : ''
+      if (id.length > 0) {
+        // id 只在 scope 内唯一 ⇒ 逐个 scope 查，别用一个全表 find
+        const found = readScopes.map((scope) => sources.find(scope, id)).find((candidate) => candidate !== undefined)
+        if (found === undefined) return { ok: false, mode: 'detail', total: 0, sources: [] }
+        return { ok: true, mode: 'detail', total: 1, sources: [viewOf(found, true)] }
+      }
+
+      const typeFilter = typeof args.type === 'string' && args.type.trim() !== '' ? (args.type.trim() as SourceType) : undefined
+      const ownerFilter = typeof args.owner === 'string' && args.owner.trim() !== '' ? args.owner.trim() : undefined
+      const statusFilter = args.status === 'active' || args.status === 'retired' ? args.status : undefined
+      const out = readScopes
+        .flatMap((scope) => sources.list({
+          scope,
+          ...(typeFilter !== undefined ? { type: typeFilter } : {}),
+          ...(ownerFilter !== undefined ? { owner: ownerFilter } : {}),
+          ...(statusFilter !== undefined ? { status: statusFilter } : {}),
+          ...(args.unlabeledReliability === true ? { unlabeledReliability: true } : {}),
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id))
+        .slice(0, limit)
+      return { ok: true, mode: 'list', total: out.length, sources: out.map((source) => viewOf(source, false)) }
     },
   })
 }
@@ -3775,6 +4030,8 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildThesaurus(deps),
     buildEntity(deps),
     buildEntities(deps),
+    buildSource(deps),
+    buildSources(deps),
     buildUpdate(deps),
     buildSupersede(deps),
     buildForget(deps),
