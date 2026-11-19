@@ -46,6 +46,7 @@ import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, par
 import { auditMemory } from './audit.ts'
 import { retentionSummary } from './retention.ts'
 import { catalogReport } from './catalog.ts'
+import { mapReport } from './map.ts'
 import { credibilityReport } from './credibility.ts'
 import { mergeForgetPlans, planForget } from './forget.ts'
 import type { ForgetCertificate } from './forget.ts'
@@ -4767,6 +4768,307 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
+/**
+ * 构建 `memory_map`：知识地图（v0.45 · 方案 §4.5）——**只读**。
+ *
+ * 存在的理由：§4.5 判 ❌（无载体），而它的七项要求**数据源大半已在**（`space` / 词表 /
+ * 关系 / `accessedAt` / 项目字段 / `expiry`），缺的只是「把它们读出来」。
+ *
+ * 核心机制是**每维自报可读性档位**：`measured` / `starved` / `absent`。没有这一层，
+ * 七项里三项（领域 1.4% / 关系 2 条 / `expiry` 0 条）会输出 0 而看起来健康——
+ * 与 v0.44 之前「空结果率恒为 0.00%」是同一种病：**仪器在，读数健康，其实什么都没测**。
+ *
+ * **不写库、不自动建边**：共现候选只是提问（判断型字段禁默认值）。
+ */
+function buildMap(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_map',
+    deferLoading: true,
+    description:
+      '知识地图（只读）：回答「我的知识长什么样、哪里是空的」。按方案 §4.5 的七项要求逐条报，**每一项自带可读性档位**——`measured`（数据源够，读数可用于排名）· `starved`（载体在但填充率低，只报分母不报排名）· `absent`（读不出，报缺什么）。没有这一层，领域/关系/过期三项会输出 0 而看起来健康。另报四个独立的「空白」口径（未检索 / 单例标签 / 未用概念 / 零标签，**不可相加**）与共现候选关联（**永不落库**）。⚠ 本工具不改任何条目、不刷新 accessedAt。',
+    parameters: {
+      scope: { type: 'string', description: '作用域覆盖（缺省当前 workspace + global；受调用者角色视野约束）。' },
+      role: { type: 'string', description: '角色视角覆盖（缺省按调用者会话身份推导）。' },
+      maxTopics: { type: 'integer', description: '参与共现计算的 top 标签数（缺省 30）——只算头部，避免两两组合爆炸。' },
+      minCooccurrence: { type: 'integer', description: '共现达到多少次才进候选（缺省 5）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          considered: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              total: { type: 'integer', required: true, description: '传入集合全量（含归档）' },
+              active: { type: 'integer', required: true, description: '所有维度的分母（= total − archived）' },
+              archived: { type: 'integer', required: true },
+            },
+          },
+          dimensions: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true, description: 'domains / topics / links / activity / projects / blanks / expiry' },
+                requirement: { type: 'string', required: true, description: '方案 §4.5 原文那一项' },
+                denominatorName: { type: 'string', required: true, description: '分母口径名（跟着数一起走，否则百分比会被读成别的意思）' },
+                denominator: { type: 'integer', required: true },
+                filled: { type: 'integer', required: true },
+                fillingRate: { type: 'number', required: true },
+                readability: { type: 'string', required: true, description: 'measured / starved / absent' },
+                note: { type: 'string', required: true, description: '为什么读得出 / 读出来代表多少条 / 缺什么' },
+              },
+            },
+          },
+          domains: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              spaces: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    space: { type: 'string', required: true },
+                    count: { type: 'integer', required: true },
+                  },
+                },
+              },
+              unset: { type: 'integer', required: true, description: '未标注空间的活跃条目' },
+            },
+          },
+          topics: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              concepts: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string', required: true },
+                    prefLabel: { type: 'string', required: true },
+                    altLabelCount: { type: 'integer', required: true },
+                    broaderCount: { type: 'integer', required: true },
+                    relatedCount: { type: 'integer', required: true },
+                    entriesUsing: { type: 'integer', required: true, description: '用它的任一标签的活跃条目数（按 normalizeLabel 归一比对）' },
+                  },
+                },
+              },
+              controlledTags: { type: 'integer', required: true, description: '被概念标签命中的标签数（受控率分子）' },
+              totalTags: { type: 'integer', required: true },
+              singletonTags: { type: 'integer', required: true, description: '只出现在 1 条条目上的标签数' },
+              topTags: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    tag: { type: 'string', required: true },
+                    entries: { type: 'integer', required: true },
+                  },
+                },
+              },
+            },
+          },
+          links: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              edges: { type: 'integer', required: true },
+              byType: { type: 'object', additionalProperties: true, required: true },
+              entriesTouched: { type: 'integer', required: true },
+              conceptRelatedPairs: { type: 'integer', required: true, description: '词表 related 条目数（对称存储可能重复计，按存储报）' },
+            },
+          },
+          activity: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              retrievedEntries: { type: 'integer', required: true },
+              neverRetrieved: { type: 'integer', required: true },
+              traceAvailable: { type: 'boolean', required: true, description: 'false ⇒ 「从未被检索」不可判（不是「没有活跃主题」）' },
+              traceSince: { type: 'string', required: true, description: 'trace 首条时刻（ISO）；不可用时为空串' },
+              traceLines: { type: 'integer', required: true },
+              topTopics: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    tag: { type: 'string', required: true },
+                    entries: { type: 'integer', required: true },
+                    retrievedEntries: { type: 'integer', required: true },
+                    retrievals: { type: 'integer', required: true },
+                  },
+                },
+              },
+            },
+          },
+          projects: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              declared: { type: 'integer', required: true },
+              byProject: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    project: { type: 'string', required: true },
+                    entries: { type: 'integer', required: true },
+                    topTags: { type: 'array', required: true, items: { type: 'string' } },
+                  },
+                },
+              },
+            },
+          },
+          blanks: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              unretrieved: { type: 'integer', required: true, description: '活跃但自 trace 起点起未被记录检索' },
+              singletonTopics: { type: 'integer', required: true },
+              unusedConcepts: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    id: { type: 'string', required: true },
+                    prefLabel: { type: 'string', required: true },
+                  },
+                },
+              },
+              untagged: { type: 'integer', required: true, description: '活跃零标签（任何按主题的读数都覆盖不到）' },
+            },
+          },
+          expiry: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              unset: { type: 'integer', required: true, description: '没设失效时刻——**不是「有效」**' },
+              active: { type: 'integer', required: true },
+              expired: { type: 'integer', required: true },
+            },
+          },
+          relationCandidates: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                a: { type: 'string', required: true },
+                b: { type: 'string', required: true },
+                cooccurrence: { type: 'integer', required: true },
+                declaredAsConceptPair: { type: 'boolean', required: true, description: '两个标签都命中概念且概念间已声明 related（粒度不同，false 不等于「一定没声明」）' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => {
+        const pct = (n: number, d: number) => (d === 0 ? '—' : `${((n / d) * 100).toFixed(1)}%`)
+        const grade = (r: string) =>
+          r === 'measured' ? 'measured〔可排名〕' : r === 'starved' ? 'starved〔只报分母〕' : 'absent〔读不出〕'
+        const lines = [
+          `知识地图（只读）：活跃 **${value.considered.active}** / 全量 **${value.considered.total}**（归档 ${value.considered.archived}）`,
+          '口径：`measured` = 数据源够，读数可用于排名 · `starved` = 载体在但填充率低，**只报分母不报排名** · `absent` = 读不出，报缺什么。**三档不是评级，是「这个数代表多少条」的自报。**',
+        ]
+        for (const dim of value.dimensions) {
+          lines.push(`[${grade(dim.readability)}] ${dim.requirement}｜${dim.denominatorName} ${dim.denominator}，有值 ${dim.filled}（${pct(dim.filled, dim.denominator)}）`)
+          lines.push(`  ${dim.note}`)
+        }
+        // 各维明细：`starved` 维照样给分布，但紧跟在它的档位后面，读的时候知道只代表那几条
+        const spaceParts = value.domains.spaces.map((s) => `${s.space} ${s.count}`)
+        lines.push(`领域分布：${spaceParts.length === 0 ? '（四空间无一标注）' : spaceParts.join(' · ')} · 未标注 ${value.domains.unset}`)
+        const conceptParts = value.topics.concepts.map((c) => {
+          const extras = [c.altLabelCount > 0 ? `同义 ${c.altLabelCount}` : '', c.broaderCount > 0 ? `上位 ${c.broaderCount}` : ''].filter((x) => x.length > 0)
+          return `${c.prefLabel}×${c.entriesUsing}${extras.length > 0 ? `(${extras.join('/')})` : ''}`
+        })
+        lines.push(`概念 ${value.topics.concepts.length} 个（受控标签 ${value.topics.controlledTags}/${value.topics.totalTags} = ${pct(value.topics.controlledTags, value.topics.totalTags)}）：${conceptParts.join(' · ')}`)
+        const topTagParts = value.topics.topTags.map((t) => `${t.tag}(${t.entries})`)
+        lines.push(`词面 top 标签：${topTagParts.join(' ')} · 单例标签 ${value.topics.singletonTags}`)
+        const relTypes = Object.entries(value.links.byType).map(([k, v]) => `${k} ${v}`)
+        lines.push(`已声明关系：边 ${value.links.edges}${relTypes.length > 0 ? `（${relTypes.join(' / ')}）` : ''} · 触达条目 ${value.links.entriesTouched} · 概念 related ${value.links.conceptRelatedPairs}`)
+        const actParts = value.activity.topTopics.map((t) => `${t.tag}(检索 ${t.retrievals}/条目 ${t.entries})`)
+        lines.push(`活跃主题：${actParts.length === 0 ? '（无可聚合的标签）' : actParts.join(' ')}`)
+        lines.push(`  被记录检索 ${value.activity.retrievedEntries} 条 · 从未 ${value.activity.neverRetrieved} · trace ${value.activity.traceLines} 行${value.activity.traceAvailable ? `，起点 ${value.activity.traceSince}` : '（**未接线**）'}`)
+        const projParts = value.projects.byProject.map((p) => `${p.project} ${p.entries}（${p.topTags.slice(0, 3).join('/')}）`)
+        lines.push(`项目使用：声明 ${value.projects.declared} 条${projParts.length > 0 ? `：${projParts.join(' · ')}` : ''}`)
+        lines.push(`空白四口径（**各自独立、不可相加**）：未检索 ${value.blanks.unretrieved} · 单例主题 ${value.blanks.singletonTopics} · 未用概念 ${value.blanks.unusedConcepts.length}${value.blanks.unusedConcepts.length > 0 ? `（${value.blanks.unusedConcepts.map((c) => c.prefLabel).join('/')}）` : ''} · 零标签 ${value.blanks.untagged}`)
+        lines.push(`过期三态：未设 **${value.expiry.unset}**（⚠ 未设 ≠ 有效）· 未到 ${value.expiry.active} · 已过期 ${value.expiry.expired}`)
+        if (value.relationCandidates.length > 0) {
+          const candParts = value.relationCandidates.map((c) => `${c.a}+${c.b}(${c.cooccurrence})`)
+          lines.push(`共现候选关联（**提问不是答案，永不落库**）：${candParts.join(' ')}`)
+        }
+        lines.push('⚠ 「从未被检索」只覆盖 trace 起点之后；`auto` 占多数时活跃度偏向自动注入路径。共现 ≠ 语义关联。本工具不改任何条目。')
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      // 含归档取全量：`mapReport` 自己算「活跃 / 归档」（传剔过的集合会让 considered.archived 恒 0）
+      const { entries, scopes } = gatherReadable(deps, {
+        readScopes,
+        includeArchive: true,
+        view,
+        explicitScope: args.scope,
+      })
+      // 词表 / 关系未接线 ⇒ 传空数组并在渲染里说清，**不假装「零概念」**
+      const inScopes = (scope: string): boolean => scopes.includes(scope)
+      const concepts = deps.concepts === undefined ? [] : deps.concepts.all().filter((c) => inScopes(c.scope))
+      const relations = deps.relations === undefined ? [] : deps.relations.all().filter((r) => inScopes(r.scope))
+      const access = deps.readAccess === undefined ? undefined : await deps.readAccess()
+      const summary = deps.readAccessSummary === undefined ? undefined : await deps.readAccessSummary()
+      const retrievalCounts = new Map<string, number>()
+      if (access !== undefined) {
+        for (const [id, stat] of access) retrievalCounts.set(id, stat.hits)
+      }
+      const traceSince =
+        summary !== undefined && summary.firstAtMs > 0 ? new Date(summary.firstAtMs).toISOString() : null
+      return mapReport(
+        {
+          entries,
+          concepts,
+          relations,
+          retrievalCounts,
+          traceSince,
+          traceLines: summary?.lines ?? 0,
+          now: Date.now(),
+        },
+        {
+          ...(args.maxTopics !== undefined ? { maxTopics: args.maxTopics } : {}),
+          ...(args.minCooccurrence !== undefined ? { minCooccurrence: args.minCooccurrence } : {}),
+        },
+      )
+    },
+  })
+}
+
 function buildReviewMark(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_review_mark',
@@ -5088,6 +5390,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildStats(deps),
     buildAudit(deps),
     buildCatalog(deps),
+    buildMap(deps),
     buildReviewMark(deps),
     buildTrail(deps),
     buildRecompress(deps),

@@ -164,7 +164,18 @@ test('A49 轨迹汇总：auto/recall 计数 + 去重命中 + 最近时刻；坏�
   assert.equal(s.distinctIds, 2)
   assert.equal(s.totalHits, 3)
   assert.equal(s.lastAtMs, 300)
-  assert.deepEqual(summarizeAccessRecords(''), { autoCalls: 0, recallCalls: 0, distinctIds: 0, totalHits: 0, lastAtMs: 0 })
+  // v0.45 补：首条时刻是「从未被检索」这类读数的下界（390 行前它不存在，故此刻补断言）
+  assert.equal(s.firstAtMs, 100, '首条必须是最早那条（300 是最后一条），否则「从未」没有下界')
+  assert.equal(s.lines, 3, '坏行不计数；空 ids 的行算有效记录（它是合法调用）')
+  assert.deepEqual(summarizeAccessRecords(''), {
+    autoCalls: 0,
+    recallCalls: 0,
+    distinctIds: 0,
+    totalHits: 0,
+    lastAtMs: 0,
+    firstAtMs: 0,
+    lines: 0,
+  })
 })
 
 // ---------- A50 提案日志 ----------

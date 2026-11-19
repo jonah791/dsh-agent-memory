@@ -189,10 +189,20 @@ export interface AccessSummary {
   totalHits: number
   /** 最近一次写入时刻（ms；无记录为 0） */
   lastAtMs: number
+  /**
+   * 首条记录时刻（ms；无记录为 0）。
+   *
+   * 存在的理由：任何「从未 X」的读数都必须是**有界**的。v0.45 知识地图要报
+   * 「活跃但从未被检索的条目」，它的真话是「自 trace 起点起未被记录检索过」——
+   * 没有下界就只能报一个不可复核的全称否定。
+   */
+  firstAtMs: number
+  /** 有效记录行数（成功解析为对象的行；**含空结果记录**，那是合法调用） */
+  lines: number
 }
 
 export function summarizeAccessRecords(text: string): AccessSummary {
-  const out: AccessSummary = { autoCalls: 0, recallCalls: 0, distinctIds: 0, totalHits: 0, lastAtMs: 0 }
+  const out: AccessSummary = { autoCalls: 0, recallCalls: 0, distinctIds: 0, totalHits: 0, lastAtMs: 0, firstAtMs: 0, lines: 0 }
   const ids = new Set<string>()
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
@@ -204,9 +214,11 @@ export function summarizeAccessRecords(text: string): AccessSummary {
       continue
     }
     if (typeof record !== 'object' || record === null) continue
+    out.lines += 1
     const r = record as { atMs?: unknown; source?: unknown; ids?: unknown }
     const atMs = typeof r.atMs === 'number' && Number.isFinite(r.atMs) ? r.atMs : 0
     if (atMs > out.lastAtMs) out.lastAtMs = atMs
+    if (atMs > 0 && (out.firstAtMs === 0 || atMs < out.firstAtMs)) out.firstAtMs = atMs
     if (r.source === 'auto') out.autoCalls += 1
     else if (r.source === 'recall') out.recallCalls += 1
     if (!Array.isArray(r.ids)) continue

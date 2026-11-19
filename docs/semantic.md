@@ -15,7 +15,7 @@
 | 能力名 | 记忆连续性（memory-continuity） |
 | 主副本 | 本文件（`self-plugins/dsh-agent-memory/docs/semantic.md`） |
 | 状态 | **implemented**（验收 **117 行**；解析器现算 `total=117 / proven=115 / pending=2`——2026-10-14 由 `semantic_get` 现读。⚠ **判据以解析器的实际行数为准，不以本节文字为准**：编号若有重复或不连续，解析器仍按**行数**计数 ⇒ 本行只复述读数，不自算。历史：2026-10-14 早些时候该行停留在「A1–A78 / total=78」，属**文档漂移**（DREAM 那批加了 A79–A84 未回填），本次一并修正；2026-09-22 曾报 77，真因是解析器吞掉续块首行，已修 `dsh-semantic-docs` `7f9def6`，详见 §7 汇总行；`pending=2 > 0` 故**不得**标 verified） |
-| 版本 | v0.7（文档）· **对应插件 v0.24.0**（`package.json`）——v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；v0.8 压缩流水线证据层；**v0.8.1/v0.8.2 修 U10 真因**（总结调用补会话 id；输出预算与可归因证据）<br>**v0.12 检索别名**（2026-10-13 重做第一步；⚠ **契约节缺**——原引用的「§5.14」编号已被 v0.15 占用，正本暂在 `src/types.ts` 的 `Entry.aliases` 与 `tests/aliases.test.mjs`，已记入 §10）<br>**v0.13 主体层**（2026-10-14：`subject` = 条目「**关于谁**」——`self` / `master` / 缺省通用；与 `role` 正交；语义见 §9 第 19 条、判据见 §7 A85–A94）<br>**v0.14 约定状态**（2026-10-14：`grounding` = 「**是否已被共同建立**」——`established` / `proposed`（我提的、主人未回应）/ `scoped` / `rejected` / 缺省未标注；与 `subject` 正交；语义见 §9 第 20 条、判据见 §7 A95–A104）<br>**v0.15 时效维**（2026-10-14：`reviewAfter` = **复查死线** + `watchFor` = **观察条件**；论文 *Fresh at Decision, Stale at Action* 移植；契约见 **§5.14**、语义见 §9 第 21 条、判据见 §7 A105–A116）<br>**v0.23 执行位置**（2026-11-15：`project` = 哪个项目 + `taskId` = 哪个任务；**两级不可拆**；与 `scope` 正交（后者是准入且值是路径）；`project` 写入时按会话 cwd **自动盖章**（经 `dsh-project-state` **软依赖**，缺该插件则不盖）；依据 = 主人 2026-11-15 架构定调「Project 不属于 Agent 也不属于 Session」 + MAGE/EMNLP 2026（记忆组织轴该是执行路径而非语义相似度）；语义见 `src/execution.ts` 文件头、不变量见 §9 第 16 条 I16、判据见 `tests/execution.test.mjs`）<br>**v0.24 事实生命周期**（2026-11-17：`validAfter` = 这条结论**从何时开始成立**（≠ `createdAt`）+ `supersededBy` / `supersedes` = **谁替代了谁**（只留一层）；**唯一写入口** `memory_supersede`（两侧同写），`update` 刻意不暴露这两个字段；旧条目**绝不删除**，recall 默认仍返回并打「⚠ 已过时」标记；契约见 **§5.16**、语义见 `src/succession.ts` 文件头、判据见 `tests/succession.test.mjs`） |
+| 版本 | **能力编号 v0.45**（2026-11-19；⚠ 与 `package.json` 的包语义版本**不相等**，见 `lh-6009c216`）· **逐版变更史的正本在 §9 实践修订记录**（v0.5–v0.45 共 38 条），本格只保留早期摘要。v0.7（文档）· 对应插件 v0.24.0 —— v0.5 角色维度；v0.6 价值体检器；v0.7 重心化注入 + 命中率度量 + 提案日志；v0.8 压缩流水线证据层；**v0.8.1/v0.8.2 修 U10 真因**（总结调用补会话 id；输出预算与可归因证据）<br>**v0.12 检索别名**（2026-10-13 重做第一步；⚠ **契约节缺**——原引用的「§5.14」编号已被 v0.15 占用，正本暂在 `src/types.ts` 的 `Entry.aliases` 与 `tests/aliases.test.mjs`，已记入 §10）<br>**v0.13 主体层**（2026-10-14：`subject` = 条目「**关于谁**」——`self` / `master` / 缺省通用；与 `role` 正交；语义见 §9 第 19 条、判据见 §7 A85–A94）<br>**v0.14 约定状态**（2026-10-14：`grounding` = 「**是否已被共同建立**」——`established` / `proposed`（我提的、主人未回应）/ `scoped` / `rejected` / 缺省未标注；与 `subject` 正交；语义见 §9 第 20 条、判据见 §7 A95–A104）<br>**v0.15 时效维**（2026-10-14：`reviewAfter` = **复查死线** + `watchFor` = **观察条件**；论文 *Fresh at Decision, Stale at Action* 移植；契约见 **§5.14**、语义见 §9 第 21 条、判据见 §7 A105–A116）<br>**v0.23 执行位置**（2026-11-15：`project` = 哪个项目 + `taskId` = 哪个任务；**两级不可拆**；与 `scope` 正交（后者是准入且值是路径）；`project` 写入时按会话 cwd **自动盖章**（经 `dsh-project-state` **软依赖**，缺该插件则不盖）；依据 = 主人 2026-11-15 架构定调「Project 不属于 Agent 也不属于 Session」 + MAGE/EMNLP 2026（记忆组织轴该是执行路径而非语义相似度）；语义见 `src/execution.ts` 文件头、不变量见 §9 第 16 条 I16、判据见 `tests/execution.test.mjs`）<br>**v0.24 事实生命周期**（2026-11-17：`validAfter` = 这条结论**从何时开始成立**（≠ `createdAt`）+ `supersededBy` / `supersedes` = **谁替代了谁**（只留一层）；**唯一写入口** `memory_supersede`（两侧同写），`update` 刻意不暴露这两个字段；旧条目**绝不删除**，recall 默认仍返回并打「⚠ 已过时」标记；契约见 **§5.16**、语义见 `src/succession.ts` 文件头、判据见 `tests/succession.test.mjs`） |
 | 实现落点 | `self-plugins/dsh-agent-memory/src/`（19 个模块，见 §8） |
 | 运行落点 | 数据：`${DSH_HOME}/storages/agent_memory.json`（域 `agent_memory` / 表 `entries`）<br>配置：`E:\alice\.dsh\memory.yml`（**2026-09-15 起存在**：`roles` 已启用，策略 main/worker/verifier/ghost；其余键走默认）<br>侧车：`${DSH_HOME}/memory-access-trace.jsonl`（v0.6 用量）、`${DSH_HOME}/memory-audit-proposals.jsonl`（v0.7 提案）、`${DSH_HOME}/memory-compress-trace.jsonl`（v0.8 压缩流水线）<br>挂载：`.dsh/profiles/web/cordis.patch.yml` 的 `agent-memory` 行（**`config.maxTokens: 32000`**——2026-09-15 由 16000 抬高，见 §7 A64–A67 旁注） |
 | 作者 / 日期 | 爱丽丝 · 2026-09-13 |
@@ -203,7 +203,7 @@
 | 工具执行内 | `src/tools.ts`（recall / memory_stats）→ `deps.compress` | 访问记忆时补压（fire-and-forget） |
 | 其他插件 | `ctx.memoryApi.remember()` 消费方：emotion / taskboard / evolution-core / skill-forge | 运行态结论回流（默认 `global`） |
 | 装配（v0.8 证据层） | `src/index.ts: makeCompressTrace(cfg, trigger)` | 懒压缩与周期补压**两条路径各自注入 sink**；sink 补齐 `atMs`/`trigger` 后落 `<DSH_HOME>/memory-compress-trace.jsonl`（吞错） |
-| 模型 | 11 个工具（§5.4） | agent 自主调用 |
+| 模型 | **28 个工具**（§5.4 起逐个增补；逐版清单见 §9，不在此复述） | agent 自主调用 |
 
 **写入真源唯一**：上表所有路径最终都调 `MemoryStore.remember / update / forget / put`。
 
@@ -1226,6 +1226,61 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 
 ---
 
+### 5.36 知识地图契约（v0.45 · 方案 §4.5「主题关联与知识地图」· 只读派生 · 设计正本 `docs/design/aml-map.md`）
+
+**定位**：报「我的知识长什么样、哪里是空的」。方案 §4.5 给了七项（知识领域 / 领域下主题 / 主题间联系 / 长期活跃 / 项目使用 / 知识空白 / 已过期），本契约把它们**逐条建维**，并给每一维**自报可读性**。
+
+**反定位**：**不报「该补哪些字段」**——那是 §5.33 编目工作面（作业面，只覆盖未分类条目）。本节是**认知面**，覆盖全库。两者读同一批条目，读数不可互相替代。也不做可视化（图形化属方案 §12 界面，当前没有读者）。
+
+**术语：三档可读性**（本契约的核心机制，不是注释）。
+
+| 档 | 判据 | 输出什么 |
+|---|---|---|
+| `measured` | 该维填充率 **≥ 50%** | 读数可用于排名 |
+| `starved` | `0 < 填充率 < 50%` | **报分母与填充率，明细照给但档位并列**——排名靠标注生效，不靠删数据 |
+| `absent` | 填充率 0 或缺载体 | **报缺什么，不报 0 作为结论** |
+
+50% 是**我的工程惯例**（取中位数：少于一半成员有值时，聚合结果由少数决定），不是行业标准。**它与方案 §13.3「建议目标」同属自定门槛**，不冒充外部依据。
+
+**不变量**：
+
+1. **`expiry=0` 的两种读法在数字上都是 0、在含义上相反**——「没有一条设过失效时刻」≠「没有过期知识」。前者是仪器没接上，后者是馆藏健康。`absent` 档存在的唯一理由就是不让这两件事混成一个 0。
+2. **「空白」是四个数，不可合并**（合并就丢掉了差在哪）：`unretrieved`（活跃但自 trace 起点起未被记录检索）· `singletonTopics`（只出现在 1 条上的标签）· `unusedConcepts`（概念存在但零条目使用）· `untagged`（零标签）。四个口径各自独立计数，**不由彼此或任何其他维度相减得出**。
+3. **「从未」必须是有界断言**：`unretrieved` 的真话是「自 trace 起点起未被记录检索过」，起点由 `AccessSummary.firstAtMs` 给出并回传。**无 trace ⇒ 该口径判 `absent`，不报 0**。
+4. **所有维度派生，不加字段**（三个先例：`memType` 1.4% / `space` 1.4% / `sourceIds` 0.1%——可空字段必然不填）。
+5. **候选关联永不落库**：共现达标的标签对只出现在返回值里（不带 relation id / type），建不建边由我决定（判断型字段禁默认值）。
+
+**契约**：`memoryMap(input, options): MapReport`（`src/map.ts`，纯函数）· 工具 `memory_map`（`src/tools.ts::buildMap`，只读，`deferLoading`）。**调用点唯一**：`buildMap` 的 `execute`。数据来源：`store`（条目）+ `deps.concepts.all()` / `deps.relations.all()`（按 `scopes` 过滤）+ `deps.readAccess()`（id → 检索次数）+ `deps.readAccessSummary()`（`firstAtMs` / `lines`）。词表或关系未接线时传空数组并在渲染里说清，**不假装「零概念」**。
+
+**已知边界（诚实登记）**：① `accessedAt` 与 trace 不同源——前者是条目上的回写时间戳，后者是调用日志；读数以 trace 为准。② trace 只覆盖起点之后，且 `auto` 占 71.8% ⇒ 活跃度偏向自动注入路径。③ **标签共现不是语义关联**（`6维+日结` 共现 45 次是因为总被一起打）。④ 单例标签 73.7% ⇒ 聚合只算 `df ≥ 2` 的标签。⑤ **50% 判据在小样本下没有分辨力**（分母 2 时 1/2 判 `measured`，但那个百分比不代表任何东西）；线上分母是四位数量级，故不为此加「最小样本量」机制。
+
+**判据 M1–M11 + E1–E5**（`tests/map.test.mjs`，17 条）：
+
+| # | 判据 |
+|---|---|
+| M1 | ★三档判据：`≥50%` ⇒ measured（含恰好 50%）· `0<r<50%` ⇒ starved · `=0` 或分母 0 ⇒ absent |
+| M2 | ★starved 维的返回值**同时**带 `readability` / `fillingRate` / `denominatorName` / `note`；渲染里档位在明细之前 |
+| M3 | ★absent 维报「读不出」而非「没有」；`expiry.unset` 必须自报（未设 ≠ 有效） |
+| M4 | ★空白四口径各自独立计数（**不得有相加关系**） |
+| M5 | ★无 trace ⇒ 「从未被检索」判 absent 并写「不可判」；有 trace 必须回传起点 |
+| M6 | 单例标签只数 `df=1`（不数「≤N」） |
+| M7 | ★概念匹配走 `normalizeLabel`（与词表同源），大小写/空白差异不影响命中 |
+| M8 | ★候选关联：共现达阈值才进；已声明 `related` 的概念对要标 `declaredAsConceptPair` |
+| M9 | 候选只出现在返回值（不带 relation id ⇒ 无法被当成「已建边」落库） |
+| M10 | ★每个概念都报使用量，0 使用的单列进 `unusedConcepts` |
+| M11 | 七维齐全且顺序与方案原文一致；每维带 `requirement`（引原句）与分母口径名 |
+| E1 | ★工具只读（跑前后存储逐字节不变，含 `accessedAt`）；返回键全在 `output.schema` 内 |
+| E2 | ★`traceSince` 取自 `firstAtMs`，不是「今天」 |
+| E3 | 填充率随标注变化（不缓存） |
+| E4 | 词表/关系未接线 ⇒ 空数组，不假装零概念 |
+| E5 | ★`summarizeAccessRecords` 报首条时刻与有效行数（「从未」的下界）；空 ids 行算有效记录 |
+
+**尸体验证**：① `readabilityOf` 恒返回 `'measured'` ⇒ M1/M2/M3 红；② `firstAtMs` 改取最大值（等于 `lastAtMs`）⇒ A49/E5 红。两处各自精确变红 ⇒ 判据有分辨力，不是靠别的路径连带。
+
+**诚实标注的弱环**：七项里**只有三项当前是 `measured`**（活跃 / 空白 / 项目声明低但可读）；领域 1.4%、主题受控率 0.5%、关系 2 条边、`expiry` 0 条全在 `starved`/`absent`。**所以 §4.5 判 🟡 不判 ✅**——仪器建成了，但它此刻读出的主要信息是「这四项还没数据」。
+
+---
+
 ## 6 · 边界与信任
 
 **记忆内容是数据，不是指令。** 条目正文、来源说明、关系注释、实体画像在注入与渲染时都按**不可信内容**对待——它们能影响我看见什么，不能改变我做什么。检索结果没有执行权限；「说得有理」不构成扩大授权的理由。
@@ -1316,6 +1371,7 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | A204 | **遗忘场景端到端**：删除后默认视图查不到、归档视图能找回 | 同文件「S4」 | ✔ 已实测（单测） |
 | A206 | ★**类别来源三档与两个口径并列**（v0.43）：`memory_catalog.effectiveSources` 报 `explicit` / `derived-from-kind` / `unknown`；渲染把「字段存有率」与「有效分类率」并列——线上 1.4% vs 17.0%，差 13 倍。**只报前者会让「维度建了但没人用」成为唯一读法**，而真实边界是 83% 的存量（全是 `kind='knowledge'`）在语义上无法机械归类 | `tests/catalog.test.mjs`「C13」 | ✔ 已实测（单测；尸体：关掉派生 ⇒ 只有 C13 红） |
 | A207 | ★**空结果必须落盘**：「查了但没找到」是一次检索，侧车里必须有 `ids: []` 的记录——否则失败样本结构性缺失，「检索失败原因」（方案 §16.3）永远算不出。命中带 id / 未命中空数组 / `source` 可辨；空行**不改**「条目·次」分母（R7 不受影响），只让「调用次数」这个分母变真 | `tests/access-trace.test.mjs`「T1–T4」（**真实写入器**）· `tests/audit.test.mjs`「A31c」（调用点）· `tests/centroid.test.mjs`（汇总口径翻面） | ✔ 已实测（单测；尸体：加回任一道门 ⇒ T1/T3/A39/centroid 红）。⚠ **三道门**：`tools.ts` 调用点 · `auto-inject.ts` 调用点（含 `digest.length === 0` 的早返回）· **`access-trace.ts` 写入器**。第一版只修前两道，A31c 因 mock 而绿、线上仍红 ⇒ **被 mock 掉的那一层里藏着第三道门**。⚠ `auto` 路径的**调用点**仍无单测（`createAutoInject` 依赖 dsh agent 上下文），只有线上验证 |
+| A208 | ★**知识地图七维各自自报可读性**（v0.45 · 方案 §4.5）：七项要求逐条成维，每维必带 `readability`（measured / starved / absent）· `fillingRate` · `denominatorName` · `note`。**`expiry=0` 必须报「没有一条设过失效时刻」而不是「没有过期知识」**——两件事在数字上都是 0、在含义上相反。空白四口径（未检索 / 单例标签 / 未用概念 / 零标签）**不得有相加关系**；无 trace 时「从未被检索」判 absent 并写「不可判」，有 trace 必须回传 `firstAtMs`（「从未」是有界断言）。候选关联只出现在返回值、**不带 relation id**（结构上无法被当成已建边落库） | `tests/map.test.mjs`「M1–M11 / E1–E5」（17 条） | ✔ 已实测（单测；尸体：`readabilityOf` 恒 `measured` ⇒ M1/M2/M3 红；`firstAtMs` 改取最大值 ⇒ A49/E5 红。工具面 27 → 28，A42 第九次如期变红）。⚠ 七项里只有三项 `measured`，故 §4.5 判 🟡 不判 ✅ |
 | A205 | ★**分项相加 ≠ 净排除**：`excluded` 新增 `considered` 与 `net`；`net` 必须由「全量 − 分母」算，**不能**用四项相加——一条已归档的 summary 会同时进 `archived` 与 `summary`（线上实测重叠 **424** 条：净排除 1328 vs 四项相加 1752）。渲染并列四个分项时必须同时出现「不可相加」与「交集」 | `tests/catalog.test.mjs`「C1c」「C12」 | ✔ 已实测（单测；尸体：把 `net` 改成四项相加 ⇒ **只有 C1c 红**，C12 因样本无排除项而恒成立、不红——这条边界已写进判据注释，防止未来的我把它当成覆盖了自洽性） |
 | A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
@@ -1470,6 +1526,8 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 > **A25/A23 的线上量化对账（2026-09-15 17:5x · 真实生产库 676 条）**：主脑视角 `recall` → `命中 496`；`role='ghost'`（`read: []`, `include_global: false`）→ `命中 384`。差额 **112 = 111（global 作用域被 `include_global: false` 收窄）+ 1（唯一带 `role='main'` 的条目被 `read: []` 拒绝）**，逐项对得上。库内实测：盖章 `role` 共 1 条（`974a5e6b`，`author = {sessionId: 'session-a5375716…', delegationDepth: 0, preset: 'alice-v2'}`），其余 **675 条为共享**（迁移安全的实证）。
 
 ## 8 · 与实现的关系
+
+⚠ **本表只覆盖到 v0.7**（`centroid.ts` 那一行是末端）。v0.12 起的模块——`aliases` / `subject` / `grounding` / `temporal` / `execution` / `memType` / `space` / `lifecycle` / `relations` / `thesaurus` / `entities` / `sources` / `forget` / `actor-audit` / `temporal-dual` / `retention` / `catalog` / `credibility` / `scenario` / `map`——**正本是各自的 §5.x 契约节与 `src/` 目录本身**，本表不复述以免漂移。当前实际 **46 个源文件 / 21411 行**（`src/*.ts`，2026-11-19 17:10 实测）、**28 个工具**。
 
 | 模块 | 职责 |
 |------|------|
@@ -1766,6 +1824,30 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
     - **一处刻意的判据放宽，写清理由**：注入面**不要求旧偏好消失**（v0.38 起就是「标记但保留」——旧值里写着「以前为什么这么定」）。所以第四格的判据是「**顺序 + 标记**」而不是「缺席」。⚠ 写清楚是为了让未来的我分得清「判据按设计放宽」与「为了让测试变绿而放水」——**两者的区别是：放水不会解释自己**。
     - **落地判据**：`tests/scenario.test.mjs` 4 条（S1–S4）；尸体验证：去掉「是否被替代」档 ⇒ **仅 S3 红**（其余三条绿 ⇒ 判据精确，不是靠别的路径连带变红）；全家 **675/675** + 88 pass（1 skip）；工具面仍 27（无新工具）。
     - **诚实标注的弱环**：第二类（跨会话整合）只到「两条都能取回」，离方案的「组织成完整项目记忆」还差 LLM 归纳层（§16.1 未建）——**所以 §13.2 判 🟡 不判 ✅**。
+
+36. **2026-11-19 · 类别来源三档与两个口径并列（v0.43 · 方案 §3.1 · 一处「少做」的裁决）**
+    - **缺口**：`memory_catalog` 只报 `memType` 字段存有率 **1.4%**（25/1773），于是这个维度唯一能得出的读法是「建了但没人用」。而真实边界是另一回事。
+    - **读数**：同一批条目的**有效分类率 17.0%**（301 = 25 显式 + 276 按 `kind` 零猜测派生）——两个口径差 **13 倍**。剩余 **83.0%（1472 条）全是 `kind='knowledge'`**：语义上可被「语义/程序/运行/项目/关系」五类中的任一类解释，**推不出就不推**。
+    - **★ 原计划「批量补 memType」被证据推翻**：抽读「判据」簇 80 条标题发现**簇内混杂**——「删除类动作的两条纪律」是原理（语义类），「读取通路的选择：走 read 或 fetch_page」是步骤（程序类），整簇按一个类别写会错掉约一半。而 `memType` 自 v0.39 起**改变体检档位**（§5.32 后置修正层）⇒ **判错比留空更坏**。
+    - **一处归因修正**：覆盖率低**不是因为「不知道有这个字段」**——同批条目里 `aliases` 47.5% / `cue` 36.3% / `watchFor` 32.5% 都远高于 `memType` 的 1.4%。**分界是「填了有没有后果」，不是字段新旧。**
+    - **落地**：`catalog.ts::effectiveSources` + `retention.ts::countByEffectiveTypeSource`（三档 `explicit` / `derived-from-kind` / `unknown`），渲染把两个口径**并列**印出。判据 C13（尸体验证：关掉派生 ⇒ 只有 C13 红）。
+
+37. **2026-11-19 · §16.3 反馈闭环盘点 + 空结果的三道门（v0.44 · 方案 §16.3 · 读数层缺陷第五次同形）**
+    - **缺口**：方案 §16.3 要「调用成功率 / 纠错率 / 检索失败原因」三项回流，而 `memory-access-trace.jsonl` 只有四个字段（`atMs` / `source` / `role` / `ids`），**无 query**。逐项核过：调用成功率**无任何满意度信号载体**（`auto` 占 71.8%，自动注入无反馈通道）· 纠错率**只能算代理**（id 可关联 trace 与 audit，但「被改 ≠ 因为被检索」，且 audit 仅 9 条）· 检索失败原因**只剩空结果率**（不记 query 是 v0.37 最小化的刻意裁决）。
+    - **★ 更底层的缺陷**：盘到「3,539 次调用、空结果 0 次（0.00%）」——好得可疑。查下去发现空结果**从来不落盘**，且有**三道门**：① `tools.ts` recall 调用点 `result.results.length > 0` ② `auto-inject.ts` 的 `hitIds.length > 0` **与更早的 `digest.length === 0` 早返回** ③ **`access-trace.ts::appendAccessTrace` 的 `if (capped.ids.length === 0) return false`**——第三道在**写入器**里，不在调用点。
+    - **★ 第一次修没修好**：只修前两道，单测 A31c 绿、**线上仍不落盘**。真因是 A31c **mock 掉了 `recordAccess`**，绕过了真实写入器。⇒ 两条纪律：**修「过滤」要找所有过滤点，只 grep 调用点会漏掉被调用的实现**；**「改了 A 要让它生效」的修复，A 的上下游都要有非 mock 的判据**。
+    - **修法**：契约从「一行一次**命中**」改为「一行一次**检索调用**（含空结果），`ids` 可为空数组」；新增 `tests/access-trace.test.mjs`（T1–T4）**直测真实写入器不 mock**；两条把旧契约钉成回归判据的旧测试**翻面并说明理由**（删断言等于把「以前为什么这么定」也丢了）。
+    - **线上验收**：`{"atMs":1795078661319,"source":"recall","role":"main","ids":[]}` = 3,539 行历史上第一条空结果记录（现 3,541 行）。**历史行不可回溯 ⇒ 新读数只能判在滑尺上。** 判据 A207；盘点表见 `docs/design/aml-eval.md §7`。
+
+38. **2026-11-19 · 知识地图（v0.45 · 方案 §4.5 · 先量数据源再定设计）**
+    - **缺口**：§4.5 判 ❌（七项要求无载体：知识领域 / 领域下主题 / 主题间联系 / 长期活跃 / 项目使用 / 知识空白 / 已过期）。
+    - **★ 先量再设计**：七项的数据源逐条量过（2026-11-19 17:00，磁盘 3103 / 活跃 1794）——`space` **1.4%**、词表覆盖标签 **0.5%**（21/4160，单例标签 73.7%）、关系边 **2 条**、`expiry` **0 条**。⇒ **直接照字面建七项，四项会输出 0 而看起来健康**，与 v0.44 之前「空结果率恒 0.00%」是同一种病。
+    - **核心机制：三档可读性**（`measured` 填充率 ≥50% 可排名 / `starved` 只报分母不报排名 / `absent` 报缺什么不报 0）。其中最关键的一条：**`expiry=0` 的两种读法在数字上都是 0、在含义上相反**——「没有一条设过失效时刻」≠「没有过期知识」。
+    - **空白是四个数、不可相加**：`unretrieved` 265 · `singletonTopics` 3067 · `unusedConcepts` 1（实体权威档）· `untagged` 68。合并成一个数就丢掉了「差在哪」。
+    - **「从未」是有界断言**：`AccessSummary` 新增 `firstAtMs` / `lines`——没有下界就只能报一个不可复核的全称否定。
+    - **候选关联永不落库**：共现达标（top30 内 ≥5 的 19 对）的标签对只出现在返回值里，**不带 relation id** ⇒ 结构上无法被当成「已建边」落库。
+    - **落地**：`src/map.ts`（纯函数）+ `memory_map`（只读，`deferLoading`）；判据 **M1–M11 + E1–E5**（17 条）；尸体验证两处——`readabilityOf` 恒 `measured` ⇒ M1/M2/M3 红，`firstAtMs` 改取最大值 ⇒ A49/E5 红。工具面 27 → **28**（A42 如期第九次变红）。
+    - **诚实标注的弱环**：七项里只有三项 `measured`（活跃 85.2% / 空白 / 项目 5.8%），**所以 §4.5 判 🟡 不判 ✅**——仪器建成了，但它此刻读出的主要信息是「这四项还没数据」。
 
 ## 10 · 未决问题
 
