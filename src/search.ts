@@ -489,6 +489,11 @@ interface ScoredEntry {
  */
 function compareScored(a: ScoredEntry, b: ScoredEntry): number {
   if (b.score !== a.score) return b.score - a.score
+  // ★ v0.42：已被替代的排后面。理由见函数上方注释——这条一档来自方案 §13.2 第三类场景实测
+  // （两条同分、旧条目因先写入而排前 ⇒ 读第一条就拿到已被推翻的偏好）。只在同分时生效。
+  const aSuperseded = a.entry.supersededBy !== undefined
+  const bSuperseded = b.entry.supersededBy !== undefined
+  if (aSuperseded !== bSuperseded) return aSuperseded ? 1 : -1
   // accessedAt 新→旧（ISO 字典序即时间序）
   if (a.entry.accessedAt !== b.entry.accessedAt) {
     return a.entry.accessedAt < b.entry.accessedAt ? 1 : -1
