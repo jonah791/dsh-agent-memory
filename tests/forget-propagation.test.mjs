@@ -217,6 +217,63 @@ test('F7 工具端到端：预览和实跑同列多层后代，且只归档目�
   assert.deepEqual(store.get(WID, unrelated.id), beforeUnrelated)
 })
 
+test('F8a 显式 id 可选中已归档条目：不报「未找到」，且派生闭包照常给出', async () => {
+  const { store, byName, exec } = setupE2E()
+  const seed = (title, kind, archiveRef = []) => store.remember({
+    kind,
+    title,
+    body: `${title}正文`,
+    scope: WID,
+    level: null,
+    bucket: null,
+    ...(archiveRef.length > 0 ? { archiveRef } : {}),
+  })
+  const source = await seed('F8 source', 'fact')
+  const day = await seed('F8 day summary', 'summary', [source.id])
+  const week = await seed('F8 week summary', 'summary', [day.id])
+  const forget = byName.get('forget')
+
+  await forget.execute({ id: source.id, reason: 'F8 first' }, exec)
+  assert.equal(store.get(WID, source.id).archived, true, '先归档它，制造「归档后还要被点名」的处境')
+
+  const preview = await forget.execute({ id: source.id, dryRun: true }, exec)
+  assert.deepEqual(preview.ids, [source.id], '已归档条目必须能被显式 id 选中——否则派生链永远没机会被检查')
+  assert.deepEqual(preview.derivedEntries.map((item) => [item.id, item.depth]), [[day.id, 1], [week.id, 2]])
+  assert.equal(preview.archivedCount, 0, 'dryRun 不写')
+
+  const done = await forget.execute({ id: source.id, reason: 'F8 again' }, exec)
+  assert.equal(done.archivedCount, 0, '本来就是归档态 ⇒ 不虚增')
+  assert.equal(done.alreadyArchived, 1, '但要如实报「它本来已归档」')
+  assert.deepEqual(done.derivedEntries, preview.derivedEntries, '实跑与预览同源')
+})
+
+test('F8b 幂等：重复点名已归档条目不刷新 updatedAt、不重复写审计', async () => {
+  const { store, byName, exec } = setupE2E()
+  const created = await byName.get('remember').execute({ text: '# F8b 正文' }, exec)
+  const forget = byName.get('forget')
+  await forget.execute({ id: created.id, reason: 'F8b first' }, exec)
+  const before = store.get(WID, created.id)
+  const again = await forget.execute({ id: created.id, reason: 'F8b second' }, exec)
+  const after = store.get(WID, created.id)
+  assert.equal(again.archivedCount, 0)
+  assert.equal(again.alreadyArchived, 1)
+  assert.equal(after.updatedAt, before.updatedAt, '对本来就归档的条目再归档一次不产生新信息，不该动 updatedAt')
+  assert.equal(after.archivedReason, before.archivedReason, '也不该覆盖原来的归档理由')
+})
+
+test('F8c 护栏不放宽：mode=topic / all 仍只挑活跃条目', async () => {
+  const { store, byName, exec } = setupE2E()
+  const remember = byName.get('remember')
+  const forget = byName.get('forget')
+  const live = await remember.execute({ text: '# F8c 活跃', tags: ['f8c'] }, exec)
+  const gone = await remember.execute({ text: '# F8c 已归档', tags: ['f8c'] }, exec)
+  await forget.execute({ id: gone.id, reason: 'F8c setup' }, exec)
+
+  const preview = await forget.execute({ mode: 'topic', topicTags: ['f8c'], dryRun: true }, exec)
+  assert.deepEqual(preview.ids, [live.id], 'topic 只命中活跃的那条——批量选择器不许被 includeArchived 放宽')
+  assert.equal(store.get(WID, gone.id).archived, true)
+})
+
 test('F3 凭证最小化：有面/计数/id，但**拿不到被删内容**（可对账、不可反推）', async () => {
   const { byName, certs, exec } = setupE2E()
   const titleMark = 'Zj7Q机密标题'

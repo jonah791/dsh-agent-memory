@@ -1424,16 +1424,26 @@ export function pushRevision(
 /**
  * 批量遗忘目标选择（v0.9 纯函数）：去重 → 只留**存在且未归档**者 → 截断到上限。
  * `skipped` 计「重复 / 不存在 / 已归档」；`truncated` 计被上限挡下的条数（两者都如实回报）。
+ *
+ * `includeArchived`（v0.55 · 方案 §10.4）只给**显式 id / ids** 用：方案那三条操作里
+ * 「忘记一条记忆」并没有按活跃/归档分档，而归档过的记忆此前**根本选不中**
+ * （`forget({id})` 直接报「未找到」）⇒ `archiveRef` 派生链在归档区永远没有被检查的机会。
+ * 批量选择器（topic / all / tier）**不许**传它：那三档靠「只挑活跃」控制爆炸半径。
+ *
+ * `alreadyArchived` 把「选中了但本来就已归档」单独计数——这批不进 `archivedCount`
+ * （避免重复归档把「忘了多少条」灌水），但仍出现在 `targets` 里，好让派生清单照常算。
  */
 export function selectForgetTargets(
   entries: readonly Entry[],
   requestedIds: readonly string[],
   max: number,
-): { targets: Entry[]; skipped: number; truncated: number } {
-  const alive = new Map<string, Entry>()
+  opts: { includeArchived?: boolean } = {},
+): { targets: Entry[]; skipped: number; truncated: number; alreadyArchived: number } {
+  const includeArchived = opts.includeArchived === true
+  const byId = new Map<string, Entry>()
   for (const entry of entries) {
-    if (entry.archived === true) continue
-    alive.set(entry.id, entry)
+    if (!includeArchived && entry.archived === true) continue
+    byId.set(entry.id, entry)
   }
   const seen = new Set<string>()
   const picked: Entry[] = []
@@ -1444,7 +1454,7 @@ export function selectForgetTargets(
       continue
     }
     seen.add(id)
-    const entry = alive.get(id)
+    const entry = byId.get(id)
     if (entry === undefined) {
       skipped += 1
       continue
@@ -1452,7 +1462,13 @@ export function selectForgetTargets(
     picked.push(entry)
   }
   const truncated = Math.max(0, picked.length - max)
-  return { targets: picked.slice(0, max), skipped, truncated }
+  const targets = picked.slice(0, max)
+  return {
+    targets,
+    skipped,
+    truncated,
+    alreadyArchived: targets.filter((entry) => entry.archived === true).length,
+  }
 }
 
 /** 合并正文（v0.9 纯函数）：把 others 的正文并入 canonical（带来源标注，信息不丢） */
@@ -1865,7 +1881,8 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
           id: { type: 'string' },
           mode: { type: 'string', description: '本次操作类型（entry / topic / all）' },
           archived: { type: 'boolean', required: true },
-          archivedCount: { type: 'integer', required: true },
+          archivedCount: { type: 'integer', required: true, description: '本次**新归档**的条数（v0.55 起不含「本来就已归档」的目标——放 alreadyArchived）' },
+          alreadyArchived: { type: 'integer', description: '选中但本来就已归档的条数：不重复归档（不刷新 updatedAt），派生清单与凭证照常覆盖' },
           ids: { type: 'array', required: true, items: { type: 'string' } },
           skipped: { type: 'integer', required: true },
           truncated: { type: 'integer', required: true },
@@ -1888,6 +1905,11 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
           lines.push(`已归档记忆条目 ${value.id}`)
         } else {
           lines.push(`已归档 ${value.archivedCount} 条（跳过 ${value.skipped}）`)
+        }
+        // 已归档目标（v0.55）：不印这一行的话，「已归档 0 条」会被读成「什么都没找到」，
+        // 而实际发生的是「它本来就归档了，派生清单仍然算过了」。
+        if (!value.dryRun && (value.alreadyArchived ?? 0) > 0) {
+          lines.push(`其中 ${value.alreadyArchived} 条本就已归档：未重复归档（不动 updatedAt），派生清单已照常给出`)
         }
         // 传播面（v0.36 · 方案 §10.4）：不印出来，读者就只看到「已归档」三个字，
         // 而方案要的是「九处都处理了吗」这个答案。
@@ -1995,10 +2017,18 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
         throw new Error('forget: 需要 id / ids / tier 之一（批量归档请先 dryRun=true 看清单）')
       }
 
-      const { targets, skipped, truncated } = selectForgetTargets(universe, requested, max)
+      // 显式点名（id / ids）允许选中**已归档**条目（v0.55 · 方案 §10.4）：方案那三条操作里
+      // 「忘记一条记忆」不按活跃/归档分档，而归档过的记忆此前直接报「未找到」——
+      // 于是 `archiveRef` 派生链永远没有在归档区被检查的机会。topic / all / tier 不放宽：
+      // 它们靠「只挑活跃」控制爆炸半径，多给一个旋钮就等于把它们变成第二种全删。
+      const explicitIds = args.id !== undefined || args.ids !== undefined
+      const { targets, skipped, truncated, alreadyArchived } = selectForgetTargets(universe, requested, max, { includeArchived: explicitIds })
       const singleMode = args.id !== undefined && args.ids === undefined && args.tier === undefined
       if (singleMode && targets.length === 0) {
         throw new Error(`forget: 未找到 id="${args.id}" 的记忆条目（当前视野内，或已归档）`)
+      }
+      if (alreadyArchived > 0) {
+        notes.push(`${alreadyArchived} 条已是归档态：本次不重复归档（不刷新 updatedAt），但派生清单照常给出`)
       }
       if (truncated > 0) {
         notes.push(`目标共 ${targets.length + truncated} 条超上限 ${max}，本次只处理前 ${max} 条（其余下次再来）`)
@@ -2037,6 +2067,7 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
           mode,
           archived: false,
           archivedCount: 0,
+          alreadyArchived,
           ids,
           skipped,
           truncated,
@@ -2053,11 +2084,16 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
       // 解析入参（v0.21.0）：非法值 fail-loud——静默当成 `unspecified` 会让「我判断过」
       // 与「我打错了字」在库里同形，而这两件事对未来读它的人完全不同。
       const reasonType = parseArchiveReasonTypeArg(args.reasonType, 'forget.reasonType') ?? 'unspecified'
+      // ⚠ 已归档目标**不再写一次**（v0.55）：`store.forget` 会刷新 updatedAt，而对一条本来就归档的
+      // 条目再归档一次不产生任何新信息，却会让「最近改动」的读数漂移。派生清单与凭证照常覆盖它。
+      let newlyArchived = 0
       for (const target of targets) {
+        if (target.archived === true) continue
         await deps.store.forget(target.scope, target.id, {
           ...(reason !== undefined ? { reason } : {}),
           reasonType,
         })
+        newlyArchived += 1
         recordAction(deps, config, {
           action: 'forget',
           id: target.id,
@@ -2113,8 +2149,9 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
       return {
         ...idField,
         mode,
-        archived: ids.length > 0,
-        archivedCount: ids.length,
+        archived: newlyArchived > 0,
+        archivedCount: newlyArchived,
+        alreadyArchived,
         ids,
         skipped,
         truncated,
