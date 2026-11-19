@@ -1013,7 +1013,7 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 
 **存入与派生分开**：`expiry` / `occurredAt` 是**存储字段**（我写时给的事实），「是否已过期」是**派生值**（`expiry < now` 现算）——不预存档位，否则与读取时刻脱钩（同 `staleness` 的教训：`reviewAfter` 也只存日期、档位由渲染层现算）。
 
-**判据 A167–A174**（`tests/temporal-dual.test.mjs`）：T1 四个字段各自可独立读写、互不推导 · T2 不给就没有（`occurredAt` / `expiry` 无默认值，键缺席 ≠ 等于 createdAt）· T3 `expiry` 早于 `validAfter` ⇒ fail-loud（区间为空不是「长期有效」）· T4 过期是派生：同一份数据在不同时刻读，`expired` 档会变 · T5 三种标记可同时出现且互不吃掉 · T6 注入对已失效条目**标记但保留** · T7 `memory_stats.expiry` 三档之和 == total · T8 `invalidated` 过滤与 `staleness` 过滤互不干扰。
+**判据 A167–A174**（`tests/temporal-dual.test.mjs`，12 条）：T1 解析（日期/ISO 都收，相对写法与 2026-02-30 fail-loud）· T2 两种日期解释方向相反（`occurredAt` 当日起点 / `expiry` 当日末刻）· T3 区间校验（失效早于生效 ⇒ 抛；相等允许）· T4 过期是**派生**：同一份数据在不同 `now` 下档位不同 · T5 三种标记可同时出现且互不吃掉 · T6 三档计数之和 == 条目数 · T7 过滤（未给档位 ⇒ 零拷贝）· T8 四个字段互不推导、缺省就是缺省 · T9 `expiry` 与 `validAfter` 冲突 ⇒ **写入被拒** · T10 update 三态 + 按**修改后状态**校验区间 · T11 过期**不改生命周期**（条目仍 active，只是打标记）· T12 `expiryState` 与 `staleness` 两个筛子互不干扰。尸体验证：把 `expiryStateOf` 写死返回 `active` ⇒ **6 条红**（T4/T5/T6/T7/T11/T12），恢复后 12/12 绿。
 
 **边界与信任**：见 **§6**；本节特有两条——`occurredAt` 是**我声明的事实**，机制无法验证（写错了没有任何东西会报错，只能靠 `evidenceRefs` 回原文核）；过期**不删除任何东西**，它只改读法。
 
@@ -1069,6 +1069,14 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | A164 | **只记真实变更**：`remember` 新建记 `write`、同标题合并记 `update`；`forget({dryRun})` **不记**；`memory_link` 幂等命中与 `memory_unlink` 二次退役**不记**；`forget` 零命中是 fail-loud 抛错且**不写审计**（失败的动作不是动作） | 同文件「E1」「E2」「E3b」「E3c」「E4」 | ✔ 已实测（单测） |
 | A165 | ★**三个零可辨 + 宿主校验面对齐**：`wired=false`（未接线）/ `wired=true,total=0`（零事件，文案必须写明「不是零违规」）/ `total>0,rejected=0` 三种形态各自可辨；`memory_trail` 的 `output.schema` 与 `execute` 返回键**双向对齐**（宿主 `additionalProperties:false` 漏声明会整条拒收，而单测直接调 `execute()` 看不见这一跳）；`memory_stats.audit` 块同守三态 | 同文件「E7」「E8」「E9」「E10」「E11」 | ✔ 已实测（单测） |
 | A166 | **动作簇是信号不是裁决**：同一（会话, 动作）在窗内达阈值才报；**跨动作不合并**（合并会把「正常干活」读成「失控」）；窗太窄不算；`minCount<2` 或 `windowMs<=0` ⇒ 返回空（不产生恒真信号）；审计未接线时工具照常工作（旁证不是前置条件） | 同文件「A8」「A9」「E12」 | ✔ 已实测（单测） |
+| A167 | ★**四轴独立且缺省就是缺省**：`occurredAt` / `expiry` / `validAfter` / `createdAt` 各自可独立读写、**互不推导**；不给就是键缺席（`undefined`）而不是被填成 `createdAt`——追记场景下两者必须能不同 | `tests/temporal-dual.test.mjs`「T8」「T1」 | ✔ 已实测（单测） |
+| A168 | **解析 fail-loud + 两种日期解释方向相反**：日期与 ISO 时刻都收且**原样保留**；相对写法（`+7d`）与不存在的日期（2026-02-30，JS 会静默滚到 3-02）当场抛；`occurredAt=2026-11-15` 按**当日起点**、`expiry=2026-11-15` 按**当日末刻**（与 `reviewAfter` 同口径，否则同一判据两个真源） | 同文件「T1」「T2」 | ✔ 已实测（单测） |
+| A169 | ★**区间校验按修改后状态**：`expiry` 早于 `validAfter` ⇒ 写入被拒（「从未有效过」几乎一定是笔误，静默接受会让一条永不生效的记录混进库里）；相等**允许**（当天生效当天失效合法）；`update` 只给 `expiry` 而条目已有 `validAfter` 时，冲突按**修改后**的两值判 | 同文件「T3」「T9」「T10」 | ✔ 已实测（单测） |
+| A170 | ★**过期是派生值**：同一份数据在不同 `now` 下档位不同（不预存档位——预存就与读取时刻脱钩）；未设失效时刻是 `unset`，**不是 `active`**（不知道 ≠ 有效） | 同文件「T4」 | ✔ 已实测（单测；尸体：`expiryStateOf` 写死 `active` ⇒ 6 条红） |
+| A171 | **三种标记共存且互不吃掉**：`⚠已过时`（被取代）/ `⌛已失效`（时间到了）/ `⚠已复查`（reviewAfter）可同时出现在一行；只对已失效打 `⌛`（未失效不打——标记要挑着打） | 同文件「T5」 | ✔ 已实测（单测） |
+| A172 | **统计与过滤**：`memory_stats.expiry` 三档之和 == total（未设单列，不并入有效）；`expiryState` 过滤在未给档位时**零拷贝透传**，非法取值 fail-loud | 同文件「T6」「T7」「T11」 | ✔ 已实测（单测） |
+| A173 | ★**过期不改生命周期**：已失效条目仍 `active`、仍可被检索到（只打标记），**不自动归档**——处置归人（§1.3 禁自动决策） | 同文件「T11」 | ✔ 已实测（单测） |
+| A174 | **两个筛子互不干扰**：`expiryState`（事实维）与 `staleness`（提醒维）各筛各的，可同时用；单用一个时另一个不生效 | 同文件「T12」 | ✔ 已实测（单测） |
 | A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
 | A2 | 同标题 `knowledge` 再写 → `merged`（标签并集 + 正文追加，不新增条目） | `tests/tools.test.ts`「remember：同标题 knowledge → merged（标签并集）」；`tests/store.test.mjs` describe「去重合并（规格 §2.2）」 | ✔ 已实测 |
@@ -1457,6 +1465,14 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
     - **工具面 25 → 26**（`memory_trail`）：`tests/audit.test.mjs` 的硬编码计数与 `tests/tools.test.ts` 的名称清单同批同步（这两处每漏补一次就变成恒红，而恒红的断言不再是指标）。
     - **落地判据**：`npm test` **611/611**、`test:ts` **88 pass / 1 skip**；工具面 25 → 26；设计正本 `docs/design/aml-audit.md`。
     - **线上验收抓到两个单测看不见的缺陷（同日修）**：① `readActorAudit` 把「文件不存在」与「读不到」都折成 `undefined` ⇒ 新部署的插件永远显示「未接线」，而实际只是还没有事件——**本模块要修的假读数出现在自己的读数层上**；ENOENT 改回首插空结构，判据 A10。② `memory_trail` 用 `shortId` 直接截前 8 位渲染操作者，而会话 id 形态是 `session-<uuid>` ⇒ 每个会话都显示「会话 session-」，**在最关键的「谁」这一维上零区分度**；改 `shortActorId`（剥共通前缀再截），判据 A11。⚠ **为什么单测没抓到**：夹具用的 sessionId 是 `session-audit`（短），截断不出形——**夹具的 id 形态与生产不符时，渲染缺陷会整批隐形**。
+
+31. **2026-11-19 · 双时态（v0.38 · 方案 §9.3 · AML 差距表 §9.3）**
+    - **缺口**：方案要求三轴（发生 / 进入系统 / 失效），本库只有「进入系统」（`createdAt`）。后果可指认：追记上周的事时 `memory_browse` 把「我何时记下」当成「何时发生」；「今天下午 3 点开会」过了 3 点仍被当有效，而 `reviewAfter` 救不了——它答「该何时重看」，文档自己写着「到期 ≠ 作废」。
+    - **四轴齐，且两两不可合并（本轮的裁决核心）**：`occurredAt`（事件）≠ `validAfter`（适用）——情景类记忆没有「生效」可言、语义类结论的核心是适用范围，两者是**不同 memType 的主轴**；`expiry`（事实维）≠ `reviewAfter`（提醒维）；`expiry`≠`supersededBy`（时间到了 vs 被顶掉）；`expiry`≠`archived`（读数 vs 处置）。
+    - **两条纪律**：① 过期是**派生读数**（`expiryStateOf` 按 `now` 现算，不预存档位——预存就与读取时刻脱钩，`staleness` 已踩过）；② 过期**不改生命周期、不自动归档**（六态里没有「过期」这一态，也不该有；把过期自动判成 archived 会把「时间到了」和「我决定不再用它」混成一个动作）。
+    - **一处刻意的不对称（写进契约，不是疏漏）**：新字段**原样保留 ISO 时刻**（事件时刻的价值常在分钟级），而 `validAfter` 一律取 UTC 日——那是 v0.24 已发布的契约，改它要动存量。
+    - **踩坑（同一个坑的新形态）**：`entrySchema`（写入边界）、`EntryDraft` / `EntryPatch`（store）、`RecallResultItem` 投影（search.ts）**四处都要声明**；漏了投影层时 tsc 当场报（`auto-inject` 用 `r.expiry` 报「不存在」）——**这次是类型系统替我抓住的**，而不是线上。另：`schema-parity` 的 A117 主动报「夹具未落盘 `occurredAt` ⇒ 该判据对该字段恒真」，按守卫要求补了夹具（**守卫发现夹具不覆盖，正是它存在的理由**）。
+    - **落地判据**：`tests/temporal-dual.test.mjs` 12 条（T1–T12），尸体验证 6 红；全家 **623/623** + 88 pass（1 skip）；差距表 §9.3 ❌→🟡（6/33/18）。
 
 ## 10 · 未决问题
 
