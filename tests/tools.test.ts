@@ -93,7 +93,12 @@ test('工具齐备，名称与契约一致', () => {
   // 2026-11-19：`memory_catalog`（v0.40 编目工作面 · 方案 §7 第 07 步）—— 同上，同一次提交内补上。
   // 2026-11-19：`memory_map`（v0.45 知识地图 · 方案 §4.5）—— 同上，同一次提交内补上。
   // 2026-11-19：`memory_misuse`（v0.46 R7 严格上限 · 方案 §13.3）—— 同上。
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_catalog', 'memory_check', 'memory_concept', 'memory_dispose', 'memory_entities', 'memory_entity', 'memory_health', 'memory_link', 'memory_map', 'memory_merge', 'memory_misuse', 'memory_recompress', 'memory_relate', 'memory_relations', 'memory_review_mark', 'memory_source', 'memory_sources', 'memory_stats', 'memory_supersede', 'memory_thesaurus', 'memory_trail', 'memory_unlink', 'memory_version', 'recall', 'remember', 'update'])
+  // ⚠ 2026-11-19（v0.51 补记）：`memory_consolidate`（v0.49）**漏在这里**，于是从 v0.49 起
+  //   `.ts` 口径一直是 87 pass / 1 fail，而 v0.49 与 v0.50 两轮的报告写的是「88 pass」——
+  //   **那个数字是抄的，不是跑出来的**。教训不是「记得同步」（这份手抄清单本身就是
+  //   第二个真源，迟早再漂），而是：**跑测试要看 `pass + fail + skip` 三项，不看 pass 单项**——只看 pass 时，
+  //   一个 fail 与一个新增测试在数字上可能互相抵消。
+  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_catalog', 'memory_check', 'memory_concept', 'memory_consolidate', 'memory_dispose', 'memory_entities', 'memory_entity', 'memory_health', 'memory_link', 'memory_map', 'memory_merge', 'memory_misuse', 'memory_recompress', 'memory_relate', 'memory_relations', 'memory_review_mark', 'memory_source', 'memory_sources', 'memory_stats', 'memory_supersede', 'memory_thesaurus', 'memory_trail', 'memory_unlink', 'memory_version', 'recall', 'remember', 'update'])
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
 })

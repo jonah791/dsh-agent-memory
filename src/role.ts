@@ -30,7 +30,7 @@
  * 历史配置字面量与外部调用方不得因新增字段而崩溃。
  */
 
-import type { Entry, MemoryConfig, RolePolicy, RolesConfig } from './types.ts'
+import type { Entry, MemoryConfig, RolePolicy, RolesConfig, Space } from './types.ts'
 
 /** 人类（主脑）会话的缺省角色 */
 export const DEFAULT_ROLE = 'main'
@@ -236,6 +236,98 @@ export function admitsEntry(
   entry: Pick<Entry, 'kind' | 'role' | 'space'>,
 ): boolean {
   return rejectReason(policy, callerRole, entry) === undefined
+}
+
+/** 单条写入准入判定（v0.51 · 方案 §11.1 四类权限之「写」）——`rejectWriteReason` 的布尔形态 */
+export function admitsWrite(
+  policy: RolePolicy,
+  callerRole: string,
+  target: { role?: string; space?: Space },
+): boolean {
+  return rejectWriteReason(policy, callerRole, target) === undefined
+}
+
+/**
+ * 单条**写入**准入判定（v0.51 · 方案 §11.1）——返回拒因码，`undefined` 表示放行。
+ *
+ * 与 `rejectReason`（读）**成对但缺省不对称**，这是刻意的：
+ * - 读闸缺省紧（`read` 缺省 `[]` ⇒ 只看自己 + 共享）
+ * - 写闸缺省松（`write` 缺省 `['*']` ⇒ 不设限）——写闸是 v0.51 新增，
+ *   它上线那一刻的缺省必须等于「升级前能做的」，否则存量配置会被静默改行为。
+ *
+ * 为什么读闸不能替代写闸（两个方向都要堵）：读闸让 worker **看不见** main 的隔间；
+ * 写闸让 worker **写不进** main 的隔间。只有前者时，一条伪造归属的条目落在 main
+ * 自己的隔间里，main 读到它没有任何标记说「这不是你写的」——**单向门不是隔间**。
+ *
+ * 判据码（与 `actor-audit.ts::CODE_LABELS` 一一对应）：
+ * - `W1-space` 目标空间未标注或不在写空间白名单（fail-closed，与 R2 同纪律）
+ * - `W2-role` 目标角色不在写白名单
+ */
+export function rejectWriteReason(
+  policy: RolePolicy,
+  callerRole: string,
+  target: { role?: string; space?: Space },
+): string | undefined {
+  return rejectMutationReason(policy, callerRole, 'write', target)
+}
+
+/** 变更动作三档（方案 §11.1 四类权限里除「读」以外的三类） */
+export type MutationAction = 'write' | 'update' | 'manage'
+
+/** 各档的判据码（与 `actor-audit.ts::CODE_LABELS` 一一对应） */
+const MUTATION_CODES: Record<MutationAction, { space: string; role: string }> = {
+  write: { space: 'W1-space', role: 'W2-role' },
+  update: { space: 'U1-space', role: 'U2-role' },
+  manage: { space: 'M1-space', role: 'M2-role' },
+}
+
+/**
+ * 变更面准入判定（v0.51 · 方案 §11.1 四类权限之「写 / 改 / 管」）——返回拒因码，`undefined` 表示放行。
+ *
+ * ## 为什么三档必须分开，而不是复用读闸
+ *
+ * `update` / `forget` / `memory_merge` 此前都先走 `gatherReadable(view)`，于是
+ * **「能改的 ⊆ 能读的」**——看着像有闸，其实是读闸的副作用。后果很具体：
+ * 生产配置里 `verifier` 的策略是 `read: [main]`（验收方要能读实施方的结论），
+ * 而 `forget` 走同一个闸 ⇒ **验收方能删掉被验收方的记忆**。
+ * 「能读」成了「能删」的充分条件，这不是权限模型，是把审阅权与改稿权焊死在一起。
+ *
+ * ## 三档的缺省都是「不设限」
+ *
+ * `policy[action] ?? ['*']`。写闸 / 改闸 / 管闸都是 v0.51 新增，缺省必须等于升级前的
+ * 行为，否则存量配置会被静默改语义。想收紧就写成具体角色；写成 `[]`
+ * 表示「除自己的隔间与共享记忆外一律不许」。
+ *
+ * ## 空间维度三档共用一个白名单
+ *
+ * `policy.writeSpaces` 的语义是「可写入 / 修改 / 管理的空间」。**刻意只做一档**：
+ * 「写这个空间但改不了里面已有的条目」这个组合没有出现过的需求证据，
+ * 而多一个字段就多一处会漂的真源（判断型字段禁默认值的同一条纪律：
+ * 没有对象的维度不加旋钮）。
+ *
+ * 判据码：
+ * - `W1/U1/M1-space` 目标空间未标注或不在白名单（fail-closed，与 `R2-space` 同纪律）
+ * - `W2/U2/M2-role` 目标角色不在该动作的白名单
+ */
+export function rejectMutationReason(
+  policy: RolePolicy,
+  callerRole: string,
+  action: MutationAction,
+  target: { role?: string; space?: Space },
+): string | undefined {
+  const codes = MUTATION_CODES[action]
+  const writeSpaces = policy.writeSpaces
+  if (writeSpaces !== undefined && writeSpaces.length > 0) {
+    if (target.space === undefined || !writeSpaces.includes(target.space)) return codes.space
+  }
+  const targetRole = target.role
+  // 无归属 = 共享记忆：它不进任何人的隔间，也就谈不上伪造归属。
+  if (targetRole === undefined || targetRole.length === 0) return undefined
+  // 自己的隔间：与读侧同规则（自己的隔间自己管）。
+  if (targetRole === callerRole) return undefined
+  const list = policy[action] ?? ['*']
+  if (list.includes('*')) return undefined
+  return list.includes(targetRole) ? undefined : codes.role
 }
 
 /**

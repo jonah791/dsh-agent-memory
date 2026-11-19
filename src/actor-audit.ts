@@ -387,6 +387,8 @@ export const CODE_LABELS: Record<string, string> = {
   'R2-space': '空间未标注或不在白名单（fail-closed）',
   'R3-shared': '共享记忆但 includeShared=false',
   'R4-read': '角色不在读白名单',
+  'W1-space': '目标空间未标注或不在写空间白名单（fail-closed）',
+  'W2-role': '目标角色不在写白名单（写入归属闸）',
 }
 
 /**

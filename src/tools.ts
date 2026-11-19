@@ -29,7 +29,7 @@ import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
 import { findNearDuplicates, formatCandidate, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
 import type { DedupeTraceRecord, SimilarDisposition } from './dedupe.ts'
-import { filterRoleView, narrowReadScopes, roleViewOf, sessionHeaderOf, sessionIdOf, type RoleView } from './role.ts'
+import { filterRoleView, narrowReadScopes, rejectMutationReason, rejectWriteReason, roleViewOf, sessionHeaderOf, sessionIdOf, type MutationAction, type RoleView } from './role.ts'
 import { ACTION_LABELS, ACTOR_AUDIT_ACTIONS, CODE_LABELS, OUTCOME_LABELS, filterActorAudit, findBursts, shortActorId, type ActorAuditAction, type ActorAuditRecord, type ActorAuditSummary, type ActorIdentity, type AuditTarget } from './actor-audit.ts'
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
 import { countByProject, executionTag, filterByExecution, normalizeProject, parseExecutionArgs, parseExecutionId } from './execution.ts'
@@ -406,6 +406,40 @@ function gatherReadable(
   return { entries: filtered.admitted, scopes, rejected: filtered.rejected, rejectedBy: filtered.rejectedBy }
 }
 
+/**
+ * 变更面准入（v0.51 · 方案 §11.1 三档：改 / 管）——拒绝即抛错 + 落审计。
+ *
+ * 为什么 `gatherReadable` 之后还要再判一次：「能读」不等于「能改」。生产配置里
+ * `verifier` 的策略正是 `read: [main]`（验收方要能读实施方的结论），而
+ * `update` / `forget` / `memory_merge` / `memory_supersede` 此前全靠读闸放行
+ * ⇒ **验收方能改能删被验收方**。读闸管「看得见」，这三档管「动得了」。
+ */
+function assertMutationAllowed(
+  deps: MemoryToolDeps,
+  exec: ToolRunContext,
+  config: MemoryConfig,
+  view: RoleView,
+  action: MutationAction,
+  entry: Pick<Entry, 'id' | 'role' | 'space'>,
+  tool: string,
+): void {
+  if (!view.enabled) return
+  const code = rejectMutationReason(view.policy, view.role, action, {
+    ...(entry.role !== undefined ? { role: entry.role } : {}),
+    ...(entry.space !== undefined ? { space: entry.space } : {}),
+  })
+  if (code === undefined) return
+  audit(deps, exec, config, {
+    action: 'permission',
+    target: { count: 1 },
+    outcome: 'rejected',
+    code,
+    tool,
+  })
+  const verb = action === 'update' ? '修订' : '删除/合并/替代'
+  throw new Error(`${tool}: ${verb}被拒（${code}）——条目 ${entry.id} 归属「${entry.role ?? '共享'}」/ 空间「${entry.space ?? '未标注'}」不在角色「${view.role}」的 ${action} 白名单内。要么在自己能动的隔间里操作，要么配置 roles.policies.${view.role}.${action} 放行。`)
+}
+
 /** action → 中文文案（工具 render 用） */
 const ACTION_TEXT: Record<RememberResult['action'], string> = {
   created: '创建',
@@ -678,6 +712,27 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         // web 无 sourceIds ⇒ 抽取置信度 inconclusive）。
         sourceNotice.push('标了 provenance=web（外部资料）但没给 sourceIds——以后回查不到这条是从哪读来的。要可核就先 memory_source 建档再引用；若只是一句转述，保留本条说明即可。')
       }
+      // 写入准入（v0.51 · 方案 §11.1 四类权限之「写」）：目标归属 / 空间不在白名单 ⇒ 拒。
+      // 为什么拒绝要落审计：与读准入同纪律——拒绝必须是**一条可读事件**，否则
+      // 「写违规 = 0」又是一句不可测的断言（v0.37 修的是同一个形状）。
+      const roleStamp = roleStampOf(exec, config, args.role)
+      const writeView = roleViewOf(config, exec as unknown as RoleCarrierLike)
+      if (writeView.enabled) {
+        const denyCode = rejectWriteReason(writeView.policy, writeView.role, {
+          ...(roleStamp.role !== undefined ? { role: roleStamp.role } : {}),
+          ...(space !== undefined ? { space } : {}),
+        })
+        if (denyCode !== undefined) {
+          audit(deps, exec, config, {
+            action: 'permission',
+            target: { count: 1 },
+            outcome: 'rejected',
+            code: denyCode,
+            tool: 'remember',
+          })
+          throw new Error(`remember: 写入被拒（${denyCode}）——目标归属「${roleStamp.role ?? '共享'}」/ 空间「${space ?? '未标注'}」不在角色「${writeView.role}」的写入白名单内。要么写进自己的隔间，要么配置 roles.policies.${writeView.role}.write / writeSpaces 放行。`)
+        }
+      }
       const written = await deps.store.remember({
         kind,
         key: args.key,
@@ -689,7 +744,9 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         scope: writeScope,
         level: null,
         bucket: null,
-        ...roleStampOf(exec, config, args.role),
+        // 归属盖章：与上方写入准入**用同一个 roleStamp**（判的和盖的必须是同一个值，
+        // 否则闸门判 A 而落库写 B——这类「检查点与使用点分叉」是最难发现的漏洞形状）。
+        ...roleStamp,
         // 证据坐标（v0.25.0）：会话 + 写入时刻的事件序号（有则盖，不猜）
         ...evidenceStampOf(exec, deps),
         ...(subject !== undefined ? { subject } : {}),
@@ -1336,6 +1393,7 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       if (entry === undefined) {
         throw new Error(`update: 未找到 id="${args.id}" 的记忆条目（当前视野内）`)
       }
+      assertMutationAllowed(deps, exec, config, view, 'update', entry, 'update')
       const rawMode = args.mode ?? 'replace'
       if (rawMode !== 'replace' && rawMode !== 'append' && rawMode !== 'patch') {
         throw new Error(`update: 未知 mode="${rawMode}"（允许 replace / append / patch）`)
@@ -1559,6 +1617,9 @@ function buildSupersede(deps: MemoryToolDeps): ToolDefinition {
 
       const target = entries.find((candidate) => candidate.id === newId)
       if (target === undefined) throw new Error(`memory_supersede: 未找到新条目 id="${newId}"（当前视野内）`)
+      // 管理面准入（v0.51 · §11.1「管」）：替代会同时改两个条目的生命周期字段
+      //（新条目写 `supersedes`、旧条目写 `supersededBy`），所以按「管」判。
+      assertMutationAllowed(deps, exec, config, view, 'manage', target, 'memory_supersede')
 
       const missing: string[] = []
       const olds: Entry[] = []
@@ -1805,6 +1866,12 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
       }
 
       const ids = targets.map((entry) => entry.id)
+      // 管理面准入（v0.51 · §11.1「管」）：删除是四类权限里最危险的一档。
+      // ⚠ 闸放在 dryRun **之前**：预览与实跑必须遵守同一条边界，否则
+      // 「dryRun 说会删 3 条、实跑说被拒」正是 v0.36 明令禁止的那种偏差。
+      for (const target of targets) {
+        assertMutationAllowed(deps, exec, config, view, 'manage', target, 'forget')
+      }
       const idField = singleMode && args.id !== undefined ? { id: args.id } : {}
       // 传播计划（v0.36 · 方案 §10.4）：在写之前算好，dryRun 与实跑走**同一份计划**——
       // 否则「预览说会动 3 条边、实跑动了 5 条」这种偏差永远查不出来。
@@ -1991,6 +2058,12 @@ function buildMerge(deps: MemoryToolDeps): ToolDefinition {
           continue
         }
         merged.push(other)
+      }
+      // 变更面准入（v0.51 · §11.1）：合并同时动两类条目——canonical 被改（update 档），
+      // 被并入者被归档（manage 档）。只判其中一档会留下「改得了却删不了」或反过来的缺口。
+      assertMutationAllowed(deps, exec, config, view, 'update', canonical, 'memory_merge')
+      for (const other of merged) {
+        assertMutationAllowed(deps, exec, config, view, 'manage', other, 'memory_merge')
       }
       const { body, charsAdded } = mergeBodies(canonical, merged, strategy)
       if (charsAdded > 0) {
