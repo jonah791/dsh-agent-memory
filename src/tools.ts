@@ -22,7 +22,7 @@ import { loadMemoryConfig, memoryConfigPath } from './config.ts'
 import { resolveScopes, sessionCwdOf } from './scope.ts'
 import type { EntryPatch, MemoryStats, MemoryStore } from './store.ts'
 import { statsOf, titleFingerprint } from './store.ts'
-import type { AccessSummary } from './access-trace.ts'
+import type { AccessRecord, AccessSummary } from './access-trace.ts'
 import type { CompressSummary } from './compress-trace.ts'
 import { formatSkipped } from './compress-trace.ts'
 import { browseEntries, bucketLabel } from './search.ts'
@@ -47,6 +47,14 @@ import { auditMemory } from './audit.ts'
 import { retentionSummary } from './retention.ts'
 import { catalogReport } from './catalog.ts'
 import { mapReport } from './map.ts'
+import {
+  misuseReport,
+  R7_BASELINE_AT,
+  R7_BASELINE_DENOMINATOR,
+  R7_BASELINE_NUMERATOR,
+  R7_BASELINE_RATE,
+  R7_CUMULATIVE_CAP,
+} from './misuse.ts'
 import { credibilityReport } from './credibility.ts'
 import { mergeForgetPlans, planForget } from './forget.ts'
 import type { ForgetCertificate } from './forget.ts'
@@ -129,7 +137,7 @@ export interface MemoryToolDeps {
    * 侧车用量轨迹写入（v0.6；缺省不落盘）。
    * 实现方负责「只追加 / 吞错 / 按体积轮转」——工具层只负责把命中 id 交出去。
    */
-  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[] }) => Promise<boolean> | void
+  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[]; includeArchive?: boolean }) => Promise<boolean> | void
   /**
    * 删除凭证（v0.36 · 方案 §10.4）：把一条 `ForgetCertificate` 追加进侧车。
    *
@@ -162,6 +170,16 @@ export interface MemoryToolDeps {
   readAccess?: () => Promise<Map<string, { hits: number; lastAtMs: number; attributed?: number }> | undefined>
   /** 用量轨迹汇总（v0.7 命中率度量：注入次数 / 主动检索次数；缺省不报） */
   readAccessSummary?: () => Promise<AccessSummary | undefined>
+  /**
+   * 逐条用量轨迹读取（v0.46 · R7 失效误用分层）。
+   *
+   * 与 `readAccessSummary` 的分工：那个给聚合（注入次数 / 命中数），本回调给**原始序列**——
+   * R7 必须逐条知道「这次返回发生在何时、走的哪条通道、该次调用有没有要求看归档」，
+   * 聚合读数无法反推这三件事。
+   *
+   * 缺省 / 读失败 ⇒ `undefined` ⇒ `memory_misuse` 如实报「未接线」，**不报「零误用」**。
+   */
+  readAccessRecords?: () => Promise<AccessRecord[] | undefined>
   /** 提案日志写入（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join；吞错） */
   recordProposal?: (record: unknown) => Promise<boolean> | void
   /**
@@ -1072,11 +1090,15 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       // 读数层教训（第五次同形）：**「没记录」会被读成「没发生」**。空数组是最简的失败样本形态，
       // 它不改变 `R7`（按条目·次算，空行贡献 0），只让「调用次数」这个分母变真。
       if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
+        // v0.46：记**最终生效的** `includeArchive`（不是调用方传参）——`status: ['archived']`
+        // 会让它在 `args.includeArchive ?? wantsArchived` 里自动变成 true，而这类查询
+        // 语义上就是「我要看归档的」。R7 靠这一格把「要求看归档」与「真误用」分开。
         void deps.recordAccess({
           atMs: Date.now(),
           source: 'recall',
           role: view.role,
           ids: result.results.map((item) => item.id),
+          includeArchive,
         })
       }
       // 扩展词只在真发生时出现（省略 ≠ 空数组：没开就是没开，不是「扩展了 0 个词」）
@@ -5069,6 +5091,197 @@ function buildMap(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
+/**
+ * 构建 `memory_misuse`：R7 失效误用的**严格上限**与判定（v0.46 · 方案 §13.3）——**只读**。
+ *
+ * ## 它补的是哪一格
+ *
+ * 方案对「已失效记忆的错误调用率」要求「持续降低并**设定严格上限**」。读数自 v0.19 就有，
+ * 但上限从未落地 ⇒ 它回答不了唯一该由它回答的问题：**现在算不算失控**。
+ *
+ * ## 与邻居的分工
+ *
+ * - `memory_audit` = 价值体检（哪些条目该降级）——对象是**条目**。
+ * - `memory_trail` = 操作审计（谁干了什么）——对象是**动作**。
+ * - 本工具 = 读路径的**质量**（我把过时结论喂出去过几次）——对象是**返回**。
+ *
+ * ## 三层上限（设计正本 `docs/design/aml-r7-cap.md`）
+ *
+ * C1 自动注入零容忍 · C2 累计率 ≤ 0.40%（基线 3σ）· C3 滑窗泊松检验（k ≥ λ+3√λ 红）。
+ * 另按 `includeArchive` 分层：**「我要求看归档」不算误用**——旧口径把它算进分子，
+ * 38 条 A 档里 9 条来自同一次这样的调用（读数层缺陷第七次同形）。
+ */
+function buildMisuse(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_misuse',
+    deferLoading: true,
+    description:
+      'R7 失效误用的**严格上限**与判定（只读）：回答「我把已失效的结论喂出去过几次、现在算不算失控」。'
+      + '按方案 §13.3「持续降低并设定严格上限」——读数分 A 档（返回那一刻结论已不能用）/ B 档（返回时已过复查死线，「到期 ≠ 作废」单列不算误用）'
+      + '/ 显式要求看归档（`includeArchive`，**正常用法不计入分子**）/ 事后归档（时间线证明非误用）。'
+      + '三档上限：C1 自动注入通道 **零容忍**（该路径不经过调用方判断）· C2 累计率 ≤ 0.40%（基线 0.267% 的 3σ 泊松上界）· C3 滑窗（7/30 天）泊松检验 `k ≥ λ+3√λ` 红、`≥ λ+2√λ` 黄、`λ<3` **不判**（样本不足不等于健康）。'
+      + '⚠ **可分辨度**：只有 v0.46 起写入的记录带 `includeArchive` 标志，历史记录分不清「要求看归档」与「真误用」——输出会如实报可分辨比例。本工具不改任何条目。',
+    parameters: {
+      role: { type: 'string', description: '角色视角覆盖（缺省按调用者会话身份推导）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          wired: { type: 'boolean', required: true, description: '轨迹是否接线——`false` 时以下读数**不是零误用**，是没有数据' },
+          verdict: { type: 'string', required: true, description: 'ok / warn / breach / inconclusive（取各窗口最严重者）' },
+          considered: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              records: { type: 'integer', required: true, description: '轨迹行数' },
+              returns: { type: 'integer', required: true, description: '返回条目·次（分母口径：不是调用次数）' },
+              entries: { type: 'integer', required: true, description: '参与判定的条目数（含归档）' },
+              fullyResolvable: { type: 'boolean', required: true, description: '全部记录都带 includeArchive ⇒ 分层完整' },
+            },
+          },
+          baseline: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              rate: { type: 'number', required: true },
+              numerator: { type: 'integer', required: true },
+              denominator: { type: 'integer', required: true },
+              at: { type: 'string', required: true, description: '基线取自哪一刻（判断它该不该重标的依据）' },
+              capRate: { type: 'number', required: true, description: 'C2 累计率上限' },
+            },
+          },
+          windows: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                label: { type: 'string', required: true, description: 'all / 30d / 7d' },
+                returns: { type: 'integer', required: true },
+                resolvable: { type: 'integer', required: true, description: '带 includeArchive 的返回条目·次' },
+                unresolved: { type: 'integer', required: true, description: '历史记录（不可分辨）' },
+                tierA: { type: 'integer', required: true, description: '真误用条数（未显式要求看归档）' },
+                tierAExplicit: { type: 'integer', required: true, description: '显式要求看归档的返回（不计入误用）' },
+                tierB: { type: 'integer', required: true },
+                afterReturn: { type: 'integer', required: true },
+                gone: { type: 'integer', required: true },
+                autoReturns: { type: 'integer', required: true },
+                autoTierA: { type: 'integer', required: true },
+                rate: { type: 'number', required: true },
+                lambda: { type: 'number', required: true, description: '泊松期望 = returns × 基线' },
+                warnAt: { type: 'number', description: '黄线（k 达到即 warn）；λ 不足时不出现' },
+                breachAt: { type: 'number', description: '红线；λ 不足时不出现' },
+                verdict: { type: 'string', required: true },
+                verdictReason: { type: 'string', required: true },
+                byReason: { type: 'object', additionalProperties: true, required: true },
+              },
+            },
+          },
+          notes: { type: 'array', required: true, items: { type: 'string' } },
+        },
+      },
+      render: (_args, value) => {
+        const mark = (verdict: string): string =>
+          verdict === 'breach' ? '红' : verdict === 'warn' ? '黄' : verdict === 'inconclusive' ? '不可判' : '绿'
+        const lines: string[] = []
+        lines.push(`R7 失效误用 · 综合判定 **${mark(value.verdict)}（${value.verdict}）**`)
+        if (!value.wired) {
+          lines.push('⚠ **轨迹未接线** ⇒ 以下不是「零误用」，是**没有数据**。')
+        }
+        lines.push(
+          `基线 P0 = ${value.baseline.numerator}/${value.baseline.denominator} = ${(value.baseline.rate * 100).toFixed(3)}%（${value.baseline.at} 冻结）· 累计上限 ${(value.baseline.capRate * 100).toFixed(2)}%`,
+        )
+        for (const w of value.windows) {
+          const name = w.label === 'all' ? '累计' : w.label === '7d' ? '近 7 天' : '近 30 天'
+          const lambdaPart = w.lambda >= 3 ? `λ=${w.lambda.toFixed(1)} 红线 ${(w.breachAt ?? 0).toFixed(1)}` : `λ=${w.lambda.toFixed(2)}（样本不足）`
+          lines.push(
+            `${name}：A 档 ${w.tierA}/${w.returns} = ${(w.rate * 100).toFixed(2)}%（${lambdaPart}）→ ${mark(w.verdict)} · ${w.verdictReason}`,
+          )
+        }
+        const auto = value.windows.find((w) => w.label === 'all')
+        if (auto !== undefined) {
+          lines.push(`自动注入通道：误用 ${auto.autoTierA}/${auto.autoReturns}（**容忍度 0**）`)
+        }
+        const all = value.windows.find((w) => w.label === 'all')
+        if (all !== undefined) {
+          const parts = Object.entries(all.byReason).map(([k, v]) => `${k} ${v}`)
+          lines.push(`A 档构成：${parts.length > 0 ? parts.join(' · ') : '无'}`)
+          if (all.tierAExplicit > 0) {
+            lines.push(`另有 ${all.tierAExplicit} 次返回是**显式要求看归档**（includeArchive=true）——正常用法，不计入误用`)
+          }
+        }
+        const allWin = value.windows.find((w) => w.label === 'all')
+        lines.push(
+          `可分辨度：${allWin !== undefined ? `${allWin.returns - allWin.unresolved}/${allWin.returns}` : '—'} 条返回带 includeArchive 标志${value.considered.fullyResolvable ? '（完整）' : '（其余是 v0.46 前的历史记录，**分不清「要求看归档」与「真误用」**）'}`,
+        )
+        for (const note of value.notes) lines.push(`· ${note}`)
+        return [{ type: 'text', text: lines.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
+      // 含归档取全量：归档状态是分层依据（传剔过的集合会让「返回前已归档」永远判不出来）
+      const { entries } = gatherReadable(deps, { readScopes, includeArchive: true, view })
+      const records = deps.readAccessRecords === undefined ? undefined : await deps.readAccessRecords()
+      if (records === undefined) {
+        // 「读不到」与「读到了、里面是空」必须分开：前者只能说不知道，后者才可能是零误用
+        return {
+          wired: false,
+          verdict: 'inconclusive' as const,
+          considered: { records: 0, returns: 0, entries: entries.length, fullyResolvable: false },
+          baseline: {
+            rate: R7_BASELINE_RATE,
+            numerator: R7_BASELINE_NUMERATOR,
+            denominator: R7_BASELINE_DENOMINATOR,
+            at: R7_BASELINE_AT,
+            capRate: R7_CUMULATIVE_CAP,
+          },
+          windows: [],
+          notes: ['轨迹未接线或不可读——**这不是「零误用」**，是没有数据（deps.readAccessRecords 缺失或读取失败）'],
+        }
+      }
+      const report = misuseReport({ entries, records, now: Date.now() })
+      // 展开为可变形态：`misuseReport` 的类型全是 readonly（防止下游误改），
+      // 而工具输出的 schema 推断要求可变数组——转换点只在这一处。
+      return {
+        wired: true,
+        verdict: report.verdict,
+        considered: { ...report.considered },
+        baseline: { ...report.baseline },
+        // 显式映射到 schema 声明的字段：读数是纯函数层的事，输出契约是工具层的事。
+        // `warnAt` / `breachAt` 在 λ 不足时**不出现**（省略 ≠ 0——0 是「黄线在 0」，不是「没有黄线」）。
+        windows: report.windows.map((window) => ({
+          label: window.label,
+          returns: window.returns,
+          resolvable: window.resolvable,
+          unresolved: window.unresolved,
+          tierA: window.tierA,
+          tierAExplicit: window.tierAExplicit,
+          tierB: window.tierB,
+          afterReturn: window.afterReturn,
+          gone: window.gone,
+          autoReturns: window.autoReturns,
+          autoTierA: window.autoTierA,
+          rate: window.rate,
+          lambda: window.lambda,
+          ...(window.warnAt !== null ? { warnAt: window.warnAt } : {}),
+          ...(window.breachAt !== null ? { breachAt: window.breachAt } : {}),
+          verdict: window.verdict,
+          verdictReason: window.verdictReason,
+          byReason: { ...window.byReason },
+        })),
+        notes: [...report.notes],
+      }
+    },
+  })
+}
+
 function buildReviewMark(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_review_mark',
@@ -5391,6 +5604,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildAudit(deps),
     buildCatalog(deps),
     buildMap(deps),
+    buildMisuse(deps),
     buildReviewMark(deps),
     buildTrail(deps),
     buildRecompress(deps),

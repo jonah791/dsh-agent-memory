@@ -26,6 +26,19 @@ export interface AccessRecord {
   role?: string
   /** 命中条目 id（上限见 MAX_IDS_PER_RECORD） */
   ids: string[]
+  /**
+   * 本次调用是否**显式允许**返回归档条目（v0.46）。
+   *
+   * 存在的理由：`memory_recall` 的 `includeArchive` 最终值是 `args.includeArchive ?? wantsArchived`，
+   * 而 `status: ['archived']` 这种查询**语义上就是「我要看归档的」**。R7（失效误用率）若把这类
+   * 返回算进分子，量的是「我要求看归档」而非「系统把过时结论喂给我」——2026-11-19 实测：
+   * 38 条 A 档里 9 条来自同一次调用。**这是读数层缺陷的第七次同形，形态是「分子混入了
+   * 不是误用的东西」**，比前六次危险在于读数看起来完全正常。
+   *
+   * **三态，缺省不是 false**：`true` 要求看归档 · `false` 不允许 · `undefined` = v0.46 之前的
+   * 历史记录，**不可分辨**（存量不回填，同 R1 事件级处理）。
+   */
+  includeArchive?: boolean
 }
 
 /** 单行最多记多少个 id（防长文把轨迹撑爆） */
@@ -168,9 +181,48 @@ export async function appendAccessTrace(
     atMs: record.atMs,
     source: record.source,
     ...(record.role !== undefined && record.role.length > 0 ? { role: record.role } : {}),
+    ...(record.includeArchive !== undefined ? { includeArchive: record.includeArchive } : {}),
     ids: record.ids.slice(0, MAX_IDS_PER_RECORD),
   }
   return appendJsonl(filePath, capped, maxBytes)
+}
+
+/**
+ * 解析用量轨迹 → **逐条记录**（纯函数）。
+ *
+ * 与 `summarizeAccessRecords` 的分工：那个给「注入次数 / 命中数」这类聚合，本函数给
+ * **可用于分层的原始序列**——R7 失效误用必须逐条知道「这次返回发生在何时、走的哪条通道、
+ * 该次调用有没有要求看归档」。聚合读数无法反推这三件事。
+ *
+ * 坏行（非 JSON / `ids` 非数组）跳过不抛——轨迹是旁证，永远不能成为故障源（同 §5.22）。
+ * `atMs` 非有限数时置 0（下游按「时刻不可用」处理，不伪造一个时刻）。
+ */
+export function parseAccessRecords(text: string): AccessRecord[] {
+  const out: AccessRecord[] = []
+  for (const line of text.split('\n')) {
+    const trimmed = line.trim()
+    if (trimmed.length === 0) continue
+    let record: unknown
+    try {
+      record = JSON.parse(trimmed)
+    } catch {
+      continue
+    }
+    if (typeof record !== 'object' || record === null) continue
+    const r = record as { atMs?: unknown; source?: unknown; role?: unknown; ids?: unknown; includeArchive?: unknown }
+    if (!Array.isArray(r.ids)) continue
+    const atMs = typeof r.atMs === 'number' && Number.isFinite(r.atMs) ? r.atMs : 0
+    const source = r.source === 'auto' || r.source === 'audit' ? r.source : 'recall'
+    out.push({
+      atMs,
+      source,
+      ...(typeof r.role === 'string' && r.role.length > 0 ? { role: r.role } : {}),
+      // 三态：只有真的是布尔才算「可分辨」——字符串 "true" 之类不猜
+      ...(typeof r.includeArchive === 'boolean' ? { includeArchive: r.includeArchive } : {}),
+      ids: r.ids.filter((id): id is string => typeof id === 'string' && id.length > 0),
+    })
+  }
+  return out
 }
 
 /**
@@ -261,6 +313,16 @@ export async function readAccessIndex(filePath: string): Promise<Map<string, Acc
     const text = await readFile(filePath, 'utf8')
     const index = parseAccessTrace(text)
     return index.size > 0 ? index : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/** 读取逐条轨迹（**吞错**）。**读不到 ⇒ `undefined`；读到但为空 ⇒ `[]`**——两者不可合并（第三种空）。 */
+export async function readAccessRecords(filePath: string): Promise<AccessRecord[] | undefined> {
+  try {
+    const text = await readFile(filePath, 'utf8')
+    return parseAccessRecords(text)
   } catch {
     return undefined
   }

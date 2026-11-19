@@ -92,7 +92,8 @@ test('工具齐备，名称与契约一致', () => {
   //   所以它冷了六周才被发现（v0.24.0 → 2026-11-18）。
   // 2026-11-19：`memory_catalog`（v0.40 编目工作面 · 方案 §7 第 07 步）—— 同上，同一次提交内补上。
   // 2026-11-19：`memory_map`（v0.45 知识地图 · 方案 §4.5）—— 同上，同一次提交内补上。
-  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_catalog', 'memory_check', 'memory_concept', 'memory_dispose', 'memory_entities', 'memory_entity', 'memory_health', 'memory_link', 'memory_map', 'memory_merge', 'memory_recompress', 'memory_relate', 'memory_relations', 'memory_review_mark', 'memory_source', 'memory_sources', 'memory_stats', 'memory_supersede', 'memory_thesaurus', 'memory_trail', 'memory_unlink', 'memory_version', 'recall', 'remember', 'update'])
+  // 2026-11-19：`memory_misuse`（v0.46 R7 严格上限 · 方案 §13.3）—— 同上。
+  assert.deepEqual([...byName.keys()].sort(), ['forget', 'memory_audit', 'memory_browse', 'memory_catalog', 'memory_check', 'memory_concept', 'memory_dispose', 'memory_entities', 'memory_entity', 'memory_health', 'memory_link', 'memory_map', 'memory_merge', 'memory_misuse', 'memory_recompress', 'memory_relate', 'memory_relations', 'memory_review_mark', 'memory_source', 'memory_sources', 'memory_stats', 'memory_supersede', 'memory_thesaurus', 'memory_trail', 'memory_unlink', 'memory_version', 'recall', 'remember', 'update'])
   assert.ok(byName.get('remember')!.description.includes('不记录：临时状态'))
   assert.ok(byName.get('remember')!.description.includes('凭证'))
 })

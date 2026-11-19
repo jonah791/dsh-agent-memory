@@ -48,7 +48,7 @@ export interface AutoRecallInjectDeps {
   store: MemoryStore
   loadConfig: (workspaceRoot: string) => Promise<MemoryConfig> | MemoryConfig
   /** 侧车用量轨迹写入（v0.6；缺省不落盘）。吞错由实现方负责——注入绝不能因它失败 */
-  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[] }) => Promise<boolean> | void
+  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[]; includeArchive?: boolean }) => Promise<boolean> | void
 }
 
 /** snippet 最大长度（字符） */
@@ -326,7 +326,10 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
     // 所以记 `ids: []` 而不是 `probe.results`——记录的是**实际注入**，不是候选。
     if (digest.length === 0) {
       if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
-        void deps.recordAccess({ atMs: Date.now(), source: 'auto', role: view.role, ids: [] })
+        // v0.46：显式声明 includeArchive=false——自动注入**不允许**返回归档条目。
+        // 这条声明是 R7 C1（该通道零容忍）的前提：一旦它为 true 或该通道真的产出归档条目，
+        // 说明「系统在我不要求的情况下把过时结论喂给我」，那是机制 bug 不是容忍度问题。
+        void deps.recordAccess({ atMs: Date.now(), source: 'auto', role: view.role, ids: [], includeArchive: false })
       }
       return decision
     }
@@ -334,7 +337,7 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
     const hitIds = probe.results.map((item) => item.id)
     for (const id of hitIds) injected.add(id)
     if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
-      void deps.recordAccess({ atMs: Date.now(), source: 'auto', role: view.role, ids: hitIds })
+      void deps.recordAccess({ atMs: Date.now(), source: 'auto', role: view.role, ids: hitIds, includeArchive: false })
     }
 
     signal.throwIfAborted()

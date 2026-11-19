@@ -27,7 +27,7 @@ import { installAutoRecallInject } from './auto-inject.ts'
 import { installCompactionSink } from './compaction-sink.ts'
 import { installPeriodicCompress } from './periodic.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
-import { appendAccessTrace, appendJsonl, appendProposalRecord, readAccessIndex, readAccessSummary as readAccessSummaryFromTrace, readReviewMarks as readReviewMarksFromTrace } from './access-trace.ts'
+import { appendAccessTrace, appendJsonl, appendProposalRecord, readAccessIndex, readAccessRecords as readAccessRecordsFromTrace, readAccessSummary as readAccessSummaryFromTrace, readReviewMarks as readReviewMarksFromTrace } from './access-trace.ts'
 import { appendCompressTrace, readCompressSummary as readCompressSummaryFromTrace, type CompressTraceSink } from './compress-trace.ts'
 import { appendDedupeTrace, readDedupeTrace as readDedupeTraceFromSidecar } from './dedupe-trace.ts'
 import { readActorAudit, sanitizeActorAuditRecord } from './actor-audit.ts'
@@ -482,6 +482,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const readAccess: NonNullable<MemoryToolDeps['readAccess']> = () => readAccessIndex(accessTracePath)
   const readAccessSummary: NonNullable<MemoryToolDeps['readAccessSummary']> = () =>
     readAccessSummaryFromTrace(accessTracePath)
+  // 逐条轨迹（v0.46 · R7 分层）：聚合读数无法反推「何时 / 哪条通道 / 有没有要求看归档」
+  const readAccessRecords: NonNullable<MemoryToolDeps['readAccessRecords']> = () =>
+    readAccessRecordsFromTrace(accessTracePath)
   const recordProposal: NonNullable<MemoryToolDeps['recordProposal']> = (record) =>
     appendProposalRecord(proposalLogPath, record, DEFAULT_AUDIT_CONFIG.proposalLog.maxBytes)
   const recordReviewMark: NonNullable<MemoryToolDeps['recordReviewMark']> = (id, note) =>
@@ -671,7 +674,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   const resolveEvidence: NonNullable<MemoryToolDeps['resolveEvidence']> = (sessionId) =>
     lastSeqBySession.get(sessionId)
 
-  registerMemoryTools(ctx, { store, relations, concepts, entities, sources, loadConfig, compress, recompress, recordAccess, recordForget, recordAudit, readAudit, readAccess, readAccessSummary, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
+  registerMemoryTools(ctx, { store, relations, concepts, entities, sources, loadConfig, compress, recompress, recordAccess, recordForget, recordAudit, readAudit, readAccess, readAccessSummary, readAccessRecords, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })
