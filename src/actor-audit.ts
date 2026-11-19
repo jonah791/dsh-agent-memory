@@ -371,7 +371,7 @@ export const ACTION_LABELS: Record<ActorAuditAction, string> = {
   update: '修改',
   forget: '遗忘',
   link: '关系变更',
-  permission: '读准入',
+  permission: '准入拒绝',
 }
 
 /** 结果 → 中文 */

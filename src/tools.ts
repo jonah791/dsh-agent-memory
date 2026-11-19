@@ -2230,7 +2230,7 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
               updates: { type: 'integer', required: true },
               forgets: { type: 'integer', required: true },
               links: { type: 'integer', required: true },
-              permissionRejects: { type: 'integer', required: true, description: '读准入**拒绝**记录数（放行不记是设计）——这是「权限违规」第一次有判据' },
+              permissionRejects: { type: 'integer', required: true, description: '准入**拒绝**记录数（放行不记是设计）——这是「权限违规」第一次有判据。**两族都记**：读准入 R1–R4 与变更准入 W1/W2 · U1/U2 · M1/M2（v0.51 起），按拒因码分布可辨' },
               rejectedByCode: { type: 'array', required: true, items: { type: 'string' }, description: '拒因分布（`R2-space ×12`）——它同时是「该给这些条目补标注」的行动信号' },
               distinctActors: { type: 'integer', required: true },
               lastAt: { type: 'string', required: true },
@@ -5654,7 +5654,7 @@ function buildTrail(deps: MemoryToolDeps): ToolDefinition {
       + '与 `memory_audit` 同名的 `audit` 概念不同层：**提案日志**记「我提议了什么」，本流记「谁执行了什么」。'
       + '⚠ 三种空要分清：`wired=false` = 没接线（读不到）· `total=0` = 接了线但**还没有任何事件**（不是「零违规」）· `rejected=0 且 total>0` = 有动作、无拒绝。',
     parameters: {
-      action: { type: 'string', enum: ['write', 'update', 'forget', 'link', 'permission'], description: '只取某一类动作：`write` 写入 / `update` 修改（含替代·合并）/ `forget` 遗忘 / `link` 关系写·退役 / `permission` 读准入拒绝。' },
+      action: { type: 'string', enum: ['write', 'update', 'forget', 'link', 'permission'], description: '只取某一类动作：`write` 写入 / `update` 修改（含替代·合并）/ `forget` 遗忘 / `link` 关系写·退役 / `permission` 准入拒绝（**两族**：读准入 R1–R4 · 变更准入 W1/W2 · U1/U2 · M1/M2）。' },
       sessionId: { type: 'string', description: '只取某个会话的记录（精确匹配会话 id）。' },
       sinceHours: { type: 'number', description: '只看最近 N 小时（缺省看全部）。' },
       limit: { type: 'integer', description: '最多返回几条明细（缺省 20，上限 200；取**最近**的）。' },
@@ -5673,7 +5673,7 @@ function buildTrail(deps: MemoryToolDeps): ToolDefinition {
           updates: { type: 'integer', required: true },
           forgets: { type: 'integer', required: true },
           links: { type: 'integer', required: true },
-          permissions: { type: 'integer', required: true, description: '读准入**拒绝**记录数（放行不记——放行是默认）' },
+          permissions: { type: 'integer', required: true, description: '准入**拒绝**记录数（放行不记——放行是默认）。两族都含：读准入与写/改/管变更准入' },
           okCount: { type: 'integer', required: true },
           partialCount: { type: 'integer', required: true },
           rejectedCount: { type: 'integer', required: true },
