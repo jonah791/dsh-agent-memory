@@ -422,8 +422,9 @@ test('A39 侧车轨迹：只追加、坏行跳过、超限轮转、写失败吞�
 
   // 写失败吞错（不给路径、给目录）→ false，不抛
   assert.equal(await appendAccessTrace(dir, { atMs: 5, source: 'recall', ids: ['x'] }, 0), false)
-  // 空 ids 不写
-  assert.equal(await appendAccessTrace(trace, { atMs: 6, source: 'recall', ids: [] }, 0), false)
+  // v0.44 契约翻面：空 ids **照写**（旧断言「不写」钉的正是那个让失败样本消失的缺陷，
+  // 详见 access-trace.test.mjs 文件头与判据 A207）
+  assert.equal(await appendAccessTrace(trace, { atMs: 6, source: 'recall', ids: [] }, 0), true, '空结果也必须落盘')
 })
 
 // ---------- A40 用量项 ----------

@@ -261,12 +261,16 @@ test('A52 audit.proposal_log 配置：缺省开、可关、非法 fail-loud', ()
 
 // ---------- 轨迹写入回归（v0.6 行为不变） ----------
 
-test('轨迹写入回归：appendAccessTrace 仍只追加且空 ids 不写', async () => {
+test('轨迹写入回归：只追加；**空 ids 也写**（v0.44 · 方案 §16.3）', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'memory-trace-v07-'))
   const p = join(dir, 'access.jsonl')
   assert.equal(await appendAccessTrace(p, { atMs: 1, source: 'recall', ids: ['a'] }, 0), true)
-  assert.equal(await appendAccessTrace(p, { atMs: 2, source: 'recall', ids: [] }, 0), false)
+  // v0.44（2026-11-19）契约翻面：从「空 ids 不写」改为「空 ids 照写」。
+  // 理由：空结果是**失败样本的唯一载体**，不写它，「检索失败原因」永远算不出
+  //（详见 access-trace.test.mjs 文件头与 A207）。这不是为了让测试变绿——旧断言
+  // 钉的正是那个缺陷本身。
+  assert.equal(await appendAccessTrace(p, { atMs: 2, source: 'recall', ids: [] }, 0), true, '空结果也必须落盘')
   const s = await readAccessSummary(p)
-  assert.equal(s.recallCalls, 1)
-  assert.equal(s.totalHits, 1)
+  assert.equal(s.recallCalls, 2, '两次调用都算——「调用次数」是空结果率的分母')
+  assert.equal(s.totalHits, 1, '条目·次不变：空行贡献 0 ⇒ R7 的分母不受影响')
 })

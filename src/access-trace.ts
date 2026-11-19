@@ -147,8 +147,15 @@ export async function appendJsonl(
 
 /**
  * 追加一条用量轨迹（**吞错**）：只交出命中 id，绝不改条目。
+ *
+ * ⚠ **空 ids 也是合法记录**（v0.44 · 方案 §16.3）：「查了但没找到」是一次检索，
+ * 它必须能在侧车里被数出来。此前这里有一道 `if (capped.ids.length === 0) return false`，
+ * 是失败样本消失的**第三道门**（前两道在 `tools.ts` 与 `auto-inject.ts` 的调用点）。
+ * 教训：修「过滤」时要找**所有**过滤点——只 grep 调用点会漏掉被调用的写入器，
+ * 而单测嘲了 `recordAccess` 时，这道门连测试都照不到（绿着，线上却红）。
+ *
  * @param filePath - 轨迹文件路径
- * @param record - 记录（ids 超上限自动截断；空 ids 不写）
+ * @param record - 记录（ids 超上限自动截断；**空数组照写**）
  * @param maxBytes - 轮转阈值（≤0 表示不轮转）
  * @returns 是否写入成功（失败只返回 false，不抛）
  */
@@ -163,7 +170,6 @@ export async function appendAccessTrace(
     ...(record.role !== undefined && record.role.length > 0 ? { role: record.role } : {}),
     ids: record.ids.slice(0, MAX_IDS_PER_RECORD),
   }
-  if (capped.ids.length === 0) return false
   return appendJsonl(filePath, capped, maxBytes)
 }
 
