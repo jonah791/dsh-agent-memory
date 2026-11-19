@@ -15,7 +15,10 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { MemoryStore } from '../lib/store.js'
 import { SourceStore, SOURCE_TYPES, isSourceUsable } from '../lib/sources.js'
+import { createMemoryTools } from '../lib/tools.js'
+import { workspaceIdOf } from '../lib/scope.js'
 
 class MemoryKv {
   constructor() {
@@ -146,4 +149,75 @@ test('stats：按类型 / 按 scope / 未标注计数', async () => {
 
 test('SOURCE_TYPES 与条目 provenance 同枚举（不立第二套词表）', () => {
   assert.deepEqual([...SOURCE_TYPES], ['master', 'web', 'self', 'measured'])
+})
+
+// ---------- 端到端（工具层 + 条目层）：S3 / S4 / S5 ----------
+
+const CWD = 'C:\\Users\\Alice\\proj'
+const WID = workspaceIdOf(CWD)
+const CONFIG = { maxEntries: 500, layers: ['fact', 'knowledge', 'episodic', 'summary'] }
+
+function setupE2E(options = {}) {
+  const store = new MemoryStore(new MemoryKv())
+  const sources = options.sources === false ? undefined : new SourceStore(new MemoryKv())
+  const tools = createMemoryTools({ store, relations: undefined, concepts: undefined, entities: undefined, sources, loadConfig: () => CONFIG })
+  const byName = new Map(tools.map((tool) => [tool.name, tool]))
+  const exec = { agent: { session: { id: 'session-src', header: { cwd: CWD } } } }
+  return { store, sources, byName, exec }
+}
+
+test('S3 provenance 与来源 type 冲突：不静默覆盖，整笔拒绝', async () => {
+  const { sources, byName, exec } = setupE2E()
+  const web = await sources.create({ scope: WID, type: 'web', location: 'url:https://example.com/x' })
+  const remember = byName.get('remember')
+
+  // ① 不给 provenance ⇒ 拒绝（两个真源不能只剩一个）
+  await assert.rejects(
+    () => remember.execute({ text: '# 只有来源\n正文', sourceIds: [web.id] }, exec),
+    /必须同时给 provenance/,
+  )
+  // ② 冲突 ⇒ 拒绝，且错误里**点名两个值**（不然调用方不知道该改哪边）
+  await assert.rejects(
+    () => remember.execute({ text: '# 冲突\n正文', provenance: 'master', sourceIds: [web.id] }, exec),
+    /类型是 web.*provenance=master/s,
+  )
+  // ③ 不存在 ⇒ 拒绝
+  await assert.rejects(
+    () => remember.execute({ text: '# 悬空\n正文', provenance: 'web', sourceIds: ['SOURCE-9999'] }, exec),
+    /不存在/,
+  )
+  // ④ 一致 ⇒ 通过
+  const ok = await remember.execute({ text: '# 一致\n正文', provenance: 'web', sourceIds: [web.id] }, exec)
+  assert.equal(ok.action, 'created')
+})
+
+test('S4 反查完整：按来源恰好列出引用它的条目（不多不少）', async () => {
+  const { sources, byName, exec } = setupE2E()
+  const src = await sources.create({ scope: WID, type: 'master', location: 'session:s-1#7' })
+  const remember = byName.get('remember')
+  const a = await remember.execute({ text: '# 甲\n正文甲', provenance: 'master', sourceIds: [src.id] }, exec)
+  const b = await remember.execute({ text: '# 乙\n正文乙', provenance: 'master', sourceIds: [src.id] }, exec)
+  await remember.execute({ text: '# 丙不引用\n正文丙' }, exec)
+
+  const detail = await byName.get('memory_sources').execute({ id: src.id, withEntries: true }, exec)
+  assert.equal(detail.mode, 'detail')
+  const cited = detail.sources[0].citedBy ?? []
+  assert.equal(cited.length, 2, '恰好两条：不把没引用的算上')
+  assert.deepEqual(cited.map((item) => item.id).sort(), [a.id, b.id].sort())
+})
+
+test('S5 缺省关：不给 sourceIds 时条目**不带这个键**（不是空数组）', async () => {
+  const { store } = setupE2E()
+  const written = await store.remember({
+    kind: 'knowledge',
+    title: '无来源的条目',
+    body: '正文',
+    tags: [],
+    scope: WID,
+    level: null,
+    bucket: null,
+  })
+  const entry = store.get(WID, written.id)
+  assert.ok(entry !== undefined)
+  assert.equal('sourceIds' in entry, false, '不给就不写键——「不写键」与「写空数组」在逐字节比较里是两种形状')
 })

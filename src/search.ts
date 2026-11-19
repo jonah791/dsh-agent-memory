@@ -1199,6 +1199,12 @@ function toResultItem(entry: Entry, score: number): RecallResultItem {
     ...(entry.evidenceRefs !== undefined && entry.evidenceRefs.length > 0
       ? { evidenceRefs: entry.evidenceRefs }
       : {}),
+    // 来源实体引用（v0.35.0 · 方案 §5.2）——**同一投影点、同一教训**（第六次在这里补字段）。
+    // 不补的后果不是「少个字段」：A117 的夹具自证会报「该字段恒真（无分辨力）」，
+    // 因为从条目发的入口永远看不到它 ⇒ 来源可追溯率永远是 0。
+    ...(entry.sourceIds !== undefined && entry.sourceIds.length > 0
+      ? { sourceIds: entry.sourceIds }
+      : {}),
     // 归档因果（v0.21.0）：只对**已归档**条目出现。经 `archivalOf` 归一而不是直取存储字段
     // ——存量 1260 条的归档原因还在 `source.reason` 里（零迁移方案，理由见 archive.ts 决定 1），
     // 不归一就会出现「老条目查不到为什么没了」。

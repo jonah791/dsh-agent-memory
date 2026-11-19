@@ -350,6 +350,11 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       provenance: { type: 'string', description: '来源类型（v0.21.0）：这条记忆的信息**从哪来**——`master`（主人说的：原话 / 指令 / 定调 / 纠正）/ `web`（外部：网页 / 论文 / 他人代码 / 第三方工具输出）/ `self`（**我自己推出或提议的**）/ `measured`（我实测 / 运行 / 读数得到的）。**为什么填**：`grounding` 只覆盖「需要授权判断」的条目（约 7%），技术结论、论文笔记、实测读数全落在它之外——于是「这条是我实测的还是我从网上读来的」在库里无法区分，而两者该怎么用完全不同（读数要问样本多大，网上读来的要回原文核对）。**什么时候不填**：真的想不起来源时留空（省略 = 不知道，不是某个默认值）。⚠ 与 `grounding` 不冲突、可同时填：一条「主人否决了 RAG」既是 `master` 又可以是 `established`。' },
       cue: { type: 'array', items: { type: 'string' }, description: '情境形状（v0.16.0）：这条经验**在什么形状的情境下该被取出使用**（1–8 条短句）。与另两维**不可互相替代**：`aliases` 管**入口词**（可能被怎么问）、`watchFor` 管**时效**（什么新信息会让它失效）、`cue` 管**应用场景**（什么处境该用它）。**怎么填**：写情境的**形状**而不是本次任务的事实，才能在**另一件事**上触发。论文给的判据线（Harness² 的 experience cue）：太泛无用（`be thorough`）；太具体永不触发（`某日某费用涨到 250`）；正好是「当仪器执行若干顺序动作、且其中一个会终止行动者自身的权限时，把终止性动作排在最后」。它会被印在 recall 里——命中的那一刻我就看见「什么处境该用它」。' },
       validAfter: { type: 'string', description: '生效时间（v0.24.0）：这条结论**从何时开始成立**——`YYYY-MM-DD`（如 2026-11-01）或 ISO 时刻（如 2026-11-01T09:00:00Z，取 UTC 日）。**与 createdAt 不是一回事**：createdAt 答「我什么时候记下」，本字段答「这件事什么时候开始为真」——主人的定调可能今天记下、针对的是上周的决定。**什么时候填**：这条结论所描述的事**早于/晚于**我记下它的时刻时（追记历史决定、追认已生效的规则、登记从某日起适用的约定）。**什么时候不填**：写入时刻就是事实起点时（大多数情况）——⚠ **空是常态，填是例外**；省略 = 不知道，**不是**「等于 createdAt」（别拿它凑时间线）。⚠ **不接受相对写法**（`+7d`）——它答既成事实，不是死线（要死线请用 reviewAfter）。' },
+      sourceIds: {
+        type: 'array',
+        items: { type: 'string' },
+        description: '来源实体引用（v0.35 · 方案 §5.2）：引用的**来源实体 id**（`SOURCE-0001` 形态）。与 `evidenceRefs` 分工：那个是坐标串，这个连到可复用的来源对象（类型 / 可靠度 / 权限只记一处，不在每条记忆上复制）。**给本字段必须同时给 `provenance`**，且每个来源的 `type` 必须与它一致——不一致当场拒绝（两个真源冲突不静默覆盖）。',
+      },
       dryRun: { type: 'boolean', description: '预检（v0.19.1 · lh-0f54524a）：**只跑近重复检测、返回候选与强度，不落库**。⚠ 2026-11-12 起这是这条检测器**唯一**的入口（写入路径不再自动跑它，见 `src/dedupe.ts` 顶部证据）。它**宁滥勿缺**：会列出一批字面相关的条目供你自己筛，`强度` 是绝对计数、**不代表语义相似**。仍值得走它而不是先 `recall`，因为两者候选集**不同源**（实测：先 recall 搜「测试期望写错」返回 96 条却不含真正的母条目，而这条检测器报出了它）。' },
     },
     output: {
@@ -474,6 +479,29 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
       if (wouldCreate && active.length >= config.maxEntries) {
         throw new Error(`remember: ${writeScope} 已达 max_entries(${config.maxEntries})，请先 forget 归档旧条目或调高配置`)
       }
+      // 来源实体引用（v0.35 · 方案 §5.2）：S3——`provenance` 与来源 `type` 冲突**不静默覆盖**。
+      // 两者是同一件事的两个真源（「谁说的」），揉在一起就再也分不清哪个对。
+      const sourceIds = Array.isArray(args.sourceIds)
+        ? args.sourceIds.map((item) => String(item).trim()).filter((item) => item !== '')
+        : undefined
+      if (sourceIds !== undefined && sourceIds.length > 0) {
+        if (deps.sources === undefined) {
+          throw new Error('remember.sourceIds: 来源库未接线（deps.sources 缺失）——不能引用不存在的来源实体')
+        }
+        if (provenance === undefined) {
+          throw new Error('remember.sourceIds: 给了 sourceIds 就必须同时给 provenance——来源的类型就是它的权威归属，两者不能只有一个')
+        }
+        for (const sourceId of sourceIds) {
+          const source = deps.sources.find(writeScope, sourceId)
+          if (source === undefined) {
+            throw new Error(`remember.sourceIds: 来源 "${sourceId}" 不存在（先用 memory_source 建档）`)
+          }
+          if (source.type !== provenance) {
+            throw new Error(`remember.sourceIds: 来源 "${sourceId}" 的类型是 ${source.type}，而本条 provenance=${provenance}——两个真源冲突，不静默覆盖：改 provenance 或换来源，二选一`
+              + (source.status === 'retired' ? '（该来源已停用，本来也不该再被新记忆引用）' : ''))
+          }
+        }
+      }
       const written = await deps.store.remember({
         kind,
         key: args.key,
@@ -497,6 +525,8 @@ function buildRemember(deps: MemoryToolDeps): ToolDefinition {
         ...(reviewAfter !== undefined ? { reviewAfter } : {}),
         ...(watchFor !== undefined ? { watchFor } : {}),
         ...(provenance !== undefined ? { provenance } : {}),
+        // 来源实体引用（v0.35 · 方案 §5.2）：已在上方校验过存在性、provenance 必给、类型一致
+        ...(sourceIds !== undefined && sourceIds.length > 0 ? { sourceIds } : {}),
         // 生效时间（v0.24.0）：只在新建时盖章（store 层同形处理——命中已有条目时保留原值）。
         ...(validAfter !== undefined ? { validAfter } : {}),
         // 执行位置（v0.23.0）：两级不可拆——taskId 没有 project 时不落盘（见 execution.ts）。
@@ -556,6 +586,11 @@ export const DIMENSION_ITEM_FIELDS = {
     type: 'array',
     items: { type: 'string' },
     description: '证据引用（v0.25.0）：这条记忆**能回到哪里**，形如 `session|<会话id>|<事件号>` / `compaction|<会话id>|<压缩id>` / `derived|<定位>`。与 `provenance`（权威归谁）互补——那个答「谁说的」，这个答「去哪核」。⚠ 事件号是**写入时刻该会话的最新事件**（可回查「写这条时对话进行到哪」），不是「这句内容出自哪条事件」的精确指针。未带证据坐标的条目省略该键（省略 = 不知道，不是「无出处」）。',
+  },
+  sourceIds: {
+    type: 'array',
+    items: { type: 'string' },
+    description: '来源实体引用（v0.35 · 方案 §5.2）：引用的**来源实体 id**（`SOURCE-0001` 形态）。与 `evidenceRefs` 分工：那个是坐标串，这个连到可复用的来源对象（类型 / 可靠度 / 权限只记一处，不在每条记忆上复制）。**给本字段必须同时给 `provenance`**，且每个来源的 `type` 必须与它一致——不一致当场拒绝（两个真源冲突不静默覆盖）。',
   },
   memType: {
     type: 'string',
@@ -1630,6 +1665,21 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
               withDisambiguation: { type: 'integer', required: true, description: '写了消歧说明的实体数——撞名并存时它必须 > 0，否则消歧是空的' },
             },
           },
+          sources: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            description: '来源实体（v0.35 · 方案 §5.2）：独立来源记录的读数。⚠ 未接线时 `wired=false`（**「没接线」与「来源库为空」必须可区分**）。',
+            properties: {
+              wired: { type: 'boolean', required: true, description: 'false = 来源库未接线 ⇒ 下面的 0 不代表「没有来源」' },
+              total: { type: 'integer', required: true },
+              active: { type: 'integer', required: true, description: '适用中的来源数（已停用的不算）' },
+              retired: { type: 'integer', required: true, description: '已停用（记录保留，按 id 直查仍可回）' },
+              unlabeledReliability: { type: 'integer', required: true, description: '**未标注可靠度**的来源数——判断型字段的「不知道」不并入任何默认档' },
+              withOwner: { type: 'integer', required: true, description: '带提供方的来源数' },
+              withPermissions: { type: 'integer', required: true, description: '带权限的（本阶段只存不判，不构成准入）' },
+            },
+          },
         },
       },
       render: (args, value) => [{
@@ -1658,7 +1708,11 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           // 实体权威档（v0.30.0）：同 relations / concepts——wired=false 必须看得见
           + `\n实体权威档：${value.entities.wired
             ? `${value.entities.total} 个实体（适用 ${value.entities.active} / 已合并 ${value.entities.merged} / 停用 ${value.entities.deprecated}；带别名 ${value.entities.withAliases} / 带主题 ${value.entities.withTopics} / 有关联实体 ${value.entities.withRelatedEntities} / 有消歧说明 ${value.entities.withDisambiguation}）`
-            : '未接线（entities 表未装配）——此处的 0 不代表库里没有实体'}`,
+            : '未接线（entities 表未装配）——此处的 0 不代表库里没有实体'}`
+          // 来源实体（v0.35 · 方案 §5.2）：同 relations / concepts / entities——wired=false 必须看得见
+          + `\n来源实体：${value.sources.wired
+            ? `${value.sources.total} 个来源（适用 ${value.sources.active} / 停用 ${value.sources.retired}；未标注可靠度 ${value.sources.unlabeledReliability} / 带提供方 ${value.sources.withOwner} / 带权限 ${value.sources.withPermissions}）`
+            : '未接线（sources 表未装配）——此处的 0 不代表来源库为空'}`,
       }],
     },
     async execute(args, exec) {
@@ -1756,6 +1810,22 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
             withTopics: stats.withTopics,
             withRelatedEntities: stats.withRelatedEntities,
             withDisambiguation: stats.withDisambiguation,
+          }
+        })(),
+        // 来源实体（v0.35 · 方案 §5.2）：同 concepts / entities——`wired=false` 与「没有来源」必须可区分
+        sources: (() => {
+          if (deps.sources === undefined) {
+            return { wired: false, total: 0, active: 0, retired: 0, unlabeledReliability: 0, withOwner: 0, withPermissions: 0 }
+          }
+          const stats = deps.sources.stats()
+          return {
+            wired: true,
+            total: stats.total,
+            active: stats.active,
+            retired: stats.retired,
+            unlabeledReliability: stats.unlabeledReliability,
+            withOwner: stats.withOwner,
+            withPermissions: stats.withPermissions,
           }
         })(),
       }

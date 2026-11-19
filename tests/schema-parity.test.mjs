@@ -110,6 +110,10 @@ async function seedFull(store) {
     validAfter: '2026-11-01',
     // v0.25.0：证据坐标（编码串）。不带它 ⇒ A117 对该字段恒真（返回里没有该键不构成证据）。
     evidenceRefs: ['session|session-parity-fixture|12'],
+    // v0.35.0：来源实体引用。同上——不带它 ⇒ A117 对 sourceIds 恒真。
+    // ⚠ 这里直接给 id 不校验存在性：存在性与 `provenance` 一致性是**工具层**的 S3 校验，
+    // store 层不做（夹具走 store 直达，绕过工具层）。
+    sourceIds: ['SOURCE-0001'],
     // v0.26.0：内容分类（七类）。同上——不带它 ⇒ A117 对 memType 恒真。
     memType: 'semantic',
     // v0.27.0：空间归属（四空间）。同上——不带它 ⇒ A117 对 space 恒真。
