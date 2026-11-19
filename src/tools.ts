@@ -44,6 +44,7 @@ import { archivalOf, archiveReasonTag, countByArchiveReason, countByProvenance, 
 import { assertExpiryOrder, countByExpiry, expiryTag, filterByExpiryState, occurredAtTag, parseExpiryStateFilter, parseMomentArg, type ExpiryState } from './temporal-dual.ts'
 import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, parseValidAfterArg, shortId, supersededByTag, supersedesTag, validAfterTag } from './succession.ts'
 import { auditMemory } from './audit.ts'
+import { retentionSummary } from './retention.ts'
 import { mergeForgetPlans, planForget } from './forget.ts'
 import type { ForgetCertificate } from './forget.ts'
 import { randomUUID } from 'node:crypto'
@@ -2055,6 +2056,17 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
               lastAt: { type: 'string', required: true },
             },
           },
+          retention: {
+            type: 'object',
+            additionalProperties: false,
+            required: true,
+            description: '七类保留策略读数（v0.39 · 方案 §10.1）：与 `memory_audit.retention` **同源同口径**（`retentionSummary` 是唯一实现）。⚠ `byEffectiveType` 与 `bySource` 各自之和都 == total；`needsAction` 是「按该类别自己的节奏该看一眼」的条数——行动入口，不是结论。',
+            properties: {
+              byEffectiveType: { type: 'object', additionalProperties: true, required: true, description: '生效类别分布：七类 + unknown（类未知）。⚠ 与 `byMemType` **不是同一件事**——那个只统计我写的值，这个含按 `kind` 推导的部分。' },
+              bySource: { type: 'object', additionalProperties: true, required: true, description: '类别来源三档：explicit（我写的）/ derived-from-kind（按 `kind` 语义同构推导）/ unknown（推不出，不猜）。' },
+              needsAction: { type: 'object', additionalProperties: true, required: true, description: '各类「该看一眼」的条数（episodic 超 90 天 / semantic 已失效 / procedural 复查死线已过 / operational 超 14 天且无观察条件）。`unknown` 不计——它没有类别节奏。' },
+            },
+          },
         },
       },
       render: (args, value) => [{
@@ -2095,7 +2107,10 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
           // 「准入拒绝 0」单独给数：它不是「零违规」，只说明没有拒绝被记录（放行不记是设计）。
           + `\n审计流：${value.audit.wired
             ? `${value.audit.total} 条（写入 ${value.audit.writes} / 修改 ${value.audit.updates} / 遗忘 ${value.audit.forgets} / 关系 ${value.audit.links} / 准入拒绝 ${value.audit.permissionRejects}；${value.audit.distinctActors} 个操作者；最近 ${value.audit.lastAt.length > 0 ? value.audit.lastAt : '（无）'}）${value.audit.rejectedByCode.length > 0 ? ` 拒因 ${value.audit.rejectedByCode.join(' · ')}` : ''}`
-            : '未接线（recordAudit 缺失）——此处的 0 不代表没有动作'}`,
+            : '未接线（recordAudit 缺失）——此处的 0 不代表没有动作'}`
+          // 七类保留策略（v0.39 · 方案 §10.1）：单独一行——`needsAction` 非零就是行动信号；
+          // `bySource` 三档让「我写的」与「按 kind 推的」不混在一起（后者不是覆盖率）。
+          + `\n保留策略：类别来源 explicit ${value.retention.bySource.explicit} / 按 kind 推导 ${value.retention.bySource['derived-from-kind']} / 类未知 ${value.retention.byEffectiveType['unknown']}｜各类该看一眼：${Object.entries(value.retention.needsAction as Record<string, number>).filter(([, n]) => n > 0).map(([type, n]) => `${type} ${n}`).join(' · ') || '（无）'}`,
       }],
     },
     async execute(args, exec) {
@@ -2137,6 +2152,10 @@ function buildStats(deps: MemoryToolDeps): ToolDefinition {
         // 空间归属 / 生命周期（v0.27.0）：与 byMemType 同一批样本（**之和 == total**）
         bySpace: countBySpace(entries),
         byLifecycle: countByLifecycle(entries),
+        // 七类保留策略（v0.39 · 方案 §10.1）：与 `memory_audit.retention` **同源同口径**
+        // （`retentionSummary` 是唯一实现）——`needsAction` 是各类「该看一眼」的条数，
+        // 它是「让 memType 有后果」这件事在读数层的入口。
+        retention: retentionSummary(entries, Date.now()),
         // 关系层（v0.28.0）：`wired=false` 与「零条」必须可区分（未接线时的 0 不是读数）
         relations: (() => {
           if (deps.relations === undefined) {
@@ -4334,10 +4353,32 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
                 score: { type: 'number', required: true },
                 reasons: { type: 'array', required: true, items: { type: 'string' } },
                 evidence: { type: 'object', additionalProperties: true, required: true },
+                effectiveType: { type: 'string' },
+                effectiveTypeSource: { type: 'string' },
+                retentionCode: { type: 'string' },
               },
             },
           },
           notes: { type: 'array', required: true, items: { type: 'string' } },
+          retention: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              byEffectiveType: { type: 'object', additionalProperties: true, required: true },
+              bySource: { type: 'object', additionalProperties: true, required: true },
+              needsAction: { type: 'object', additionalProperties: true, required: true },
+              policyApplied: {
+                type: 'object',
+                required: true,
+                additionalProperties: false,
+                properties: {
+                  total: { type: 'integer', required: true },
+                  byCode: { type: 'object', additionalProperties: true, required: true },
+                },
+              },
+            },
+          },
         },
       },
       render: (_args, value) => {
@@ -4347,6 +4388,10 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
           `记忆体检（只读提案）：${value.summary.total} 条 / ${value.summary.chars} 字符；承重 ${value.summary.referenced} 条｜用量信号：${value.summary.usageSource === 'trace' ? '侧车轨迹' : '无（usage 项恒 0）'}`,
           `分档：KEEP ${b['KEEP']}(${cb['KEEP']}) · DEMOTE ${b['DEMOTE']}(${cb['DEMOTE']}) · ARCHIVE ${b['ARCHIVE']}(${cb['ARCHIVE']}) · REVIEW ${b['REVIEW']}(${cb['REVIEW']})`,
           `体量前三组：${value.groups.slice(0, 3).map((g) => `${g.label} ${g.count} 条/${g.chars} 字`).join(' · ')}`,
+          // 七类保留策略（v0.39 · 方案 §10.1）：分布只说明「有多少条归了哪类」，
+          // `policyApplied` 才说明「策略真的改了什么」——两个都印，否则「按七类定策略」
+          // 与「什么都没做」在报告上长得一样。
+          `保留策略：类未知 ${value.retention.byEffectiveType['unknown']} 条 · 类别来源 explicit ${value.retention.bySource.explicit} / 按 kind 推导 ${value.retention.bySource['derived-from-kind']}｜类别修正改档 ${value.retention.policyApplied.total} 条${value.retention.policyApplied.total > 0 ? `（${Object.entries(value.retention.policyApplied.byCode).map(([code, n]) => `${code} ${n}`).join(' · ')}）` : '（未触发任何类别策略）'}`,
         ]
         for (const candidate of value.candidates.slice(0, 10)) {
           const title = candidate.title.length > 42 ? candidate.title.slice(0, 41) + '…' : candidate.title

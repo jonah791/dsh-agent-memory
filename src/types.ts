@@ -896,6 +896,20 @@ export interface AuditCandidate {
     dupCluster?: number
     dupOf?: string
   }
+  /**
+   * 生效类别（v0.39 · 方案 §10.1）。
+   *
+   * **键缺席 = 类未知**（`kind='knowledge'` 且无 `memType`——推不出就不推）；体检对它走**零修正**。
+   * 刻意不用 `null` 表达：宿主 `output.schema` 不接受 null 值，而「键缺席」与「null」
+   * 在消费侧同义，省略能少一跳。
+   *
+   * 与条目的 `memType` 字段不是一回事：那是我写的，这是**读取口径**算出来的，不写回存储。
+   */
+  effectiveType?: MemType
+  /** 生效类别从哪来（三档可辨）：`explicit` 我写的 / `derived-from-kind` 语义同构推导 / `unknown` 类未知 */
+  effectiveTypeSource?: 'explicit' | 'derived-from-kind' | 'unknown'
+  /** 类别修正的判据码（`E-decay` / `S-expired` / `P-verify` / `F-hold` / `O-stale`）——**只在档位真被改写时**出现 */
+  retentionCode?: string
 }
 
 /** 体检分组（按 kind/level 聚合，看「哪一坨最占地方」） */
@@ -906,6 +920,22 @@ export interface AuditGroup {
   chars: number
   /** 该组主导档位 */
   dominantBucket: AuditBucket
+}
+
+/**
+ * 保留策略读数（v0.39 · 方案 §10.1）。
+ *
+ * `memory_audit.retention` 与 `memory_stats.retention` **共用这一个形状**，由
+ * `retention.ts::retentionSummary` 唯一实现——两处各写一遍必然漂移，而漂移不会报错，
+ * 只会让我看到两个都像真的数字（判据 R7）。
+ */
+export interface RetentionSummary {
+  /** 生效类别分布：七类 + `unknown`（**之和 == 条目数**） */
+  byEffectiveType: Record<MemType | 'unknown', number>
+  /** 类别从哪来（三档，**之和 == 条目数**） */
+  bySource: Record<'explicit' | 'derived-from-kind' | 'unknown', number>
+  /** 各类按自身状态「该看一眼」的条数（`unknown` 不计——它没有类别节奏） */
+  needsAction: Record<MemType, number>
 }
 
 /** 体检结果 */
@@ -923,6 +953,20 @@ export interface AuditResult {
   groups: AuditGroup[]
   candidates: AuditCandidate[]
   notes: string[]
+  /**
+   * 七类保留策略读数（v0.39 · 方案 §10.1）。
+   *
+   * `policyApplied` 是这一层**唯一的「后果」证据**：类别修正到底改了几条、按哪个理由码改的。
+   * 没有它，「按七类定策略」永远无法与「什么都没做」区分开——两种情况的四档计数可能完全一样。
+   */
+  retention: RetentionSummary & {
+    policyApplied: {
+      /** 因类别修正而被改档的条数（未改 = 0） */
+      total: number
+      /** 按理由码分布（只含出现过的码） */
+      byCode: Record<string, number>
+    }
+  }
 }
 
 /** 体检配置（`memory.yml` 的 `audit` 段） */

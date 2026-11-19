@@ -1017,6 +1017,68 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 
 **边界与信任**：见 **§6**；本节特有两条——`occurredAt` 是**我声明的事实**，机制无法验证（写错了没有任何东西会报错，只能靠 `evidenceRefs` 回原文核）；过期**不删除任何东西**，它只改读法。
 
+### 5.32 七类保留策略契约（v0.39 · 方案 §10.1 · 让 `memType` 产生后果）
+
+**定位**：让已建的七类维度**改变行为**，而不是只多一个字段。方案 §10.1 要求「不同记忆类别采用不同保存期限」，本节把那张表变成可断言的参数与档位修正规则。**动机是实测出来的**：真分母 1770 条人工写入条目里，`memType` 覆盖率只有 **1.1%**（对照 `aliases` 47.5% / `cue` 36.3% / `watchFor` 32.5%）——分界不是新旧，是「填了有没有后果」。所以本节的验收目标不是「提高覆盖率」，是「让填了会改变什么」。
+
+**反定位**：不改 `classify()` 的既有四档判据（§5.9）。那一层回答「这条值不值得继续占位置」，与类别无关；本节是它的**后置修正层**——先出基础档，再按类别调整。理由是可证伪性：「未分类条目逐字不变」只有在「不动底层」的前提下才可断言（R3）。
+
+**回退口径 `effectiveMemType(entry)` —— 三档 `source` 可辨，不猜**：
+
+| 情形 | 结果 `type` | `source` |
+|---|---|---|
+| `entry.memType` 存在 | 该值 | `explicit` |
+| 缺，且 `kind='episodic'` | `episodic` | `derived-from-kind` |
+| 缺，且 `kind='fact'` | `semantic` | `derived-from-kind` |
+| 缺，且 `kind='knowledge'` 或 `'summary'` | `null` | `unknown` |
+
+只有**语义同构**的两处允许推导：`kind=episodic` 与 `memType=episodic` 是同一个词的两种写法，`kind=fact`（事实）与 `semantic`（语义记忆）在方案 §3.1 的定义里指同一类东西。`kind='knowledge'` 可被语义 / 程序 / 运行 / 项目 / 关系五类中的任一类解释——**推不出就不推**，这是 §6「不猜」的同一条纪律：字段本身不默认，读取口径显式标出来源。
+
+**七类策略表（`RETENTION_POLICIES`）**：
+
+| 类别 | `decayHalfLifeDays` | 类别修正（在基础档上） | 理由码 | 方案 §10.1 原文对应 |
+|---|---|---|---|---|
+| `episodic` | 30 | age > 90 且基础档 `KEEP` ⇒ **`DEMOTE`** | `E-decay` | 根据历史价值、用户授权和保留政策决定 |
+| `semantic` | 180 | 有 `expiry` 且已失效 ⇒ **`REVIEW`** | `S-expired` | 有效期内持续使用，失效后修订或归档 |
+| `procedural` | 120 | 有 `watchFor` 且 `reviewAfter` 已过且基础档 `KEEP` ⇒ **`REVIEW`** | `P-verify` | 定期验证，工具和环境变化时重新评估 |
+| `profile` | 永不衰减 | 基础档 `ARCHIVE` / `DEMOTE` ⇒ **`REVIEW`** | `F-hold` | 长期保存但允许用户纠正和撤回 |
+| `project` | 90 | 无修正（本版无「项目结束」信号，跟随项目生命周期无从判） | — | 按项目生命周期保存 |
+| `relational` | 120 | 无修正（关系已由 `relations` 表承载，条目层不独立判） | — | 随实体及关系的变化更新 |
+| `operational` | 14 | age > 14 且无 `watchFor` 且基础档 `KEEP` ⇒ **`REVIEW`** | `O-stale` | 结合工具版本和环境状态管理 |
+| `unknown` | — | **零修正**（逐字保持基础档） | — | — |
+
+`decayHalfLifeDays` 本版**只用于理由行披露**（写进 `reasons` 供人核），**不参与检索排序**——§5.25 的教训（十余个独立旋钮全部证否）说明任何改排序的改动都必须单独取证，本节不搭车。
+
+**硬约束（三条，均可断言）**：
+
+1. **只往「更需要人看」的方向推**：类别修正只能沿 `KEEP → DEMOTE → REVIEW` 方向走，**永不把 `REVIEW` / `ARCHIVE` 拉回 `KEEP`**。修正层的职责是提示「这一类该按另一套节奏看」，不是替我裁决安全。
+2. **`unknown` 零修正**：未分类条目的档位与 v0.38 逐字相同（R3）。这是向后兼容的唯一保证——没有它，899 条 `episodic`+`fact` 的推导会在上线当天一次性改掉全库体感。
+3. **不写库**：跑 `memory_audit` 前后存储文件字节级一致、`accessedAt` 不变（继承 §5.9）。
+
+**消费面（判据：这层让哪个动作变可能）**：
+
+| 面 | 行为 |
+|---|---|
+| `memory_audit` 候选的 `reasons` | 类别修正命中时追加理由码（`E-decay` / `S-expired` / `P-verify` / `F-hold` / `O-stale`）；**未命中时不出现**（R6：正常路径不噪音） |
+| `memory_audit.retention` 段 | `byEffectiveType` / `bySource` / `policyApplied`（改档计数）+ `notes[]`——「类别修正到底改了谁」可核 |
+| `memory_stats.retention` 块 | `byEffectiveType`（七类 + `unknown`）/ `bySource`（三档）/ `needsAction`（各类该看一眼的条数） |
+| `forget({ tier })` | 读的是**修正后**档位（它重跑 audit）；效果是 `tier=ARCHIVE` 不再含 `profile` 类——这是修正层的安全副作用，不是特例，也不额外实现 |
+
+**判据 R1–R8**（`tests/retention.test.mjs`）：
+
+| # | 判据 |
+|---|---|
+| R1 | **类别真的改变档位**：同一条目只改 `memType`（其余字段逐字相同），最终档位 / 理由码不同——`profile` 的 `ARCHIVE` 被改成 `REVIEW`、`episodic` 的老条目从 `KEEP` 降到 `DEMOTE` |
+| R2 | **回退三档可辨且不猜**：`explicit` / `derived-from-kind` / `unknown` 各自可判；`kind='knowledge'` 且无 `memType` ⇒ `unknown`（不硬塞进任一类） |
+| R3 | ★**零回归**：`unknown` 类条目的档位与修正前逐字相同（同一批夹具对照，档位 + `reasons` 全等） |
+| R4 | **画像永不自动归档**：`profile` 类在 audit 结果里 `ARCHIVE` / `DEMOTE` 计数为 **0**（只能 `REVIEW`） |
+| R5 | **计数自洽**：`byEffectiveType` 七类之和 + `unknown` == total；`bySource` 三档之和 == total（无遗漏、无重复计数） |
+| R6 | **正常路径不噪音**：显式分类 + 未触发任何策略 ⇒ `reasons` 里不出现类别判据码 |
+| R7 | **两处同口径**：`memory_stats.retention.byEffectiveType` 与 `memory_audit.retention.byEffectiveType` 在同一输入下逐字段相等（第二把尺子 = 造出两个真源） |
+| R8 | **只读仍成立**：跑 audit 前后存储文件字节级一致、`accessedAt` 不变（类别层不得破 §5.9 硬约束） |
+
+**边界与信任**：见 **§6**；本节特有**三条**——① `effectiveMemType` 的推导**不是**给条目补字段（存储里 `memType` 仍为空，只有读取口径不同），所以它不能用来「事后声称覆盖率达标」；② `profile` 永不自动归档**只约束自动建议**，我仍可显式 `forget({id})` 归档任一条目；③ **`E-decay` 的可达性由基础档参数决定**（实测出来的耦合）：缺省 `audit.archive_min_age_days = 14`，所以 age > 90 且无 `role` / `refs` 的条目基础档**已经是 `ARCHIVE`**，而修正层不把 `ARCHIVE` 降到 `DEMOTE`（硬约束 1）⇒ `E-decay` 实际只对**有归属或承重**的老情景记忆生效。这不是缺陷（老而无归属的情景本就该归档），但改 `archive_min_age_days` 时必须连带重看本节——**调大它会让 `E-decay` 覆盖更广**，而这两处改动的耦合不会报错。
+
 ---
 
 ## 6 · 边界与信任
@@ -1077,6 +1139,14 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | A172 | **统计与过滤**：`memory_stats.expiry` 三档之和 == total（未设单列，不并入有效）；`expiryState` 过滤在未给档位时**零拷贝透传**，非法取值 fail-loud | 同文件「T6」「T7」「T11」 | ✔ 已实测（单测） |
 | A173 | ★**过期不改生命周期**：已失效条目仍 `active`、仍可被检索到（只打标记），**不自动归档**——处置归人（§1.3 禁自动决策） | 同文件「T11」 | ✔ 已实测（单测） |
 | A174 | **两个筛子互不干扰**：`expiryState`（事实维）与 `staleness`（提醒维）各筛各的，可同时用；单用一个时另一个不生效 | 同文件「T12」 | ✔ 已实测（单测） |
+| A175 | ★**类别真的改变档位，且只往更需要人看的方向推**：同一条目只改 `memType`（其余逐字相同）⇒ 档位 / 理由码不同（`episodic` 超 90 天的 `KEEP`→`DEMOTE`、`profile` 的 `ARCHIVE`→`REVIEW`）；反向：目标档不高于基础档时**不改档也不加理由**（`REVIEW` 不能被倒着改回 `DEMOTE`） | `tests/retention.test.mjs`「R1」「R1b」 | ✔ 已实测（单测；尸体：去掉档位序比较 ⇒ R1b 红 1） |
+| A176 | ★**回退三档可辨且不猜**：`explicit` / `derived-from-kind` / `unknown` 各自可判；`kind='knowledge'` / `'summary'` ⇒ `unknown`（**不硬塞进任一类**）；认不出的历史值同样落 `unknown`；七类策略表齐全且只有 `profile` 是「永不衰减」 | 同文件「R2」「R2b」 | ✔ 已实测（单测；尸体：给 `unknown` 塞默认 `semantic` ⇒ 红 4 条） |
+| A177 | ★**零回归**：类未知条目的档位与 `reasons` 与 `classify()` **逐字相同**（`reasons` 必须是**同一个数组引用**——「碰巧内容相同」不算）；夹具含一条带 `expiry` 的知识条目，用来守住「不许替 `unknown` 猜类别」 | 同文件「R3」 | ✔ 已实测（单测） |
+| A178 | ★**画像永不自动归档**：`profile` 类在体检结果里 `ARCHIVE` / `DEMOTE` 计数为 **0**（只能 `REVIEW` / `KEEP`）；**对照臂**（同形态的 `semantic`）必须仍能落 `ARCHIVE`，否则该判据恒真 | 同文件「R4」 | ✔ 已实测（单测；尸体：F-hold 只在基础档 `REVIEW` 触发 ⇒ 红 4 条） |
+| A179 | **计数自洽**：`byEffectiveType` 七类 + `unknown` 之和 == total；`bySource` 三档之和 == total；`needsAction` 只数触发信号的条目且 `unknown` 不计 | 同文件「R5」「R5b」 | ✔ 已实测（单测） |
+| A180 | ★**正常路径不噪音 + 记账只记真实变更**：未触发策略 ⇒ `reasons` 里不出现类别判据码、候选不带 `retentionCode`、`policyApplied.total == 0`；改档才计入且按判据码分桶 | 同文件「R6」「R6b」 | ✔ 已实测（单测） |
+| A181 | ★**两处同口径**：`memory_stats.retention` 与 `memory_audit.retention` 的 `byEffectiveType` / `bySource` / `needsAction` 在同一批输入下**逐字段相等**（`retentionSummary` 是唯一实现——两处各写一遍必然漂移，而漂移不会报错） | 同文件「R7」 | ✔ 已实测（单测） |
+| A182 | **只读 + 判据码自洽**：跑 `memory_audit` / `memory_stats` 前后存储**逐字节不变**（含 `accessedAt`）；五个判据码各自可触发且理由行点名它自己；时间语义（严格大于、未设 ≠ 未失效、有观察条件就不按时间催） | 同文件「R8」「R9」「R10」 | ✔ 已实测（单测；尸体：删掉判据码文案 ⇒ 红 2 条） |
 | A122 | `deleted` 与 `archived` 可区分且都能查回：`forget(reasonType:'deleted')` 后 `stats.byLifecycle.deleted >= 1`，按 `status:['deleted']` 检索**自动包含归档**（不必传 includeArchive） | `tests/lifecycle.test.mjs`「L7 删除态」 | ✔ 已实测（单测） |
 | A1 | 同 `key` 再写 → `updated`（L1 精确覆盖） | `tests/tools.test.ts`「remember：同 key 再写 → updated（L1 覆盖）」 | ✔ 已实测 |
 | A2 | 同标题 `knowledge` 再写 → `merged`（标签并集 + 正文追加，不新增条目） | `tests/tools.test.ts`「remember：同标题 knowledge → merged（标签并集）」；`tests/store.test.mjs` describe「去重合并（规格 §2.2）」 | ✔ 已实测 |
@@ -1473,6 +1543,15 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
     - **一处刻意的不对称（写进契约，不是疏漏）**：新字段**原样保留 ISO 时刻**（事件时刻的价值常在分钟级），而 `validAfter` 一律取 UTC 日——那是 v0.24 已发布的契约，改它要动存量。
     - **踩坑（同一个坑的新形态）**：`entrySchema`（写入边界）、`EntryDraft` / `EntryPatch`（store）、`RecallResultItem` 投影（search.ts）**四处都要声明**；漏了投影层时 tsc 当场报（`auto-inject` 用 `r.expiry` 报「不存在」）——**这次是类型系统替我抓住的**，而不是线上。另：`schema-parity` 的 A117 主动报「夹具未落盘 `occurredAt` ⇒ 该判据对该字段恒真」，按守卫要求补了夹具（**守卫发现夹具不覆盖，正是它存在的理由**）。
     - **落地判据**：`tests/temporal-dual.test.mjs` 12 条（T1–T12），尸体验证 6 红；全家 **623/623** + 88 pass（1 skip）；差距表 §9.3 ❌→🟡（6/33/18）。
+
+32. **2026-11-19 · 七类保留策略（v0.39 · 方案 §10.1 · AML 差距表 §10.1）**
+    - **缺口的真形状与最初判断不同（这一轮最重要的事）**：差距表写「七类覆盖率 1/3071」，我据此判过两次「§10.1 空转、不做」。把分母拆开重算后：活跃 1789 − 桶概要 11 − 压缩检查点 18 = **真分母 1770 条人工写入**，`memType` 覆盖率 **1.1%**（`space` 同为 1.1%）。而同一批条目里 `aliases` **47.5%** / `cue` **36.3%** / `watchFor` **32.5%** / `provenance` 17.9% / `grounding` 13.4%。**分界不是字段新旧**（v0.15 的 `aliases` 远高于 v0.26 的 `memType`），是**填了有没有后果**——前三个直接改变检索命中，`memType` 当时不改变任何行为。⇒ 原来的「覆盖率不到就不做」是**因果倒置**：做了策略，覆盖率才可能上来。
+    - **另一处自我校正**：我先把方案 §3.1「七类并非互相排斥」读成「`memType` 该多值」，据此差点记一条「与方案不符」。读原文后确认：原意是**一次原始事件派生多条资源 + 关系边**（每条仍单类型），单值实现**符合**方案。**读规格不能读转述**——差距表的压缩把「派生多资源」这个前提吃掉了。
+    - **设计：后置修正层，不动 `classify()`**。基础四档回答「这条值不值得继续占位置」，与类别无关；本层在它之上按**生效类别**修正档位。改成「重写 classify」会让「未分类条目逐字不变」无法断言——而那是 98.9% 条目的零回归保证（R3）。
+    - **回退口径只认语义同构**：`kind='episodic'`→`episodic`、`kind='fact'`→`semantic` 允许推导（同一个词的两种写法 / 方案定义里同一类）；`kind='knowledge'` 可被五类解释 ⇒ `unknown`，**推不出就不推**。三档 `source`（`explicit` / `derived-from-kind` / `unknown`）始终可辨——推导**不是**给条目补字段，存储里 `memType` 仍为空。
+    - **实测出来的配置耦合（写进 §5.32 边界第 ③ 条）**：缺省 `audit.archive_min_age_days = 14`，所以 age>90 且无 `role`/`refs` 的条目基础档已是 `ARCHIVE`，而修正层不把 `ARCHIVE` 降到 `DEMOTE` ⇒ `E-decay` 实际只对有**归属或承重**的老情景记忆生效。改那个参数会连带改变本节的覆盖面，而耦合不会报错——所以两处必须一起看。
+    - **判据纪律上的一处收获**：首次尸体验证时「去掉 `unknown` 零修正」全绿——不是判据没分辨力，而是它的四条夹具**全都「不触发任何策略」**，所以「给 unknown 塞默认类别」也不会红。补了一条带 `expiry` 的知识条目后，该破坏形态立刻红 4 条。**夹具只覆盖「不触发」的路径，等于没覆盖「不许触发」这条纪律。**
+    - **落地判据**：`tests/retention.test.mjs` 14 条（R1–R10），尸体验证 5 处各红 1–4 条（复跑脚本 `scripts/corpse-retention.mjs`）；全家 **637/637** + 88 pass（1 skip）；工具面仍 26（无新工具，只加读数块与渲染行）。
 
 ## 10 · 未决问题
 

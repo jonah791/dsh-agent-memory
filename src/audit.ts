@@ -34,6 +34,12 @@ import type {
   Entry,
 } from './types.ts'
 import { COLD_CHECKPOINT_TAG } from './types.ts'
+import {
+  ageDaysOf,
+  applyRetentionPolicy,
+  effectiveMemType,
+  retentionSummary,
+} from './retention.ts'
 
 /** 缺省权重（和 = 1.0；**先验**，非拟合） */
 export const DEFAULT_AUDIT_WEIGHTS: AuditWeights = Object.freeze({
@@ -120,12 +126,8 @@ function charsOf(entry: Entry): number {
   return (entry.body ?? '').length
 }
 
-/** 条目年龄（天，非负） */
-function ageDaysOf(entry: Entry, nowMs: number): number {
-  const t = Date.parse(entry.updatedAt ?? entry.createdAt)
-  if (Number.isNaN(t)) return 0
-  return Math.max(0, (nowMs - t) / 86_400_000)
-}
+/** 条目年龄（天，非负）——**实现已移到 `retention.ts`**（v0.39）：类别策略与基础分档必须
+ * 用同一把年龄尺子，两处各算一遍会让同一条目在两个环节看到两个年龄，而差异不会报错。 */
 
 /** 由 createdAt 生成日桶（本地时区，YYYY-MM-DD）——用于「是否已被概要覆盖」判定 */
 function dayBucketOf(iso: string): string {
@@ -407,6 +409,10 @@ export function auditMemory(input: AuditInput): AuditResult {
   // 否则「谁引用了谁」会因为本次不看它而失真。
   const indexScope = input.indexEntries === undefined ? rawEntries : [...input.indexEntries]
 
+  // 类别修正的改档记账（v0.39 · 方案 §10.1）：只统计**真被改了档**的条目——
+  // 「理由里多了一句」与「档位变了」是两件事，前者不足以证明策略生效。
+  const retentionApplied: { total: number; byCode: Record<string, number> } = { total: 0, byCode: {} }
+
   const refs = referenceIndex(indexScope)
   const tagReuse = tagReuseIndex(indexScope)
   const dups = duplicateClusters(indexScope)
@@ -428,8 +434,16 @@ export function auditMemory(input: AuditInput): AuditResult {
       nowMs,
     })
     const verdict = classify(entry, breakdown, config)
-    let bucket = verdict.bucket
-    let reasons = verdict.reasons
+    // 七类保留策略（v0.39 · 方案 §10.1）：在基础档之上按**生效类别**做一次修正。
+    // 只往「更需要人看」的方向推；类未知（`unknown`）原样返回（R3 零回归）。
+    const effective = effectiveMemType(entry)
+    const retained = applyRetentionPolicy(entry, verdict, nowMs)
+    let bucket = retained.bucket
+    let reasons = retained.reasons
+    if (retained.applied !== undefined) {
+      retentionApplied.total += 1
+      retentionApplied.byCode[retained.applied] = (retentionApplied.byCode[retained.applied] ?? 0) + 1
+    }
 
     // 已裁决标记（v0.11.2）：命中 ⇒ 归入 KEEP 并改写理由。
     // **刻意不从候选里剔除** —— 剔除会让 candidates 与 byBucket 对不上，破坏 A37 的对账不变量。
@@ -477,6 +491,11 @@ export function auditMemory(input: AuditInput): AuditResult {
       score: Math.round(breakdown.score * 1000) / 1000,
       reasons,
       evidence: breakdown.evidence,
+      // `effectiveType` 只在类已知时出现——宿主 `output.schema` 不接受 `null`，
+      // 而「键缺席」与「值是 null」在渲染层同义（都读成「类未知」），故省略更省一跳。
+      ...(effective.type !== null ? { effectiveType: effective.type } : {}),
+      effectiveTypeSource: effective.source,
+      ...(retained.applied !== undefined ? { retentionCode: retained.applied } : {}),
     })
   }
 
@@ -575,5 +594,8 @@ export function auditMemory(input: AuditInput): AuditResult {
     groups,
     candidates: ranked,
     notes,
+    // 七类保留策略读数（v0.39）：与 `memory_stats.retention` 同源（`retentionSummary` 是唯一实现），
+    // 所以「两处逐字段相等」是构造性成立，而不是两段代码恰好算得一样（判据 R7）。
+    retention: { ...retentionSummary(entries, nowMs), policyApplied: retentionApplied },
   }
 }

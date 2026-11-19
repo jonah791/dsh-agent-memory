@@ -99,6 +99,14 @@ test('② memory_audit 渲染把**全量 id** 印出来（提案可直接执行�
         evidence: { ageDays: 3, chars: 1234, refs: 0, usage: 0, tags: 1, hasSource: false },
       },
     ],
+    // v0.39：`retention` 是 `AuditResult` 的必填块，渲染层直接消费它——夹具必须带上，
+    // 否则测到的是「旧形状能不能渲染」，而生产中不存在那个形状（同类先例：A117 夹具补 occurredAt）。
+    retention: {
+      byEffectiveType: { episodic: 0, semantic: 0, procedural: 0, profile: 0, project: 0, relational: 0, operational: 0, unknown: 1 },
+      bySource: { explicit: 0, 'derived-from-kind': 0, unknown: 1 },
+      needsAction: { episodic: 0, semantic: 0, procedural: 0, profile: 0, project: 0, relational: 0, operational: 0 },
+      policyApplied: { total: 0, byCode: {} },
+    },
     notes: [],
   }
 
@@ -121,6 +129,12 @@ test('③ 注脚默认可见（黑名单）：新增注脚不必改渲染层就�
     },
     groups: [],
     candidates: [],
+    retention: {
+      byEffectiveType: { episodic: 0, semantic: 0, procedural: 0, profile: 0, project: 0, relational: 0, operational: 0, unknown: 1 },
+      bySource: { explicit: 0, 'derived-from-kind': 0, unknown: 1 },
+      needsAction: { episodic: 0, semantic: 0, procedural: 0, profile: 0, project: 0, relational: 0, operational: 0 },
+      policyApplied: { total: 0, byCode: {} },
+    },
     // 第一条与表头重复（应被挡），第二条是「后来才加的」注脚（必须默认可见）——
     // v0.24.3 之前渲染层是白名单，这条会被静默吞掉（2026-11-18 实测现场）。
     notes: ['读数：条目 1 条 / 10 字符', '已跳过 2 条冷存档（checkpoint-archive）——要看请用 memory_browse'],
