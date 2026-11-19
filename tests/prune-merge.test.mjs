@@ -164,7 +164,7 @@ test('A71 pushRevision：只留最近 MAX_REVISIONS 条（旧→新）', () => {
 
 // ---------- A72 / A73 / A74 / A75 工具层：forget ----------
 
-test('A72 forget 单条模式零回归：id 回填 + archived=true + 旧文案逐字', async () => {
+test('A72 forget 单条模式零回归：id 回填 + archived=true + 首行文案不变', async () => {
   const { kv, byName, exec } = setup()
   seedRaw(kv, [aged(60, { id: 'old-1', title: '旧知识' })])
   const forget = byName.get('forget')
@@ -174,7 +174,14 @@ test('A72 forget 单条模式零回归：id 回填 + archived=true + 旧文案�
   assert.equal(value.archivedCount, 1)
   assert.deepEqual(value.ids, ['old-1'])
   assert.equal(value.dryRun, false)
-  assert.equal(forget.output.render({ id: 'old-1' }, value)[0].text, '已归档记忆条目 old-1')
+  // v0.36（方案 §10.4）起 render **首行**仍逐字不变，后面多了「传播面 + 未覆盖面」两段。
+  // ⚠ 这是语义变更后同步判据，不是为了让测试过而放宽：方案明写「应提供操作结果反馈，
+  // 而不能仅仅返回『已经忘记』」——所以「整段逐字相等」这个断言本身被取代了。
+  // 零回归的语义收窄为「首行文案不变」，新增段落由 F 段（forget-propagation）守。
+  const rendered = forget.output.render({ id: 'old-1' }, value)[0].text
+  assert.equal(rendered.split('\n')[0], '已归档记忆条目 old-1', '首行文案零回归')
+  assert.match(rendered, /传播面/, '必须给出逐面结果——只回「已归档」正是方案禁止的形状')
+  assert.match(rendered, /不拥有/, '必须点名本插件没处理的面（宿主日志 / 备份 / 实体档）')
   const stored = kv.map.get(`${WID}:knowledge:old-1`)
   assert.equal(stored.archived, true)
   assert.equal(stored.archivedReason, '测试归档')

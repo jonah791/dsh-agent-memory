@@ -42,6 +42,9 @@ import { evidenceTag, formatEvidenceRef, parseEvidenceRefsArg } from './evidence
 import { archivalOf, archiveReasonTag, countByArchiveReason, countByProvenance, filterByProvenance, parseArchiveReasonTypeArg, parseProvenanceArg, provenanceTag, PROVENANCE_TYPES } from './archive.ts'
 import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, parseValidAfterArg, shortId, supersededByTag, supersedesTag, validAfterTag } from './succession.ts'
 import { auditMemory } from './audit.ts'
+import { mergeForgetPlans, planForget } from './forget.ts'
+import type { ForgetCertificate } from './forget.ts'
+import { randomUUID } from 'node:crypto'
 import {
   RELATION_TYPE_SPECS,
   RELATION_TYPES,
@@ -121,6 +124,14 @@ export interface MemoryToolDeps {
    * 实现方负责「只追加 / 吞错 / 按体积轮转」——工具层只负责把命中 id 交出去。
    */
   recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[] }) => Promise<boolean> | void
+  /**
+   * 删除凭证（v0.36 · 方案 §10.4）：把一条 `ForgetCertificate` 追加进侧车。
+   *
+   * 为什么由外部注入：侧车路径由 `index.ts` 按 `DSH_HOME` 构造（与 access-trace 同一处决策），
+   * 工具层不该知道 dshHome 在哪。缺省 ⇒ **不写凭证**（工具照常工作），回执里也不给 `certId`——
+   * 「没写」与「写了一条空的」必须可区分，所以 certId 只在真写时出现。
+   */
+  recordForget?: (cert: ForgetCertificate) => Promise<boolean> | void
   /**
    * 侧车轨迹读取（体检用；缺省/读失败 ⇒ undefined = 无用量信号）。
    * v0.12：每项还带 `attributed`（排序加权归因，见 access-trace.ts）——声明与实现对齐；
@@ -1398,13 +1409,18 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'forget',
     deferLoading: true,
-    description: '归档记忆条目（软删除：不再进活跃检索，可从 includeArchive 找回）。三种选择器任一：id（单条）/ ids[]（批量）/ tier（按 memory_audit 分档批量，ARCHIVE|DEMOTE|REVIEW）。批量请先 dryRun=true 看清单；max 护栏缺省 100、上限 500。reason 记入条目 `archivedReason`，reasonType 记入 `archivedReasonType`（v0.21.0 起不再写 `source.reason`——那个字段答「从哪来」，不答「怎么没了」）。',
+    description: '归档记忆条目（软删除：不再进活跃检索，可从 includeArchive 找回）。三种选择器任一：id（单条）/ ids[]（批量）/ tier（按 memory_audit 分档批量，ARCHIVE|DEMOTE|REVIEW）。`mode` 选**操作类型**（v0.36 · 方案 §10.4）：`entry`（缺省，既有三选择器）/ `topic`（按标签·内容分类·空间批量，需 `topicTags`/`topicMemType`/`topicSpace` 之一）/ `all`（该 scope 全部，需 `confirm` 逐字等于 scope）。批量请先 dryRun=true 看清单；max 护栏缺省 100、上限 500。**返回恒带「逐面传播结果」**：条目本体 / 派生概要 / 关系边（退役不删除）/ 用量侧车（不处理，无内容），以及**本插件不拥有的面**（宿主会话日志 / 备份层 / 实体档）——这一格省掉，反馈就会让人以为九处都处理了。reason 记入条目 `archivedReason`，reasonType 记入 `archivedReasonType`（v0.21.0 起不再写 `source.reason`——那个字段答「从哪来」，不答「怎么没了」）。',
     parameters: {
+      mode: { type: 'string', description: '操作类型（v0.36 · 方案 §10.4）：`entry`（缺省·既有三选择器）/ `topic`（按主题批量）/ `all`（该 scope 全部）。⚠ 三种都是**软归档**——本插件不提供硬删除，真删要跨宿主会话日志与备份层，单插件删不干净。' },
       id: { type: 'string', description: '单条模式：目标条目 id（来自 remember/recall/audit 返回）。' },
       ids: { type: 'array', items: { type: 'string' }, description: '批量模式：目标条目 id 列表。' },
       tier: { type: 'string', description: '分档批量：按 memory_audit 的档位选目标（ARCHIVE / DEMOTE / REVIEW；KEEP 被拒绝）。' },
+      topicTags: { type: 'array', items: { type: 'string' }, description: 'mode=topic：按标签选（命中任一即选中）。' },
+      topicMemType: { type: 'string', description: 'mode=topic：按内容分类选（episodic/semantic/procedural/profile/project/relational/operational）。' },
+      topicSpace: { type: 'string', description: 'mode=topic：按空间选（personal/project/domain/system）。' },
+      confirm: { type: 'string', description: 'mode=all **必填**：逐字重写目标 scope（由报错回显给你）才执行。缺它或写错一律拒绝——全删不可逆到「要重新记起」的程度。' },
       max: { type: 'integer', description: `批量上限（缺省 ${DEFAULT_BULK_FORGET}，硬上限 ${MAX_BULK_FORGET}）。` },
-      dryRun: { type: 'boolean', description: 'true = 只列清单不写库（批量前必做）。' },
+      dryRun: { type: 'boolean', description: 'true = 只列清单与传播计划、不写库（批量前必做）。' },
       reason: { type: 'string', description: '归档原因（人类可读详情，记入条目 `archivedReason`）。' },
       reasonType: { type: 'string', description: '归档原因**类型**（v0.21.0）——决定引用它的活跃条目该怎么处置：`refuted`（被证伪·结论不能再当依据，引用方必须撤）/ `superseded`（被取代·有更新结论覆盖）/ `stale`（过时·依赖的外部状态变了）/ `merged`（被合并·内容换位置了，原文在别处）/ `capacity`（容量清理·不因为错，只因占位）/ `unspecified`（未判断）。**单条归档请务必判断一次**：这一格是「我引用的那条为什么没了」唯一可查的答案（旧实现把它写成自由文本，查不了）。' },
     },
@@ -1414,6 +1430,7 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
         additionalProperties: false,
         properties: {
           id: { type: 'string' },
+          mode: { type: 'string', description: '本次操作类型（entry / topic / all）' },
           archived: { type: 'boolean', required: true },
           archivedCount: { type: 'integer', required: true },
           ids: { type: 'array', required: true, items: { type: 'string' } },
@@ -1421,27 +1438,85 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
           truncated: { type: 'integer', required: true },
           dryRun: { type: 'boolean', required: true },
           notes: { type: 'array', required: true, items: { type: 'string' } },
+          processed: { type: 'integer', description: '本次被处理的条目数（= 传播计划覆盖的条目数）' },
+          surfaces: { type: 'array', items: { type: 'string' }, description: '逐面传播结果（v0.36 · 方案 §10.4）：本体 / 派生概要 / 关系边 / 用量侧车。每行形如 `[面] 条数 · 动作`' },
+          unowned: { type: 'array', items: { type: 'string' }, description: '**本插件不拥有的传播面**与其原因（宿主会话日志 / 备份层 / 实体档）。⚠ 这一格省掉，读者就会以为九处都处理了——它是最容易被省、也最不能省的一格' },
+          certId: { type: 'string', description: '删除凭证 id（侧车 `memory-forget-certificates.jsonl`）。凭证**不含被删内容**：只有面、计数、id 与理由——可回查，不可反推' },
         },
       },
       render: (_args, value) => {
+        const lines: string[] = []
         if (value.dryRun) {
           const tail = value.truncated > 0 ? ` · 超出上限未列 ${value.truncated} 条` : ''
-          return [{ type: 'text', text: `dry-run：将归档 ${value.ids.length} 条（跳过 ${value.skipped}${tail}）——确认后去掉 dryRun 再调` }]
+          lines.push(`dry-run：将归档 ${value.ids.length} 条（跳过 ${value.skipped}${tail}）——确认后去掉 dryRun 再调`)
+        } else if (value.archivedCount === 1 && value.id !== undefined) {
+          lines.push(`已归档记忆条目 ${value.id}`)
+        } else {
+          lines.push(`已归档 ${value.archivedCount} 条（跳过 ${value.skipped}）`)
         }
-        if (value.archivedCount === 1 && value.id !== undefined) {
-          return [{ type: 'text', text: `已归档记忆条目 ${value.id}` }]
+        // 传播面（v0.36 · 方案 §10.4）：不印出来，读者就只看到「已归档」三个字，
+        // 而方案要的是「九处都处理了吗」这个答案。
+        const surfaces = value.surfaces ?? []
+        if (surfaces.length > 0) {
+          lines.push(`传播面（${value.processed ?? 0} 条）：`)
+          for (const line of surfaces) lines.push(`  - ${line}`)
         }
-        return [{ type: 'text', text: `已归档 ${value.archivedCount} 条（跳过 ${value.skipped}）` }]
+        const unowned = value.unowned ?? []
+        if (unowned.length > 0) {
+          lines.push('⚠ 本插件不拥有、因而没有处理的面（要处理得去对应那层）：')
+          for (const line of unowned) lines.push(`  - ${line}`)
+        }
+        if (typeof value.certId === 'string' && value.certId.length > 0) {
+          lines.push(`凭证 ${value.certId} 已写入 memory-forget-certificates.jsonl（只记面 / 计数 / id / 理由，不含被删内容）`)
+        }
+        return [{ type: 'text', text: lines.join('\n') }]
       },
     },
     async execute(args, exec) {
       const { config, cwd, view } = await resolveRuntime(exec, deps)
-      const { readScopes } = resolveScopes({ configScope: config.scope, cwd })
+      const { readScopes, writeScope } = resolveScopes({ configScope: config.scope, cwd })
       // 视野内定位：视野外的条目不可归档（v0.5，同 update）
       const { entries: universe } = gatherReadable(deps, { readScopes, includeArchive: true, view })
       const max = Math.max(1, Math.min(args.max ?? DEFAULT_BULK_FORGET, MAX_BULK_FORGET))
       const notes: string[] = []
       const requested: string[] = []
+      // 操作类型（v0.36 · 方案 §10.4）：三种「遗忘」的语义与选择器都不同。
+      // mode=entry 走下面的既有三选择器（逐位不变）；topic/all 在这里就算完 requested ——
+      // 那种情况下 args.id/ids/tier 都是 undefined，下面几个分支什么都不加，故**原逻辑一行不用改**。
+      const mode = args.mode ?? 'entry'
+      if (mode !== 'entry' && mode !== 'topic' && mode !== 'all') {
+        throw new Error(`forget: 未知 mode="${mode}"（允许 entry / topic / all）`)
+      }
+      if (mode === 'topic') {
+        const byTag = args.topicTags ?? []
+        const memType = args.topicMemType
+        const space = args.topicSpace
+        if (byTag.length === 0 && memType === undefined && space === undefined) {
+          throw new Error('forget: mode=topic 需要 topicTags / topicMemType / topicSpace 至少一个（都不给就等于全删——那该走 mode=all 的强护栏）')
+        }
+        for (const entry of universe) {
+          if (entry.archived === true) continue
+          const tagHit = byTag.length === 0 || byTag.some((tag) => (entry.tags ?? []).includes(tag))
+          if (tagHit && (memType === undefined || entry.memType === memType) && (space === undefined || entry.space === space)) {
+            requested.push(entry.id)
+          }
+        }
+        const picked = [
+          byTag.length > 0 ? `标签[${byTag.join(',')}]` : '',
+          memType !== undefined ? `分类=${memType}` : '',
+          space !== undefined ? `空间=${space}` : '',
+        ].filter((part) => part !== '').join(' + ')
+        notes.push(`mode=topic：按 ${picked} 命中 ${requested.length} 条`)
+      } else if (mode === 'all') {
+        if (args.confirm !== writeScope) {
+          const activeCount = universe.filter((entry) => entry.archived !== true).length
+          throw new Error(`forget: mode=all 会把 ${writeScope} 下 ${activeCount} 条记忆全部归档（软删除，可 includeArchive 找回）。确认请把 confirm 逐字设为：「${writeScope}」。建议先 dryRun=true 看清单。`)
+        }
+        for (const entry of universe) {
+          if (entry.archived !== true) requested.push(entry.id)
+        }
+        notes.push(`mode=all：${writeScope} 下 ${requested.length} 条全部归档`)
+      }
       if (args.id !== undefined) requested.push(args.id)
       if (args.ids !== undefined) requested.push(...args.ids)
 
@@ -1486,8 +1561,42 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
 
       const ids = targets.map((entry) => entry.id)
       const idField = singleMode && args.id !== undefined ? { id: args.id } : {}
+      // 传播计划（v0.36 · 方案 §10.4）：在写之前算好，dryRun 与实跑走**同一份计划**——
+      // 否则「预览说会动 3 条边、实跑动了 5 条」这种偏差永远查不出来。
+      const summariesOf = (id: string): string[] => universe
+        .filter((entry) => entry.kind === 'summary' && (entry.archiveRef ?? []).includes(id))
+        .map((entry) => entry.id)
+      const liveRelationsOf = (id: string): string[] => {
+        if (deps.relations === undefined) return []
+        const now = Date.now()
+        return deps.relations.all()
+          .filter((relation) => relation.scope === writeScope && (relation.from === id || relation.to === id))
+          .filter((relation) => relation.validTo === undefined || new Date(relation.validTo).getTime() > now)
+          .map((relation) => relation.id)
+      }
+      const relPlanOf = new Map(targets.map((target) => [target.id, liveRelationsOf(target.id)]))
+      const feedback = mergeForgetPlans(targets.map((target) => planForget({
+        entryId: target.id,
+        derivedSummaries: summariesOf(target.id),
+        liveRelations: relPlanOf.get(target.id) ?? [],
+      })))
+      const surfaceLines = feedback.surfaces.map((item) => `[${item.surface}] ${item.count} · ${item.action}`)
+      const unownedLines = feedback.unowned.map((item) => `[${item.surface}] ${item.why}`)
       if (args.dryRun === true) {
-        return { ...idField, archived: false, archivedCount: 0, ids, skipped, truncated, dryRun: true, notes }
+        return {
+          ...idField,
+          mode,
+          archived: false,
+          archivedCount: 0,
+          ids,
+          skipped,
+          truncated,
+          dryRun: true,
+          notes,
+          processed: feedback.processed,
+          surfaces: surfaceLines,
+          unowned: unownedLines,
+        }
       }
       const reason = args.reason ?? (targets.length > 1 ? `forget: bulk（${targets.length} 条）` : undefined)
       // 解析入参（v0.21.0）：非法值 fail-loud——静默当成 `unspecified` 会让「我判断过」
@@ -1504,7 +1613,51 @@ function buildForget(deps: MemoryToolDeps): ToolDefinition {
           ...(reason !== undefined ? { reason } : {}),
         })
       }
-      return { ...idField, archived: ids.length > 0, archivedCount: ids.length, ids, skipped, truncated, dryRun: false, notes }
+      // 关系边退役（v0.36 · 方案 §10.4）：删了记忆，指向它的边就悬空了——退役（写 validTo）、
+      // **不删除**：「它曾经成立」与「它从来没存在过」是两件事，而后者会让未来的我对着一张
+      // 干净的图以为这段关系从未被记录过。
+      let retiredEdges = 0
+      if (deps.relations !== undefined) {
+        for (const target of targets) {
+          for (const relationId of relPlanOf.get(target.id) ?? []) {
+            const result = await deps.relations.unlink(relationId, { reason: `端点记忆已被遗忘（${target.id}）` })
+            if (result?.changed === true) retiredEdges += 1
+          }
+        }
+        if (retiredEdges > 0) notes.push(`退役关系边 ${retiredEdges} 条（写 validTo，记录保留）`)
+      }
+      // 删除凭证（v0.36 · 方案 §10.4）：**不含被删内容**——只记面、计数、id 与理由。
+      // 没有它，「这条为什么没了」就只剩条目自己的 archivedReason，而那是会随条目一起消失的东西。
+      const certId = randomUUID()
+      if (deps.recordForget !== undefined) {
+        const certificate: ForgetCertificate = {
+          certId,
+          at: new Date().toISOString(),
+          mode,
+          scope: writeScope,
+          surfaces: feedback.surfaces,
+          ids,
+          ...(reason !== undefined ? { reason } : {}),
+          reasonType,
+          unowned: feedback.unowned,
+        }
+        await deps.recordForget(certificate)
+      }
+      return {
+        ...idField,
+        mode,
+        archived: ids.length > 0,
+        archivedCount: ids.length,
+        ids,
+        skipped,
+        truncated,
+        dryRun: false,
+        notes,
+        processed: feedback.processed,
+        surfaces: surfaceLines,
+        unowned: unownedLines,
+        ...(deps.recordForget !== undefined ? { certId } : {}),
+      }
     },
   })
 }
