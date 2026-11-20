@@ -548,7 +548,7 @@ export function recallEntries(entries: Entry[], query: RecallQuery = {}): Recall
   let scored = filtered.map((entry) => ({
     entry,
     score: v2Tokens !== undefined && v2Idf !== undefined && v2Df !== undefined
-      ? scoreEntryV2(entry, v2Tokens, v2Idf, v2Df, filtered.length, tuning.coverageWeight, tuning.fieldAgg, tuning.smoothPower)
+      ? scoreEntryV2(entry, v2Tokens, v2Idf, v2Df, filtered.length, tuning.coverageWeight, tuning.fieldAgg, tuning.smoothPower, tuning.l2Mode)
       : weighted !== undefined
         ? scoreEntryWeighted(entry, weighted, idf, avgBodyLen, tuning, query.entityMatches)
         : scoreEntry(entry, tokens, idf, avgBodyLen, tuning, query.entityMatches),
@@ -724,9 +724,12 @@ function scoreEntryV2(
   coverageWeight: number,
   fieldAgg: 'sum' | 'max' = 'sum',
   smoothPower = 1,
+  l2Mode: 'additive' | 'recall-only' = 'additive',
 ): number {
   const view = lowerOf(entry)
   let score = 0
+  /** L1 命中的**词项数**（v0.63）：`recall-only` 用它判「这条是否已被词面证据充分支持」。 */
+  let l1Hits = 0
   const apply = (term: string, coefficient: number): void => {
     const onAlias = view.aliases.some((alias) => alias.includes(term))
     if (fieldAgg === 'max') {
@@ -754,8 +757,21 @@ function scoreEntryV2(
     const ratio = total > 0 ? (df.get(term) ?? 0) / total : 0
     // `smoothPower = 0` ⇒ 不做平滑，直用 IDF（幂零次恒 1，不必特判分支）
     const smooth = 1 / (1 + ratio) ** smoothPower
+    const before = score
     apply(term, base * smooth)
+    if (score > before) l1Hits += 1
   }
+  // L2 层（v0.63）：`recall-only` 时**已被 ≥2 个 L1 词项命中的条目不叠加 L2**。
+  //
+  // 这是把设计意图落成机制，不是新增偏好：§2 本就写着「L2 补召回但夺不了排序」，
+  // 而 0.35 的系数实测仍然夺了排序——`压缩之后怎么恢复上下文` 的第二条金标被
+  // L2 加分的竞争者挤出 top20（R@20 50%），关掉 L2 就回到 100%。
+  //
+  // ⚠ 闸门口径是**命中词项数**而不是「L1 分 > 0」（2026-11-20 实测）：后者退化成
+  // 「完全关掉 L2」——读数与 `coverageWeight=0` 逐位相同（91.8% / 60.3% / 26.7% /
+  // 75% / 0.847），因为几乎每条候选都会撞上至少一个 L1 泛词。**一个词命中是偶然，
+  // 两个以上才算词面证据**——这才是「已被支持」的可操作判据。
+  if (l2Mode === 'recall-only' && l1Hits >= 2) return score
   for (const term of tokens.l2) apply(term, (idf.get(term) ?? 1) * coverageWeight)
   return score
 }
@@ -995,6 +1011,8 @@ interface ResolvedTuning {
   fieldAgg: 'sum' | 'max'
   /** v2 的 L1 平滑幂次（v0.35）；`1` = 现行行为，`0` = 不做平滑 */
   smoothPower: number
+  /** v2 的 L2 层作用方式（v0.63）；`additive` = 现行行为 */
+  l2Mode: 'additive' | 'recall-only'
 }
 
 /**
@@ -1018,6 +1036,7 @@ function resolveTuning(tuning?: RecallTuning): ResolvedTuning {
     fieldAgg: tuning?.fieldAgg ?? 'sum',
     // ⚠ `??` 而不是 `||`：`0` 是合法取值（= 关掉平滑，直用 IDF）
     smoothPower: tuning?.smoothPower ?? 1,
+    l2Mode: tuning?.l2Mode ?? 'additive',
   }
 }
 
