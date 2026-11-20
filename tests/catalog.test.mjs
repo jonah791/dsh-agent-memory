@@ -369,3 +369,80 @@ test('C13 ★两个口径必须并列：字段存有率 ≠ 有效分类率', ()
     '有效分类率必须严格大于字段存有率——线上这两个数差 13 倍（1.4% vs 17.0%），相等说明这条断言没有分辨力',
   )
 })
+
+// ---------- W 段：时间窗（v0.64 · 方案 §10.2「日增量维护」） ----------
+
+test('W1 缺省无 window（零回归；且与「窗内 0 条」可分辨）', () => {
+  const r = catalogReport([entry({ id: 'a' })])
+  assert.equal(r.window, undefined, '不传 sinceHours ⇒ 不出现 window')
+})
+
+test('W2 window 左端按 nowMs 算，不随时间漂移', () => {
+  const r = catalogReport([entry({ id: 'a', createdAt: new Date(NOW).toISOString() })], {
+    sinceHours: 24,
+    nowMs: NOW,
+  })
+  assert.deepEqual(r.window, { sinceHours: 24, startIso: new Date(NOW - DAY).toISOString() })
+})
+
+test('W3 ★窗只算窗内新增：窗外条目不得进 considered / denominator', () => {
+  const fresh = entry({ id: 'fresh', createdAt: new Date(NOW - 3_600_000).toISOString() })
+  const old = entry({ id: 'old', createdAt: new Date(NOW - 30 * DAY).toISOString() })
+
+  const all = catalogReport([fresh, old])
+  const win = catalogReport([fresh, old], { sinceHours: 24, nowMs: NOW })
+
+  assert.equal(all.excluded.considered, 2, '全库口径必须是 2——窗过滤不得改动全库语义')
+  assert.equal(win.excluded.considered, 1, '窗内只有 1 条（30 天前那条在窗外）')
+  assert.equal(win.denominator, 1)
+  assert.equal(win.excluded.net, 0)
+})
+
+test('W4 窗内 0 条时读数不炸（分母 0 ⇒ 0，不是 NaN）', () => {
+  const old = entry({ id: 'old', createdAt: new Date(NOW - 30 * DAY).toISOString() })
+  const r = catalogReport([old], { sinceHours: 24, nowMs: NOW })
+  assert.equal(r.excluded.considered, 0)
+  assert.equal(r.denominator, 0)
+  assert.equal(r.gaps.memType.rate, 0)
+  assert.equal(r.window.sinceHours, 24, '空窗仍然要自带范围——「窗内 0 条」与「全库 0 条」不是一件事')
+})
+
+test('W5 工具层透传 sinceHours（schema 接受 → execute 产出 window）', async () => {
+  const { kv, byName, exec } = setup()
+  kv.map.set(`${WID}:knowledge:new1`, entry({ id: 'new1', createdAt: new Date().toISOString() }))
+  kv.map.set(`${WID}:knowledge:old1`, entry({ id: 'old1', createdAt: new Date(NOW - 30 * DAY).toISOString() }))
+
+  const value = await byName.get('memory_catalog').execute({ sinceHours: 24 }, exec)
+  assert.ok(value.window !== undefined, '传了 sinceHours 就必须有 window')
+  assert.equal(value.window.sinceHours, 24)
+  assert.equal(value.excluded.considered, 1, '只有刚写的那条在窗内')
+})
+
+test('W6 ★渲染必须印出范围：窗内读数不得长得像全库', async () => {
+  const { kv, byName, exec } = setup()
+  kv.map.set(`${WID}:knowledge:new1`, entry({ id: 'new1', createdAt: new Date().toISOString() }))
+  const tool = byName.get('memory_catalog')
+  const render = tool.output.render
+  // 必须走 execute 的返回值：render 还读 credibility（在 catalogReport 之外接的），
+  // 直接喂纯函数输出会 TypeError——这不是测试技巧，是 T 型边界的真实形状
+  const textAll = render({}, await tool.execute({}, exec))[0].text
+  const textWin = render({}, await tool.execute({ sinceHours: 24 }, exec))[0].text
+
+  assert.ok(textAll.includes('全库口径'), '全库读数必须自报「全库口径」')
+  assert.ok(textWin.includes('窗内口径'), '窗内读数必须自报「窗内口径」')
+  assert.ok(!textWin.includes('全库口径'), '窗内读数不得冒充全库——这正是 §13.3 反复踩的形状')
+  assert.ok(textWin.includes('24'), '必须印出小时数，否则读者不知道窗有多宽')
+})
+
+test('W7 ★两段同窗：可信度分母必须跟着编目段走（同屏不得两个口径）', async () => {
+  const { kv, byName, exec } = setup()
+  kv.map.set(`${WID}:knowledge:new1`, entry({ id: 'new1', createdAt: new Date().toISOString() }))
+  kv.map.set(`${WID}:knowledge:old1`, entry({ id: 'old1', createdAt: new Date(NOW - 30 * DAY).toISOString() }))
+
+  const all = await byName.get('memory_catalog').execute({}, exec)
+  const win = await byName.get('memory_catalog').execute({ sinceHours: 24 }, exec)
+
+  assert.equal(all.credibility.denominator, 2, '全库：两条都算')
+  assert.equal(win.credibility.denominator, 1, '窗内可信度分母必须跟着窗——线上实测过「上面 29 条、下面全库 1800 条」的混合输出')
+  assert.equal(win.credibility.denominator, win.denominator, 'schema 自己声明「与顶层 denominator 同一把尺子」')
+})

@@ -48,7 +48,7 @@ import { assertExpiryOrder, countByExpiry, expiryTag, filterByExpiryState, occur
 import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, parseValidAfterArg, shortId, supersededByTag, supersedesTag, validAfterTag } from './succession.ts'
 import { auditMemory } from './audit.ts'
 import { retentionSummary } from './retention.ts'
-import { catalogReport } from './catalog.ts'
+import { catalogReport, filterByWindow } from './catalog.ts'
 import { mapReport } from './map.ts'
 import { CONSOLIDATION_DEFAULTS, findConsolidationCandidates } from './consolidate.ts'
 import {
@@ -5018,13 +5018,23 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
       role: { type: 'string', description: '角色视角覆盖（缺省按调用者会话身份推导）。' },
       maxClusters: { type: 'integer', description: '最多出几个簇（缺省 12）——每多一个簇就多一次判断，12 是「一次能看完」的量级。' },
       minClusterSize: { type: 'integer', description: '一个标签至少覆盖多少条才成簇（缺省 8）。太小的簇是噪声：3 条以下的标签归类收益抵不上判断成本。' },
+      sinceHours: { type: 'integer', description: '只看最近 N 小时内**新增**的条目（按 createdAt；方案 §10.2「日增量维护」）。缺省 = 全库。传 24 即「昨天那一批」——全库 10% 与近 7 天 85% 是两个口径，不加窗会把「刚打通的新写入」读成「存量很差」。按 createdAt 不按 updatedAt：后者会把被更新过的旧条目混进来。' },
     },
     output: {
       schema: {
         type: 'object',
         additionalProperties: false,
         properties: {
-          denominator: { type: 'integer', required: true, description: '应编目分母（活跃、非压缩产物、非 summary）' },
+          window: {
+            type: 'object',
+            additionalProperties: false,
+            description: '时间窗。**缺省不出现 = 全库读数**；出现即表示「本读数只在窗内成立」——不出现与全库是同一件事，不能用「没有 window 所以不知道范围」来读',
+            properties: {
+              sinceHours: { type: 'integer', required: true },
+              startIso: { type: 'string', required: true },
+            },
+          },
+          denominator: { type: 'integer', required: true, description: '应编目分母（活跃、非压缩产物、非 summary；窗内读数的分母是**窗内**的）' },
           excluded: {
             type: 'object',
             required: true,
@@ -5189,7 +5199,10 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
           ` · **有效分类 ${pct(classified, value.denominator)}**（${classified} 条 = 显式 ${es.explicit} + 按 kind 零猜测派生 ${es['derived-from-kind']}）` +
           ` · 类未知 ${es.unknown}`
         const lines = [
-          `编目工作面（只读）：应编目 **${value.denominator}** 条`,
+          // 窗内读数必须自带范围（v0.64 · §10.2）：否则「近 1 天 85%」与「全库 10%」会被读成同一个数
+          value.window === undefined
+            ? `编目工作面（只读）：应编目 **${value.denominator}** 条（**全库口径**）`
+            : `编目工作面（只读）：应编目 **${value.denominator}** 条 —— ⏳ **窗内口径：近 ${value.window.sinceHours} 小时新增**（自 ${value.window.startIso.slice(0, 16).replace('T', ' ')}Z 起）· **这不是全库读数**，与全库不可互换`,
           `分母口径：全量 **${value.excluded.considered}** − 应编目 **${value.denominator}** = 净排除 **${value.excluded.net}**`,
           // ⚠ 分项相加 ≠ 净排除：`isCatalogable` 只有三条排除，而下面四项各自在全量上独立计数，
           // 一条归档的 summary 会同时在 archived 与 summary 各计一次。2026-11-19 线上实测：
@@ -5245,6 +5258,8 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
       const report = catalogReport(entries, {
         ...(args.maxClusters !== undefined ? { maxClusters: args.maxClusters } : {}),
         ...(args.minClusterSize !== undefined ? { minClusterSize: args.minClusterSize } : {}),
+        // 日增量维护（v0.64 · 方案 §10.2）：窗过滤在纯函数内做——传 24 就是「昨天那一批」
+        ...(args.sinceHours !== undefined ? { sinceHours: args.sinceHours } : {}),
       })
       // §5.4 四维可信度（在 catalog.ts 之外调，避免 catalog ⇄ credibility 循环依赖）。
       // 来源表未接线时不给查找器：那时有 `sourceIds` 一律判「查不到」（如实），
@@ -5262,9 +5277,15 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
                 ...(source.status === 'retired' ? { retired: true } : {}),
               }
             }
+      // ⚠ 可信度必须与编目段**同一个窗**（v0.64）：线上实测过「上面窗内 29 条、下面全库
+      // 1800 条」的混合输出，而两段各自都写着「与上同一把尺子」。一个窗口只能有一个过滤器，
+      // 所以复用 `filterByWindow`，不在这里手写第二遍。
+      const scopedForCred = args.sinceHours === undefined
+        ? entries
+        : filterByWindow(entries, { sinceHours: args.sinceHours })
       return {
         ...report,
-        credibility: credibilityReport(entries, lookupSource === undefined ? {} : { lookupSource }),
+        credibility: credibilityReport(scopedForCred, lookupSource === undefined ? {} : { lookupSource }),
       }
     },
   })

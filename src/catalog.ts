@@ -98,6 +98,17 @@ export interface CatalogCluster {
 }
 
 export interface CatalogReport {
+  /**
+   * 时间窗（v0.64 · 方案 §10.2 日增量维护）。**缺省不出现** = 全库读数。
+   *
+   * 出现的唯一理由是「**窗内读数必须自带范围**」——否则同一个 20.2% 在「全库」与
+   * 「近 1 天」两个口径下会被读成同一件事（§13.3 反复踩过的形状：读数不自带范围标注）。
+   */
+  readonly window?: {
+    readonly sinceHours: number
+    /** 窗口左端（ISO）——读数自带坐标，不靠调用方记 */
+    readonly startIso: string
+  }
   /** 应编目分母 */
   readonly denominator: number
   /**
@@ -195,6 +206,13 @@ export interface ClusterOptions {
   readonly minClusterSize?: number
   /** 每簇样本数（缺省 3） */
   readonly samples?: number
+  /**
+   * 时间窗（小时）：只统计 `createdAt` 落在此窗内的条目（v0.64 · 方案 §10.2「日增量维护」）。
+   * 缺省 = 全库（零回归）。传 `24` 就是「昨天新增那一批」。
+   */
+  readonly sinceHours?: number
+  /** 窗口右端（ms）。缺省 `Date.now()`；测试传固定值，避免读数随跑的时刻漂移 */
+  readonly nowMs?: number
 }
 
 /**
@@ -263,21 +281,50 @@ export function clusterByTag(
 }
 
 /**
+ * 时间窗过滤（纯函数，v0.64 · 方案 §10.2「日增量维护」）。
+ *
+ * **为什么导出**：`memory_catalog` 的同一次返回里还有一段「四维可信度」读数，它必须与
+ * 编目段**同一个窗**——否则屏幕上会出现「上面窗内 29 条、下面全库 1800 条」，而两段各自
+ * 都写着「与上同一把尺子」。2026-11-20 线上实测就撞成这个形状。**一个窗口一个过滤器**。
+ *
+ * 为什么按 `createdAt` 而不是 `updatedAt`：「日增量」问的是「昨天新写进来那批质量如何」；
+ * `updatedAt` 会把被 `update` / `forget` 动过的旧条目混进来。「变更窗口」是另一个需求。
+ */
+export function filterByWindow(
+  entries: readonly Entry[],
+  options: { sinceHours?: number; nowMs?: number } = {},
+): readonly Entry[] {
+  const sinceHours = options.sinceHours
+  if (sinceHours === undefined) return entries
+  const startMs = (options.nowMs ?? Date.now()) - sinceHours * 3_600_000
+  return entries.filter((entry) => {
+    const at = Date.parse(entry.createdAt)
+    return Number.isFinite(at) && at >= startMs
+  })
+}
+
+/**
  * 编目工作面读数（纯函数）。
  *
  * @param entries - 库内条目（调用方负责视野与 scope 过滤）
  * @param options - 聚簇参数
  */
 export function catalogReport(entries: readonly Entry[], options: ClusterOptions = {}): CatalogReport {
-  const denominator = entries.filter(isCatalogable)
+  // 时间窗（v0.64 · §10.2 日增量维护）：现在取一次，窗口左端与过滤用**同一个 nowMs**，
+  // 否则两处各调一次 Date.now() 会差几毫秒，`window.startIso` 与实际过滤边界不同步。
+  const sinceHours = options.sinceHours
+  const nowMs = options.nowMs ?? Date.now()
+  const windowStartMs = sinceHours === undefined ? undefined : nowMs - sinceHours * 3_600_000
+  const scoped = sinceHours === undefined ? entries : filterByWindow(entries, { sinceHours, nowMs })
+  const denominator = scoped.filter(isCatalogable)
   const excluded = {
-    considered: entries.length,
+    considered: scoped.length,
     // 净排除必须由「全量 − 分母」算出来，不能用四项相加：四项是独立计数、彼此有交集
-    net: entries.length - denominator.length,
-    archived: entries.filter((entry) => entry.archived).length,
-    coldCheckpoint: entries.filter((entry) => (entry.tags ?? []).includes(COLD_CHECKPOINT_TAG)).length,
-    compaction: entries.filter((entry) => (entry.tags ?? []).includes(COMPACTION_TAG)).length,
-    summary: entries.filter((entry) => entry.kind === 'summary').length,
+    net: scoped.length - denominator.length,
+    archived: scoped.filter((entry) => entry.archived).length,
+    coldCheckpoint: scoped.filter((entry) => (entry.tags ?? []).includes(COLD_CHECKPOINT_TAG)).length,
+    compaction: scoped.filter((entry) => (entry.tags ?? []).includes(COMPACTION_TAG)).length,
+    summary: scoped.filter((entry) => entry.kind === 'summary').length,
   }
   const gaps = catalogGaps(denominator)
   const unclassified = denominator.filter((entry) => !isMemType(entry.memType))
@@ -285,6 +332,10 @@ export function catalogReport(entries: readonly Entry[], options: ClusterOptions
   const { clusters, clustered } = clusterByTag(unclassified, options)
 
   return {
+    // 窗内读数自带范围：缺省不出现 = 全库（见 CatalogReport.window 注释）
+    ...(windowStartMs !== undefined && sinceHours !== undefined
+      ? { window: { sinceHours, startIso: new Date(windowStartMs).toISOString() } }
+      : {}),
     denominator: denominator.length,
     excluded,
     gaps,
