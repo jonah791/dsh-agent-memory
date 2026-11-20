@@ -74,3 +74,52 @@ test('digest：归档条目不出现', () => {
   assert.ok(text.includes('活跃条目'))
   assert.ok(!text.includes('已归档'))
 })
+
+// ---------- v0.59：注入面的证据引用（方案 §8.5「上下文包」）----------
+// 为什么在这条路径上补：速览是每个会话最先看到的文本，而「这条能回到哪」此前在这一面
+// 完全没有入口。判据参照 v0.58 的 evidenceTag 契约（同会话省号 / 异会话印短号 / 不知道不省）。
+
+const SID = 'session-cc8272d8-5195-4a34-a683-455cf5f12671'
+const OTHER_SID = 'session-9f3a1b2c-0000-1111-2222-333344445555'
+
+function withEvidence() {
+  return [entry({
+    id: 'ev', title: '带证据的条目', createdAt: '2026-08-14T00:00:00.000Z',
+    evidenceRefs: [`session|${SID}|33847`],
+  })]
+}
+
+test('digest I1：同会话 ⇒ 省会话号（⚓@N），字节花在会改变动作的信息上', () => {
+  const text = buildMemoryDigest([], withEvidence(), { ...OPTS, currentSessionId: SID })
+  assert.ok(text.includes('⚓@33847'), '同会话应省掉会话号')
+})
+
+test('digest I2：异会话 / 未给当前会话 ⇒ 印短号（不省，否则静默读错位置）', () => {
+  assert.ok(
+    buildMemoryDigest([], withEvidence(), { ...OPTS, currentSessionId: OTHER_SID }).includes('⚓cc8272d8@33847'),
+    '异会话必须印号',
+  )
+  assert.ok(
+    buildMemoryDigest([], withEvidence(), OPTS).includes('⚓cc8272d8@33847'),
+    '不知道当前会话时不许省——「不知道」与「就是当前会话」是两件事',
+  )
+})
+
+test('digest I3 尸体样本：无证据的条目行形状不变（零回归，不骗人）', () => {
+  const plain = entry({ id: 'p', title: '没有证据的条目', createdAt: '2026-08-14T00:00:00.000Z' })
+  const line = buildMemoryDigest([], [plain], { ...OPTS, currentSessionId: SID })
+    .split('\n').find((l) => l.includes('没有证据的条目'))
+  assert.ok(line !== undefined)
+  assert.ok(!line.includes('⚓'), '没有坐标就不许打证据标记')
+})
+
+test('digest I6：validAfter 有值时印「自…起成立」（v0.59 · 方案 §8.5 有效时间）', () => {
+  const e = entry({ id: 'va', title: '某规则从下周起生效', createdAt: '2026-08-14T00:00:00.000Z', validAfter: '2026-11-25' })
+  const line = buildMemoryDigest([], [e], OPTS).split('\n').find((l) => l.includes('某规则从下周起生效'))
+  assert.ok(line !== undefined)
+  assert.ok(line.includes('[自 2026-11-25 起成立]'), '生效起点要能被看见')
+  // 无 validAfter 的条目不许带这段（同一条信噪比纪律）
+  const plain = entry({ id: 'nv', title: '普通条目', createdAt: '2026-08-14T00:00:00.000Z' })
+  const line2 = buildMemoryDigest([], [plain], OPTS).split('\n').find((l) => l.includes('普通条目'))
+  assert.ok(!line2.includes('起成立'))
+})

@@ -23,10 +23,11 @@ import { normalizeSubject, subjectTag } from './subject.ts'
 import { executionTag } from './execution.ts'
 import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
-import { supersededByTag } from './succession.ts'
+import { supersededByTag, validAfterTag } from './succession.ts'
 import { expiryTag } from './temporal-dual.ts'
 import { isInjectable, lifecycleOf, lifecycleTag } from './lifecycle.ts'
 import { provenanceTag } from './archive.ts'
+import { evidenceTag } from './evidence.ts'
 import { deriveSensitivity, isAutoInjectable } from './sensitivity.ts'
 import { neutralizeControlTags, wrapInjectionBlock } from './inject-boundary.ts'
 
@@ -53,7 +54,7 @@ export interface MemoryInjectDeps {
 }
 
 /** 单行条目渲染：主体层标记 + 类型 + 层级 + 标题 + 时间 + tags（线索，不含正文） */
-function lineOf(entry: Entry): string {
+function lineOf(entry: Entry, currentSessionId?: string): string {
   const kind = entry.kind.toUpperCase()
   const level = entry.level !== null ? ` ${entry.level}` : ''
   const date = entry.updatedAt.slice(0, 10)
@@ -77,10 +78,15 @@ function lineOf(entry: Entry): string {
   const projectNote = executionTag(entry.project, entry.taskId)
   // 已过时标记（v0.24.0）：**放最前**——它比「已过期」更硬。记忆速览是每个会话最先看到的
   // 文本，一条已被新结论顶掉的条目若无标记地出现在这里，未来的我会把旧值当现状直接用。
-  // ⚠ 刻意**不注入 validAfter**：速览有字节预算，而它只在「写作时刻 ≠ 生效时刻」时才
-  // 改变我的判断（少数情形）；recall / memory_browse 里都能看到（同 auto-inject 不注入
-  // watchFor 的理由：预算要花在会改变动作的信息上）。
   const supersededNote = supersededByTag(entry.supersededBy)
+  // 生效起点（v0.59 · 方案 §8.5「有效时间」）：**改主意了，理由在此留档供对照**。
+  // 旧裁决（v0.24）是「刻意不注入 validAfter——它在少数情形才改变判断，预算要花在会
+  // 改变动作的信息上」。那个裁决的**代价假设**（会挤掉内容）在实测下不成立：
+  // 全库 3,130 条里 validAfter 仅 **2 条**（0.06%，且两条都是验收探针，不会进注入）
+  // ⇒ 字节成本实测为 0；而收益是六项要素各有载体，将来真开始标「某规则从某日起生效」时
+  // 注入面自动就有。**判据变化的原因是成本被量过了，不是标准降低了。**
+  // 仍不注入 `watchFor`（多句文本，那一条的代价假设成立）。
+  const validAfterNote = validAfterTag(entry.validAfter)
   // v0.50（方案 §16.2「每种记忆应当采用不同的调用规则」）：补齐 **recall 侧早就有、注入侧漏掉**
   // 的两处标记——`lifecycle=disputed`（❓存疑）与 `provenance=web/self`（[外部]/[自推]）。
   // 为什么这里最要紧：速览是每个会话最先看到的文本，而「存疑信息不该被当作确定事实说出来」
@@ -88,7 +94,12 @@ function lineOf(entry: Entry): string {
   // 实际只接在 tools.ts 一侧）。两处 tag 都遵循同一条信噪比纪律：只在有值时才出现。
   const lifecycleNote = lifecycleTag(lifecycleOf(entry))
   const provenanceNote = provenanceTag(entry.provenance)
-  return `- ${lifecycleNote}${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${provenanceNote}${projectNote}[${kind}${level}] ${entry.title}（${date}${tags}）`
+  // 证据标记（v0.59 · 方案 §8.5「上下文包」的证据引用）：与 recall / browse 同一个函数、同一个形状——
+  // 三个界面同一事实不能长得不一样（渲染纪律）。这里是**每个会话最先看到**的文本，
+  // 而「这条能回到哪」此前在这一面完全没有入口（结构化里也没有，速览只走投影）。
+  // 字节成本实测（2026-11-20）：选中 38 条里 8 条带坐标（21.1%）⇒ 约 +72 字符 / 3,096 = 2.3%。
+  const evidenceNote = evidenceTag(entry.evidenceRefs, { currentSessionId })
+  return `- ${lifecycleNote}${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${provenanceNote}${evidenceNote}${projectNote}[${kind}${level}] ${entry.title}（${date}${tags}）${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}`
 }
 
 /**
@@ -103,7 +114,7 @@ function lineOf(entry: Entry): string {
 export function buildMemoryDigest(
   globalFacts: Entry[],
   scopeEntries: Entry[],
-  opts: { maxBytes: number; maxEntries: number },
+  opts: { maxBytes: number; maxEntries: number; currentSessionId?: string },
 ): string {
   const sections: string[] = []
   const lines: string[] = []
@@ -113,7 +124,7 @@ export function buildMemoryDigest(
   // v0.27.0：注入只给 `isInjectable()` 的条目——`pending` 待审核**不进上下文**（候选区未过审核
   // 就自己挤进注入，等于跳过了候选区这个设计本身）；`archived` / `deleted` 同理。
   const facts = globalFacts.filter((e) => e.kind === 'fact' && isInjectableEntry(e))
-  for (const entry of facts) lines.push(neutralizeControlTags(lineOf(entry)))
+  for (const entry of facts) lines.push(neutralizeControlTags(lineOf(entry, opts.currentSessionId)))
 
   // 概要层：summary 条目按 bucket 降序（高密度索引优先）
   const summaries = scopeEntries.filter((e) => e.kind === 'summary' && isInjectableEntry(e))
@@ -129,7 +140,7 @@ export function buildMemoryDigest(
       omitted += 1
       continue
     }
-    lines.push(neutralizeControlTags(lineOf(entry)))
+    lines.push(neutralizeControlTags(lineOf(entry, opts.currentSessionId)))
   }
 
   if (lines.length > 0) sections.push('【记忆速览】', ...lines)
@@ -182,6 +193,7 @@ export function installMemoryInject(ctx: Context, deps: MemoryInjectDeps): void 
     const digest = buildMemoryDigest(globalFacts, scopeEntries, {
       maxBytes: config.inject.maxBytes,
       maxEntries: config.inject.maxEntries,
+      currentSessionId: agent.session.id,
     })
     if (digest.length === 0) {
       injected.add(agent.session.id)

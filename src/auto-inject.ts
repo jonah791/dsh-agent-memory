@@ -29,10 +29,11 @@ import { normalizeSubject, subjectTag } from './subject.ts'
 import { executionTag } from './execution.ts'
 import { groundingTag, normalizeGrounding } from './grounding.ts'
 import { stalenessTag } from './temporal.ts'
-import { supersededByTag } from './succession.ts'
+import { supersededByTag, validAfterTag } from './succession.ts'
 import { expiryTag } from './temporal-dual.ts'
 import { isInjectable, lifecycleTag } from './lifecycle.ts'
 import { provenanceTag } from './archive.ts'
+import { evidenceTag } from './evidence.ts'
 import { deriveSensitivity, isAutoInjectable } from './sensitivity.ts'
 import { buildCentroid, recentTurnTexts } from './centroid.ts'
 import type { WeightedTerm } from './types.ts'
@@ -111,7 +112,7 @@ export function lastUserMessageText(
 export function buildAutoRecallDigest(
   entries: Entry[],
   query: string,
-  opts: { maxEntries: number; maxBytes: number; weightedTerms?: WeightedTerm[] },
+  opts: { maxEntries: number; maxBytes: number; weightedTerms?: WeightedTerm[]; currentSessionId?: string },
 ): string {
   const trimmed = query.trim()
   const weighted = opts.weightedTerms !== undefined && opts.weightedTerms.length > 0 ? opts.weightedTerms : undefined
@@ -151,8 +152,12 @@ export function buildAutoRecallDigest(
     // 已过时标记（v0.24.0）：**这是最该看见它的位置**——auto-recall 是「我正打算拿这条记忆
     // 当前提」的那一刻；若它已被新结论顶掉，照旧值行动就是用错的结论。
     // **纯附加信息**：不改排序、不改过滤、不改条数（与其余标记同一纪律）。
-    // ⚠ 不注入 validAfter / supersedes：注入有字节预算，它们只在少数情形下改变判断。
     const supersededNote = supersededByTag(r.supersededBy)
+    // 生效起点（v0.59 · 方案 §8.5）：与速览同一条判据、同一个理由改动——v0.24 的
+    // 「刻意不注入」建立在「会挤掉内容」的代价假设上，而实测全库 validAfter 仅 2/3130
+    // （0.06%）⇒ 代价为 0。仍不注入 `supersedes`（「我顶掉了谁」对**用**这条记忆没有影响，
+    // 那是追溯方向的元数据）。
+    const validAfterNote = validAfterTag(r.validAfter)
     // v0.19（2026-10-27）：snippet 与标题同源时改注入 cue。
     //
     // 旧行为的失效证据（同族第 2 次，2026-10-26 记过「我不读是取用问题」）：
@@ -182,7 +187,10 @@ export function buildAutoRecallDigest(
     // 主人消息都跑的路径，正是最该看见它的地方）。两处 tag 都遵循同一条信噪比纪律：只在有值时出现。
     const provenanceNote = provenanceTag(r.provenance)
     const lifecycleNote = lifecycleTag(r.lifecycle)
-    lines.push(`- ${lifecycleNote}${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${provenanceNote}${projectNote}[${kind}] ${neutralizeControlTags(r.title)}（${date}${score}）：${neutralizeControlTags(payload)}`)
+    // 证据标记（v0.59 · 方案 §8.5）：与 recall / browse / 速览三处同一函数、同一形状。
+    // 这是**每条主人消息都跑**的路径，字节要算着花——实测本轮 8/38 带坐标，约 2.3%。
+    const evidenceNote = evidenceTag(r.evidenceRefs, { currentSessionId: opts.currentSessionId })
+    lines.push(`- ${lifecycleNote}${supersededNote}${expiryNote}${stalenessNote}${subject}${groundingNote}${provenanceNote}${evidenceNote}${projectNote}[${kind}] ${neutralizeControlTags(r.title)}（${date}${score}）${validAfterNote.length > 0 ? ' ' + validAfterNote : ''}：${neutralizeControlTags(payload)}`)
   }
   // 块内不再重复标题：块首的 header 已说明这块是什么（v0.48 起帧由 wrapInjectionBlock 统一）。
   let body = lines.join('\n')
@@ -331,6 +339,7 @@ export function installAutoRecallInject(ctx: Context, deps: AutoRecallInjectDeps
     const digest = buildAutoRecallDigest(fresh, found.text, {
       maxEntries: config.autoInject.maxEntries,
       maxBytes: config.autoInject.maxBytes,
+      currentSessionId: agent.session.id,
       ...(weightedTerms.length > 0 ? { weightedTerms } : {}),
     })
     // v0.44（方案 §16.3）：**空注入同样是一次检索**——此前这里直接 return，于是

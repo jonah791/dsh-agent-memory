@@ -254,3 +254,26 @@ test('digest v0.19 边界：snippet 是标题 echo 但没有 cue ⇒ 回落到 s
   assert.ok(text.includes(title))
   assert.ok(!text.includes('◎'))
 })
+
+// ---------- v0.59：自动召回面的证据引用（方案 §8.5）----------
+
+const ASID = 'session-cc8272d8-5195-4a34-a683-455cf5f12671'
+
+test('digest I4：自动召回命中的条目带证据时印 ⚓（同会话省号）', () => {
+  const entries = [entry({
+    id: 'k9', title: 'ComfyUI 生图经验', createdAt: '2026-08-31T00:00:00.000Z', body: '工作流与采样',
+    evidenceRefs: [`session|${ASID}|35043`],
+  })]
+  const text = buildAutoRecallDigest(entries, 'ComfyUI 怎么生图', {
+    maxEntries: 3, maxBytes: 1500, currentSessionId: ASID,
+  })
+  assert.ok(text.includes('⚓@35043'))
+})
+
+test('digest I5 尸体样本：无证据的命中不打标记（零回归）', () => {
+  const entries = [entry({ id: 'k10', title: 'ComfyUI 生图经验', createdAt: '2026-08-31T00:00:00.000Z', body: '工作流与采样' })]
+  const text = buildAutoRecallDigest(entries, 'ComfyUI 怎么生图', {
+    maxEntries: 3, maxBytes: 1500, currentSessionId: ASID,
+  })
+  assert.ok(!text.includes('⚓'))
+})
