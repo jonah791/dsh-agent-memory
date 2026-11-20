@@ -1640,7 +1640,10 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 
 ⚠ **A258 是源码结构断言**，只证「接线存在」，不证运行时正确（要真跑 `apply()` 需造整套 ctx 桩，成本大于它多证明的那一点）。运行时那半由 A257 的往返自证承担，**并明确记为未做线上触发验证**。
 
-**已接入的调用方**：`dsh-agent-emotion`（`refluxIfNewDay` 的两处调用点分别传 `exec.agent.session.id` 与 `session.id`）。**未接入**：skill-forge / taskboard（两处）/ evolution-core——接口向后兼容，未传即保持不盖，属**安全的渐进**而非破坏；追踪在 `lh-e503fb3c`。
+**已接入的调用方（三个）**：`dsh-agent-emotion`（`refluxIfNewDay` 两处分别传 `exec.agent.session.id` 与 `session.id`）· `dsh-agent-skill-forge`（`commit` 工具内传 `exec.agent?.session?.id`）· `dsh-agent-taskboard`（`rememberCompletion` 增可选参数，两条完成路径都传既有的 `callerSessionId(exec)`；远程路径无会话故不传）。**未接入**：`dsh-evolution-core`——接口已加可选槽并通过编译，但它的工具包装形态不是 `execute(args, exec)`（`grep` 不到），接线需先读懂它怎么取上下文，留给下一段；未传即保持不盖，属**安全的渐进**而非破坏。追踪在 `lh-e503fb3c`。
+
+**线上触发验证（2026-11-20 13:01，`taskboard` 路径，真库）**：发一条探针任务 → claim → complete，回流生成的条目带 **`evidenceRefs: ["session|session-cc8272d8-5195-4a34-a683-455cf5f12671|62545"]`** —— 事件级坐标带 seq，而**此前这类回流条目 `evidenceRefs` 是空的**。判据从「结构断言（A258）」推进到「线上可观测」，探针随后按验收纪律归档（凭证 `1313243b`）。
+⚠ 同一读数暴露一个**未修**的相邻缺口：`author` 仍然是 `undefined`——`author` 由工具层写，服务通道不写「谁调的」。归因与证据是两个字段（前者答「谁」，后者答「能去哪核」），本段只补了后者。
 
 **已知边界**：① 证据引用只覆盖 **21.1%**（写入纪律爬坡，存量不回填）；② 使用限制在本库零触发（不是「没做」）；③ `derived` 坐标在注入面同样只印 locator；④ **不做块级汇总页脚**（「本块 N 条未核」）——逐条标记已能表达同一事实，块级汇总会成为同一事实的第二落点。
 
