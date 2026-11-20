@@ -13,7 +13,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { evidenceRefsOfSessionId } from '../lib/index.js'
+import { evidenceRefsOfSessionId, authorOfSessionId } from '../lib/index.js'
 import { parseEvidenceRef } from '../lib/evidence.js'
 
 const SID = 'session-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
@@ -56,4 +56,39 @@ test('A258 服务接口接线：provide 里传 sessionId 且落库带 evidenceRe
   )
   // 反向：不许出现「取当前活跃会话」这类兜底——它会把写入记到别人身上
   assert.doesNotMatch(block, /agents\.list\(\)[\s\S]{0,200}sessionId/, '不得用活跃会话兜底（宁缺不猜）')
+})
+
+// ---------- A259 归属：与坐标同源，且只盖它知道的 ----------
+
+test('A259 authorOfSessionId：给了 sessionId 就盖，且只盖已知部分（不猜 preset / delegationDepth）', () => {
+  // ① 有 sessionId ⇒ 归属的**已知部分**
+  const a = authorOfSessionId(SID)
+  assert.deepEqual(a, { sessionId: SID })
+  // ② 不猜：服务通道不知道调用方是哪个 agent 预设、第几层委派 ⇒ 这两格必须**不出现**。
+  //    出现一个猜的值比留空更坏——它会看起来像一条真归因。
+  assert.equal('preset' in a, false, '不得猜 preset：调用方是插件，不是 agent 预设')
+  assert.equal('delegationDepth' in a, false, '不得猜委派深度')
+  // ③ 不给 / 空串 ⇒ undefined（宁缺不猜，与坐标同一条纪律）
+  assert.equal(authorOfSessionId(undefined), undefined)
+  assert.equal(authorOfSessionId(''), undefined)
+  // ④ **同源**：对同一个输入，归属与坐标必须同向（同存同缺）——
+  //    这是本判据的核心：两处若各自演化，同一条库里的归属精度会落后于坐标精度。
+  for (const input of [SID, undefined, '']) {
+    const hasRefs = evidenceRefsOfSessionId(input, () => 1) !== undefined
+    const hasAuthor = authorOfSessionId(input) !== undefined
+    assert.equal(hasAuthor, hasRefs, `归属与坐标必须同源（同存同缺）：input=${JSON.stringify(input)}`)
+  }
+})
+
+test('A259b 服务接口接线：author 由同一个入参派生，且真的并入 store.remember 草稿', () => {
+  const src = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8')
+  const provideAt = src.indexOf("ctx.provide('memoryApi'")
+  assert.ok(provideAt > 0, 'memoryApi 服务必须存在')
+  const block = src.slice(provideAt, provideAt + 4000)
+  assert.match(block, /authorOfSessionId\(input\.sessionId\)/, '必须由同一个入参派生归属')
+  assert.match(
+    block,
+    /\.\.\.\(author !== undefined \? \{ author \} : \{\}\)/,
+    '归属必须真的并入 store.remember 的草稿（只算不传 = 白算）',
+  )
 })

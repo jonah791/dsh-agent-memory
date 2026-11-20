@@ -63,6 +63,23 @@ export function evidenceRefsOfSessionId(
   return [formatEvidenceRef({ kind: 'session', sessionId, ...(seq !== undefined ? { seq } : {}) })]
 }
 
+/**
+ * 服务通道的归属（v0.62，**导出供测试直接校验**）：`author` 答「谁写的」，与
+ * {@link evidenceRefsOfSessionId} 的坐标**同源**——同一个 `input.sessionId`，两处都盖。
+ *
+ * 同源是判据不是巧合：v0.61 只补了坐标、没补归属，于是库里出现「能回原文查」但
+ * 「不知道谁写的」条目（第 54 段自己点名的相邻缺口）。两处若各自演化，同一条
+ * 库里的证据精度与归属精度会分叉。
+ *
+ * 服务通道只知道会话 id——调用方是插件、不是 agent 预设 ⇒ `delegationDepth` 与
+ * `preset` 一律留空。**不猜**：留空是「不知道」，填一个猜的比留空更坏
+ * （与 `evidenceRefsOfSessionId` 的 seq 同一条纪律）。
+ */
+export function authorOfSessionId(sessionId: string | undefined): Entry['author'] | undefined {
+  if (sessionId === undefined || sessionId === '') return undefined
+  return { sessionId }
+}
+
 /** 记忆条目 zod schema（storage-domain 持久化校验边界，对齐 types.ts Entry） */
 /**
  * 写入边界 schema（**导出供测试直接校验**）。
@@ -609,7 +626,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         // 生效时间（v0.24.0）：同走**容错归一**——服务通道不为标注字段阻塞调用方。
         const validAfter = normalizeValidAfter(input.validAfter)
         const evidenceRefs = evidenceRefsOfSession(input.sessionId)
-        const r = await store.remember({ kind, key: input.key, title, body, tags: input.tags ?? [], scope, level: null, bucket: null, ...(subject !== undefined ? { subject } : {}), ...(grounding !== undefined ? { grounding } : {}), ...(reviewAfter !== undefined ? { reviewAfter } : {}), ...(watchFor !== undefined ? { watchFor } : {}), ...(validAfter !== undefined ? { validAfter } : {}), ...(evidenceRefs !== undefined ? { evidenceRefs } : {}) })
+        // 归属（v0.62）：与坐标同源——同一个 `input.sessionId` 两处都盖，否则同一条库里的
+        // 归属精度会落后于坐标精度（第 54 段点名的相邻缺口）。
+        const author = authorOfSessionId(input.sessionId)
+        const r = await store.remember({ kind, key: input.key, title, body, tags: input.tags ?? [], scope, level: null, bucket: null, ...(subject !== undefined ? { subject } : {}), ...(grounding !== undefined ? { grounding } : {}), ...(reviewAfter !== undefined ? { reviewAfter } : {}), ...(watchFor !== undefined ? { watchFor } : {}), ...(validAfter !== undefined ? { validAfter } : {}), ...(evidenceRefs !== undefined ? { evidenceRefs } : {}), ...(author !== undefined ? { author } : {}) })
         return { id: r.id, action: r.action }
       } catch (err) {
         return { error: 'memoryApi.remember 失败: ' + String(err) }

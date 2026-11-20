@@ -1,0 +1,83 @@
+#AOCI-CODE-VOLUME: 1
+
+===/<repository>/===
+.gitattributes[FV5T]: F:强制全仓行尾为 LF，消除 checkout 时的 CRLF 改写 | R:- | A:- | S:本机 core.autocrlf=true 是 system 级设置，删掉本文件会让工作区文件在下次 checkout 被改写成 CRLF，而 DSH 插件生态按 LF 消费（BOM/CRLF 曾造成构建与测试假红）
+.gitignore[FV3T]: F:忽略 node_modules、构建产物 lib、编辑备份与检索评测数据 | R:- | A:- | S:recall-eval 数据含语料 token 不进公开仓；生产不依赖 lib 被追踪
+AGENTS.md[SG7S]: F:AOCI 会话合同与仓库认知使用规则的托管区块 | R:- | A:aoci_rules,aoci_overview,aoci_maintain,aoci_update_entry | S:本区块由 aoci init 生成，内容随时可从 aoci_rules 现取，归档副本会成第二真源；它不是本插件设计文档
+DESIGN.md[SG7M]: F:v0.1 设计定稿：设计总纲（程序只是工具，决策归智能体）+ 分层、作用域路由、存储、压缩通道 | R:code:IMPLEMENTATION.md | A:- | S:总纲是最高原则，任何实现取舍与它冲突时它优先；本文件是设计意图，工程契约在 IMPLEMENTATION.md
+IMPLEMENTATION.md[SG6S]: F:v0.1 实现规格：接口、格式、验收的唯一工程契约 | R:code:DESIGN.md | A:- | S:标注「取证」处要求实现者查证源码后自定，不许照抄猜测；文件自称 v0.1 MVP 完成，实际能力编号已远超它
+LICENSE[ZG2T]: F:MIT 许可声明 | R:- | A:- | S:版权人写的是 jonah791，公开仓据此发布
+README.md[SG7M]: F:插件对外契约：用途、工具表、配置、生效判据、回退，加生态公约声明头 | R:code:docs/semantic.md,code:cordis.patch.yml,code:package.json | A:- | S:声明头里 tools 列表与 package.json 的 dsh 段是两处载体，加工具时两处都要改；README 反引号里写出的测试文件名由 readme-claim-verify 门禁核对存在性
+cordis.patch.yml[FV6T]: F:bundle patch：把本插件与 storage 栈（storage→storage-json→storage-domain）挂进宿主组合 | R:code:package.json | A:- | S:包通过 package.json 的 dsh.bundle.patch 自挂载，宿主无需另行声明；storage-domain 的 root 用 dshHomePath('storages') 解析，改它会让既有库读不到
+dsh-plugin.json[FV3T]: F:社区插件清单：manifestVersion 0.1.0、id com.jonah791.agent-memory、宿主入口 lib/fabric.js | R:code:package.json | A:- | S:清单 version 0.24.0 落后包版本 0.32.0，不一致是既有状态
+package.json[FV6T]: F:包清单与 dsh bundle 入口；脚本、依赖、exports 声明 | R:code:cordis.patch.yml,code:README.md | A:- | S:version 0.32.0 是包语义版本，与 semantic.md 的能力编号 v0.61 不相等，引用能力时一律用能力编号；description 字段被当成变更日志逐版重写
+pnpm-workspace.yaml[FV4T]: F:禁止把 peerDependencies 装成真实副本（autoInstallPeers: false） | R:- | A:- | S:不能改用 .npmrc——pnpm 11.7 起不再从它读取该设置，两种写法实测均无效；被遮蔽的是宿主链接层，症状是新旧版本混搭
+tsconfig.json[FV4T]: F:TypeScript 编译配置：ES2022 加 NodeNext | R:- | A:- | S:module 与 moduleResolution 同为 NodeNext，改一个要一起改
+
+===/<repository>/docs/design/===
+aml-forget.md[SG5T]: F:方案 §10.4 遗忘传播的设计正本：九处传播面 × 本插件真实载体的边界裁决，含 §6.2 另三种派生形状（手写 derived-from / evidenceRefs 坐标 / 改写痕迹）的逐条裁决 | R:code:src/forget.ts,code:docs/semantic.md | A:- | S:边界裁决不是待办清单：先回答「哪些面真的拥有」再谈实现；不拥有却声称已传播与什么都没做同罪；三种未覆盖形状已逐个量过，零对象不等于对齐
+
+===/<repository>/docs/===
+semantic.md[SG9L]: F:本插件权威契约：定位与反定位、术语、概念模型与不变量、契约含调用点清单、边界与信任、可证伪验收、未决问题，十节齐全 | R:code:src/types.ts,code:src/tools.ts,code:README.md | A:semantic_check | S:每加一个数据字段或工具必须同步 output schema 共享常量与 entrySchema 声明，否则线上整条拒收（已发生八次）；「实践修订记录」节缺了会被 D6 判红；服务通道与工具通道共享同一份判据（坐标与归属都由同一个 sessionId 派生，改一处必须改另一处）；能力编号可能与正文脱节（v0.60 未使用、版本格曾停在 v0.59），引用前先核正文
+
+===/<repository>/scripts/===
+audit-retrieval.mjs[TQ7L]: F:检索面体检器：泛词门回归哨兵、placebo 四臂对照、recall 与 auto-inject 耗时基线 | R:code:src/search.ts,code:src/auto-inject.ts | A:node scripts/audit-retrieval.mjs [gate|ablation|timing|inject|all] | S:它是 v0.12「空结果自报 suppressedTerms」那处修复的回归哨兵；跑的是生产编译产物，改源码后不重编则测的是旧产物
+corpse-catalog.mjs[TQ5T]: F:catalog 段尸体验证驱动：改坏源码→重编→跑测试→数红→恢复 | R:code:src/catalog.ts | A:- | S:判据是每处改坏必须让至少一条测试变红，全绿说明该判据没有分辨力；跑完必须恢复源码，中断会留下改坏的树
+corpse-credibility.mjs[TQ5T]: F:credibility 段尸体验证驱动 | R:code:src/credibility.ts | A:- | S:第一具尸体是「proposed 判成 settled」，那是本模块最要紧的一格——我自己提的、主人没回应不等于已核验
+corpse-retention.mjs[TQ5T]: F:retention 段尸体验证驱动 | R:code:src/retention.ts | A:- | S:第一具尸体给 unknown 塞默认类别，验证「推不出就不推」这条纪律真的被测试守住
+diff-snapshot.mjs[TQ4T]: F:输出快照比对：等价性判据的比对端，自带 --selftest 尸体测试 | R:code:scripts/snapshot-output.mjs | A:node scripts/diff-snapshot.mjs <a.json> <b.json> | S:「差异 0」有三个来源——真等价、两份都空、比对根本没跑；没有 --selftest 就无法区分，而三种绿长得一样
+profile-top.mjs[TQ3T]: F:CPU profile 排行，按 self time 占总采样时间算 | R:- | A:node scripts/profile-top.mjs <file.cpuprofile> [topN] | S:分母必须含 GC 等无函数名样本，否则占比不可比；复测必须用同一解析器，口径不一致等于两次读数不同源
+snapshot-output.mjs[TQ4T]: F:输出快照取样端：对全库逐 target 跑 relatedOf 并落盘完整输出，供逐字段比对 | R:code:scripts/diff-snapshot.mjs,code:src/search.ts | A:node scripts/snapshot-output.mjs <输出路径> | S:取样必须含 ngrams() 的 1 字符退化边界（clean.length===1 返回单字符而非 2-gram），那是 relatedOf 缓存优化的等价性风险点，不覆盖等于没证
+
+===/<repository>/src/===
+access-trace.ts[MO7M]: F:侧车用量轨迹：记谁在何时读了哪些条目，补 u(x) 使用信号而不改条目 | R:code:src/audit.ts | A:appendAccessTrace,parseAccessRecords,summarizeAccessRecords,readAccessSummary | S:只追加（POSIX append 天然免锁、跨进程安全）；任何写失败只返回 false，绝不抛、绝不阻塞 recall；空 ids 也是合法记录，那是 v0.44 起唯一的失败样本来源
+actor-audit.ts[MO8L]: F:操作者审计流：五类动作与两类拒绝落侧车，让权限拒绝从布尔值变成可读事件 | R:code:src/role.ts,code:src/access-trace.ts | A:sanitizeActorAuditRecord,parseActorAudit,findBursts | S:最小化是硬约束——target 只放 id/计数/scope，不含正文、标题、查询词；只记异常面（放行不记、dryRun 不记、幂等不记）⇒ 拒绝总数是下界
+archive.ts[DD6M]: F:归档原因类型与来源类型的枚举归一，修掉「归档原因写进 source.reason」的字段语义错配 | R:code:src/types.ts,code:src/store.ts | A:archivalOf,archiveReasonLabel,archiveReasonTag,provenanceLabel,parseArchiveReasonTypeArg | S:归档原因曾是自由文本无法按类型查询，于是「我引用的那条为什么没了」在机制上答不了，只能逐条读正文猜；这正是本模块存在的理由
+audit.ts[DQ8L]: F:价值体检器（只读提案器）：承重引用、年龄、体量、标签复用、近重复五信号 → KEEP/DEMOTE/ARCHIVE/REVIEW 四档 | R:code:src/retention.ts,code:src/credibility.ts | A:auditMemory,scoreEntry,classify,duplicateClusters | S:提案 ≠ 裁决——不归档、不删除、不写库；分档顺序 REVIEW→KEEP→ARCHIVE→DEMOTE→KEEP 可复现；超预算概要只覆盖体量≥阈值那一截，6000-11999 之间的会滑到 KEEP 无人知会
+auto-inject.ts[AW8M]: F:自动 recall 注入：每条新主人消息到达时以消息文本为 query 跑 recall，把 top 命中注入批次末尾 | R:code:src/centroid.ts,code:src/inject.ts,code:src/search.ts,code:src/access-trace.ts | A:installAutoRecallInject,worthInjecting,buildAutoRecallDigest | S:注入走 tail append 而非开头，因为尾部追加对前缀缓存友好；触发需批次里存在真实主人消息（role=user 且 source.kind=user），缺这条会让工具回显也被当成查询
+catalog.ts[DD7M]: F:编目工作面（只读）：应编目分母、四维缺口、可机械覆盖上限；补的是存量而非写入闸 | R:code:src/credibility.ts,code:src/retention.ts | A:catalogReport,catalogGaps,clusterByTag,effectiveSources | S:主战场是存量——1700+ 应编目条目对每天几十条增量，从今天起全编目也要近百天追平，所以先补让存量可作业那一层；按簇批量填类别会错一半，建议类别永不落库
+centroid.ts[KA6S]: F:上下文重心：把最近 K 轮消息合成加权词项集合，替代「最后一条消息字面」作为检索查询 | R:code:src/auto-inject.ts | A:buildCentroid,recentTurnTexts | S:动机有实测反例——重启唤醒消息按字面召回的三条记忆全与当轮意图无关（双重重启事故/守护协议/哨兵拦截）
+compaction-sink.ts[AM8M]: F:压缩即记忆：订阅会话事件流，把成功压缩的 checkpoint 保底存档为情景记忆并投递 inbox 通知 | R:code:src/evidence.ts,code:src/tools.ts | A:installCompactionSink,describeSinkError,dayStampOf | S:通知 wakeup=true 自动送达，把「提炼与否、如何组织」的决策权交还给爱丽丝，机制不替她决定；source.reason 记理由，那是压缩路径唯一的动机留痕
+compress-trace.ts[MO6M]: F:压缩流水线轨迹：记录这一轮扫描看到什么、压了什么、为什么没压 | R:code:src/compress.ts | A:appendCompressTrace,summarizeCompressTrace,readCompressSummary | S:它是「先补证据层再修业务逻辑」的产物——宿主 logger 不落盘，导致「断在哪一段」这个问题当时无法回答；跳过原因必须落盘，否则缺口回填会静默停摆
+config.ts[FC8L]: F:工作区 memory.yml 解析与默认值，含角色段与空间白名单 | R:code:src/role.ts,code:src/types.ts | A:loadMemoryConfig,parseMemoryConfig,resolveMemoryConfig,memoryConfigPath | S:文件缺失走缺省，文件存在但非法则 fail loud 抛错——绝不静默吞掉，否则配置写错会表现为「功能莫名不生效」；本模块是纯函数层，不依赖 Cordis 运行时以便离线单测
+consolidate.ts[KA6M]: F:知识提炼候选（只读）：按主题聚类并报证据量三要素，不生成任何条目 | R:code:src/catalog.ts | A:findConsolidationCandidates,spanDaysOf,isTopicTag | S:不生成知识是刻意的——归纳是判断归主体，且生成的知识条目会带来谁更新、谁撤回的整条传播问题；返回值无任何条目 id，结构上无法被当成已建关系；时间坐标标签按形态排除，否则会退化成流水账
+credibility.ts[DQ7M]: F:四维可信度读数（只读派生）：来源可靠性、抽取置信、核验状态、时效，四档之和恒等于分母 | R:code:src/catalog.ts,code:src/evidence.ts | A:credibilityOf,CredDimensionReport,CRED_DIMENSIONS | S:全部派生不加字段——memType 1.1%、space 1.2%、sourceIds 0.11% 三个先例证明新增可空字段必然不填；proposed 判 inconclusive、measured 判 selfVerified 且不计入 settled；刻意不合成总分
+dedupe-trace.ts[MO4T]: F:近重复处置轨迹的 IO 层 | R:code:src/dedupe.ts,code:src/access-trace.ts | A:appendDedupeTrace,readDedupeTrace | S:单独成文件的理由是纪律不是风格——dedupe.ts 是「什么算近重复」的判据单一真源，被 IO 污染后单测就得碰文件系统
+dedupe.ts[KQ5M]: F:近重复检测（纯逻辑）：强度为共享标签×3 加标题 gram×2 加正文 gram×1 | R:code:src/dedupe-trace.ts | A:findNearDuplicates,SimilarDisposition,NEAR_DUP_THRESHOLD | S:2026-11-12 已从写入路径下线——强度是绝对计数无分母，真阳性 P2b 得 7 分低于完全无关 N2 的 14 分，不存在能分开两者的阈值；别凭「它是个好想法」把它加回去
+entities.ts[DD7L]: F:实体权威档：同一现实对象的多种称呼收在一处，别名归一与词表同源，支持显式合并与停用不删除 | R:code:src/thesaurus.ts,code:src/store.ts | A:resolveName,mergeInto,entityKey,normalizeEntityName | S:同名可并存但必须写 disambiguation（不许因同名就合并）；解析返回候选列表加 ambiguous，程序不挑；名称反查必须用词边界——纯子串曾让别名 AML 命中 yaml，实测 5/5 假阳
+evidence.ts[DD6S]: F:证据维度：证据坐标的编码、解析与呈现（session|id|seq 与 compaction|id|cid） | R:code:src/types.ts,code:src/tools.ts,code:src/compaction-sink.ts | A:formatEvidenceRef,parseEvidenceRef,parseEvidenceRefsArg,evidenceTag | S:落盘是平级字符串数组而非嵌套对象——本仓 schema DSL 不支持嵌套（required 会被提成对象级、泛型推断退化），所以编解码集中在此、条目里只存字符串；本模块不做采集
+execution.ts[DD6M]: F:执行位置维：记录这条记忆在哪个项目、哪个任务里得到，是语义标记而非准入门槛 | R:code:src/types.ts,code:src/store.ts | A:- | S:主人 2026-11-15 定调「Project 不属于 Agent 也不属于 Session」；自动判定按会话 cwd 查项目注册表，命中才盖章、没命中留空不猜
+export.ts[DD6S]: F:记忆库导出：把可见面写成可移植 JSON 快照 | R:code:src/tools.ts | A:memory_export | S:落盘不回灌——18.5MB 实测塞进返回会撑爆一轮；L2/L3 缺省不导，因为导出后 role 与 includeSensitive 都不再生效
+fabric.ts[IV2T]: F:Fabric host 入口骨架，按 RFC 0001 §7.1 预留；无 SDK 时不可运行 | R:code:src/index.ts | A:activate | S:在此之前不得声称通过 Fabric conformance
+family.ts[KQ5S]: F:家族折叠：同一来源派生的多条记录压成一位，不让它们当多个独立证据占检索位 | R:code:src/search.ts | A:foldFamilies | S:论文原话「Repeated writes add records, not independent votes」；单独上线会把准确率从 0.825 打到 0.651，必须配当前事实优先
+forget.ts[DD8M]: F:遗忘传播的纯函数计划层：算出逐面传播计划，与实际「写什么」分离，使面完整性与未覆盖面可剥离单测 | R:code:src/store.ts,code:src/relations.ts | A:planForget,archiveRefDescendants | S:九处传播面里本插件只拥有四处的一部分，不拥有的三处每次都在反馈里点名——不拥有却声称已传播与什么都没做是同一种谎；刻意不做硬删除
+grounding.ts[DD8M]: F:约定状态维：区分「主人说过」与「我自己提的」，防止提议被当成授权执行 | R:code:src/sensitivity.ts | A:- | S:论文实测被保留的未接受提议 86–100% 被记成已确认信息，且给它更多内容反而放大未授权执行 ⇒ 我提的必须标 proposed
+index.ts[EG9L]: F:插件入口与组装：开存储域、建 store 与压缩器、注册工具、接线启动注入与压缩联动，并对外提供 memoryApi 回流服务 | R:code:src/tools.ts,code:src/store.ts,code:src/timeline.ts,code:src/inject.ts,code:src/compaction-sink.ts | A:name,inject,Config,apply,authorOfSessionId | S:函数插件形态无 default export；懒压缩钩子与周期补压各建一个压缩器实例，两者撞车靠 lock.ts 的按键串行锁兜住；memoryApi 的归属与坐标由同一个 sessionId 派生（v0.62），两处守卫逐字同构，只改一处会让归属精度落后于坐标精度
+inject-boundary.ts[MS7T]: F:注入面边界：中和四类控制标签、唯一块组装入口、数据定性声明 | R:code:src/inject.ts,code:src/auto-inject.ts | A:wrapInjectionBlock,neutralizeControlTags | S:先量后建——九类注入特征活库零命中，所以不做指令检测器；它让边界可见且不可伪造，不阻断执行
+inject.ts[AW8M]: F:启动注入：会话首个 pre-step 注入一次记忆速览——常驻层全量，轮廓层按预算截断 | R:code:src/inject-boundary.ts,code:src/timeline.ts | A:installStartupInject | S:只注入标题、时间、tags 线索，正文按需 recall；与 skill 目录注入同构
+lifecycle.ts[DD7M]: F:生命周期六态的唯一读取入口，优先级 deleted>archived>superseded>disputed>pending>active | R:code:src/types.ts,code:src/store.ts | A:lifecycleOf | S:存储只补 pending 与 disputed 两态，其余三态走既有载体——不为同一件事开第二个真源；pending 不进注入
+lock.ts[RR5T]: F:按键串行锁（进程内、跨实例共享），防止压缩临界区被并发穿透 | R:code:src/timeline.ts,code:src/periodic.ts | A:withKeyLock | S:来自生产事故：两入口各建压缩器，LLM 往返期间第二个调用者穿过检查，实测 4 对重复日桶
+map.ts[DA7L]: F:知识地图（只读派生）：方案七项逐条成维，每维自报可读性 measured/starved/absent | R:code:src/catalog.ts,code:src/search.ts | A:memory_map,buildMap | S:与 catalog 分工——那个报该补哪些字段（作业面），本节报知识长什么样（认知面），读数不可互替；候选关联永不落库
+memType.ts[DD7S]: F:内容分类维：七类内容性质，与 kind 存储粒度轴正交 | R:code:src/types.ts,code:src/retention.ts | A:- | S:与 kind 不可互替——kind 决定去重策略与压缩链参与方式，memType 决定内容性质；无默认值，推不出就不推
+misuse.ts[DQ8L]: F:R7 失效误用的严格上限：三层上限（自动注入零容忍、累计上限、滑动窗口泊松）与四档可分状态 | R:code:src/access-trace.ts,code:src/forward.ts | A:memory_misuse | S:上限拆三层是因为自动注入不经过我的判断；滑窗用泊松而非连续 N 次上升，因为读数由我手动触发、采样不等间隔；历史记录不可回溯时如实报可分辨度而不回填猜值
+origin.ts[DQ5T]: F:转述型无出处标记：标题形态像转述而缺出处时点名 | R:code:src/types.ts | A:- | S:危害不是记了笔记，是未来的我拿它当自己的判断用
+periodic.ts[RW7T]: F:周期补压：启动延迟首跑补历史缺口，加上周期轮询 | R:code:src/timeline.ts,code:src/lock.ts | A:installPeriodicCompress | S:v0.2 懒压缩的错误被静默吞掉导致日概要零产出，本机制是它的替代而不是补丁
+relations.ts[DD8L]: F:类型化关系层：十种边类型加四件元数据，边落独立表，条目一个字段都不加 | R:code:src/store.ts,code:src/types.ts | A:memory_link,memory_unlink,memory_relations | S:一条边的真值不随两端正文改写而消失，也不该由 tags 承载（无类型、无方向、无有效期）；退役不删除，supersedes 与 archiveRef 走派生视图
+retention.ts[DQ7M]: F:七类保留策略的后置修正层：不动分类判据，在其上按生效类别把档位往更需要人看的方向推 | R:code:src/memType.ts,code:src/audit.ts | A:memory_audit,memory_stats | S:实测 memType 1.1% 而 aliases 47.5%——分界是填了有没有后果；本模块职责是让填了改变什么，不是提醒人填
+role.ts[MI8L]: F:角色维度：归属与准入——读、写、改、管四档加空间白名单，拒绝从布尔改成可读的拒绝原因 | R:code:src/actor-audit.ts,code:src/space.ts | A:admitsEntry,rejectReason,filterRoleView | S:三档不能复用读闸——能读不等于能改；生产配置里 verifier 正是 read:[main]，复用会让验收方能删被验收方的记忆
+scene.ts[KA6S]: F:消息场景判据：chitchat/deictic/tracking/task 四类，决定 auto-recall 要不要注入 | R:code:src/auto-inject.ts,code:src/centroid.ts | A:classifyScene | S:12 条真实消息实测通过门槛仅 4/12，分场景差异极大；它是检索意图判据，不是记忆类型偏好
+scope.ts[RD6S]: F:作用域路由：workspaceId 解析与读写 scope 决策 | R:code:src/config.ts,code:src/store.ts | A:resolveWorkspaceScope | S:只依赖 exec.agent?.session.header.cwd 的鸭子类型，不 import harness 运行时以便离线单测
+search.ts[KA9L]: F:检索管道纯函数：过滤、IDF 与打分、排序、截断，含 v2 三层计价与共现加权 | R:code:src/types.ts,code:src/temporal-dual.ts,code:src/lifecycle.ts | A:recallEntries,browseEntries,relatedOf,relateClosure | S:排序在分数之后加「是否被替代」一档，否则同分时旧条目因先写入排前面；relatedOf 对每个结果遍历全库，是 recall 的主要耗时来源
+sensitivity.ts[DS8S]: F:敏感分级与隐私检查：形态硬闸（五类极窄凭据形态）、四档等级与调用规则 | R:code:src/types.ts,code:src/tools.ts | A:detectCredential,memory_stats | S:形态刻意极窄——宽形态在本语料假阳 100%；未标注按既有行为、不猜成 L2，因为错的代价不对称
+sources.ts[PD7M]: F:来源实体存储：独立 sources 表、SOURCE-0001 递增身份、七项字段 | R:code:src/store.ts,code:src/types.ts | A:memory_source,memory_sources | S:SourceStore 不提供条目反查——引用方在条目表里，两者职责分开；permissions 只存不判
+space.ts[DD7S]: F:空间归属维：四空间，回答这条知识属于谁的疆域 | R:code:src/scope.ts,code:src/types.ts | A:- | S:与 scope 正交不可推导——scope 是物理分区与准入，space 是知识归属；未标注不进任何空间
+store.ts[PD9L]: F:存储层：条目 CRUD、去重合并（L1 按 key 精确、L2/L3 按标题指纹）、归档不参与查重 | R:code:src/types.ts,code:src/scope.ts | A:MemoryStore | S:key 是 <scope>:<kind>:<id>；归档条目不参与查重——冷归档是保留但不活跃，新写入应新建而不是合并到它
+subject.ts[DD6S]: F:主体层：这条记忆关于谁（self / master / 通用），是语义标记不是准入 | R:code:src/role.ts,code:src/types.ts | A:- | S:与 role 正交——role 答谁写的，subject 答关于谁；它是可选筛子，不改变任何条目的可见性
+succession.ts[DD7M]: F:事实生命周期维：这条结论从何时开始为真，以及谁替代了谁 | R:code:src/types.ts,code:src/store.ts | A:- | S:压缩摘要是散文，T1→T2→T3 的更新关系在压缩时会被抹平；本模块是那两格的载体
+summarizer.ts[IG6M]: F:LLM 直调总结：增量组装、text-only 投影、失败 fail closed | R:code:src/timeline.ts | A:summarizeWithLlm | S:输入是可控文本因而不用 KV cache；error、aborted、max-tokens 一律 fail closed
+temporal-dual.ts[DD7M]: F:双时态：事件时间 occurredAt 与失效时刻 expiry，四轴两两不可合并 | R:code:src/temporal.ts,code:src/types.ts | A:expiryStateOf,parseTemporalArg | S:过期是派生读数不预存档位、不改生命周期、不自动归档；occurredAt 是我声明的事实，机制无法验证写错
+temporal.ts[DD8L]: F:时效维：复查死线 reviewAfter 与观察条件 watchFor，含四档 staleness | R:code:src/types.ts | A:stalenessOf,formatWatchFor | S:论文把决策有效性与证据新鲜度分开——新鲜度有指数天花板，决策时刻再新鲜也突破不了它；到期不等于作废，只表示该去核实
+thesaurus.ts[DG8L]: F:主题词表：概念独立成表，首选名、同义词、定义、上下位与变更记录，支持查询扩展 | R:code:src/store.ts,code:src/search.ts | A:memory_concept,memory_thesaurus | S:标签唯一空间——同 scope 归一后冲突整笔拒绝；停用不删除；下位反查派生（只存 broader）；概念 id 从 v0.57 起为全局唯一 CONCEPT 号
+timeline.ts[AW9L]: F:时间压缩线：日周月年桶算法、懒压缩触发、概要生成与 archiveRef 原料绑定 | R:code:src/summarizer.ts,code:src/lock.ts,code:src/store.ts | A:TimelineCompressor | S:桶全部基于本地时区（ISO 周周一起）；只压 L3 情景，global 不压缩；跨实例撞车由 lock 兜住
+tools.ts[EG9L]: F:工具注册：32 个工具的定义、参数 schema、执行与渲染 | R:code:src/search.ts,code:src/store.ts,code:src/types.ts | A:remember,recall,update,forget,memory_browse,memory_stats | S:加数据字段必须同步 output schema 共享常量与 entrySchema，否则线上整条拒收（已八次）；工具清单由契约解析并与工具面双向互锁，不手抄
+types.ts[DD9L]: F:数据契约：Entry、Source、Concept、Entity、Relation 的类型与 zod schema | R:code:src/temporal.ts,code:src/store.ts | A:entrySchema,sourceSchema,conceptSchema,entitySchema,relationSchema | S:仅含类型无运行时代码；时效档位定义住 temporal.ts 以免两处真源；revisions 必须在 entrySchema 声明，否则载入即被剥
