@@ -1559,7 +1559,7 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 
 **调用点清单**：`thesaurus.ts::nextId / planRenumber / renumberIds` · `entities.ts::rewriteTopicRefs` · `tools.ts::buildConceptRenumber` · `createMemoryTools`（工具面 32）· `README.md` 工具表（判据真源，`tests/tools.test.ts` 从它解析）
 
-**已知边界**：① 存量 10 个概念**尚未迁移**（工具已部署、`dryRun` 实测正常、迁移前快照已导出，等一个决策窗口）；② 事件 id 仍由宿主给定；③ 项目 id 来自 `dsh-project-state`；④ 关系 id 仍是 `<scope>:relation:<uuid>`，未纳入本轮。
+**已知边界**：① 存量 10 个概念**已于 2026-11-20 11:37 线上迁移完成**（`CONCEPT-0001..0010`、无重号、词表内与实体 `topics` 悬空 0、再跑幂等返回「无需迁移」；迁移前快照 `pre-concept-renumber-2026-11-20.json` 18,508,538 B 保留作回滚点，迁移前已核对「条目正文零处提到旧 uuid」）；② 事件 id 仍由宿主给定；③ 项目 id 来自 `dsh-project-state`；④ 关系 id 仍是 `<scope>:relation:<uuid>`，未纳入本轮。
 
 **为什么不做全库统一 ID 方案**：七类里四类（条目 / 关系 / 事件 / 项目）的 id 各有既有来源与消费者，统一编号会把「一个事实一个归宿」变成「一个方案一张 ID 表」；§6.3 的真实判据是「可口头引用」，逐类满足即可。
 
@@ -2244,7 +2244,7 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
     - **改动**：`thesaurus.ts` 增 `nextId`（全局唯一）/ `planRenumber`（只算不写）/ `renumberIds`；`entities.ts` 增 `rewriteTopicRefs`（跨表改 `topics`，支持 `dryRun`）；新工具 `memory_concept_renumber`（工具面 31 → 32）。能力编号 v0.56 → **v0.57**。测试 822/822 + 88 pass / 1 skip（`concept-ids.test.mjs` 9 条）。
     - **裁决「全局唯一」**：第一版写成「每 scope 各自归零」，**两条既有跨 scope 判据当场变红**——真因是 `find(id)` 全局按 id 查，同号跨 scope 让跨 scope 校验退化成「碰巧撞对」。uuid 时代这条不变量是免费的，换成可读号必须显式保证。⚠ 本轮最有价值的发现是**既有测试教给我的**，不是我想到的。
     - **裁决「迁移不走 `update`」**：`update` 的 `assertReferences` 会正确拒绝那个中间态，而它是一次必须发生的改写 ⇒ 显式命名的专用路径 + 先写新键再删旧键。
-    - **未验证风险**：① 存量 10 个概念**未迁移**（工具已部署、`dryRun` 实测正常、迁移前快照 18,508,538 B 已导出），等一个决策窗口；② 关系 id 未纳入；③ 事件 id 仍由宿主给定。
+    - **线上迁移已完成（11:37）**：10 个概念 → `CONCEPT-0001..0010`、无重号、词表内与实体 `topics` 悬空 0、再跑返回「无需迁移」；迁移前核对条目正文零处提到旧 uuid，快照 18,508,538 B 留作回滚点。**未验证风险**：① 关系 id 与事件 / 项目 id 未纳入；② 若将来另建 scope 并各自迁移，号段会按迁移顺序而非 scope 切分（全局唯一的代价）；③ 事件 id 仍由宿主给定。
 
 ## 10 · 未决问题
 
