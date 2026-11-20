@@ -27,6 +27,7 @@ import { installAutoRecallInject } from './auto-inject.ts'
 import { installCompactionSink } from './compaction-sink.ts'
 import { installPeriodicCompress } from './periodic.ts'
 import { loadMemoryConfig, memoryConfigPath } from './config.ts'
+import { formatEvidenceRef } from './evidence.ts'
 import { appendAccessTrace, appendJsonl, appendProposalRecord, readAccessIndex, readAccessRecords as readAccessRecordsFromTrace, readAccessSummary as readAccessSummaryFromTrace, readReviewMarks as readReviewMarksFromTrace } from './access-trace.ts'
 import { appendCompressTrace, readCompressSummary as readCompressSummaryFromTrace, type CompressTraceSink } from './compress-trace.ts'
 import { appendDedupeTrace, readDedupeTrace as readDedupeTraceFromSidecar } from './dedupe-trace.ts'
@@ -41,6 +42,26 @@ import { normalizeReviewAfter, normalizeWatchFor } from './temporal.ts'
 import { normalizeValidAfter } from './succession.ts'
 
 // ---------- 持久化域 ----------
+
+/**
+ * 服务通道的证据坐标（v0.61，**导出供测试直接校验**）。
+ *
+ * 只在调用方给了 `sessionId` 时才盖——**宁缺不猜**：服务接口无法知道「谁在调我」，
+ * 取「当前活跃会话」会把 A 会话的写入记到 B 身上，那比没有坐标更坏。
+ * 与工具通道的 `tools.ts::evidenceStampOf` **同源**（同一个 `formatEvidenceRef` + 同一个 seq 火线），
+ * 否则同一条库里的坐标精度会分叉。
+ * @param sessionId - 调用方显式给的会话 id；`undefined` / 空串 ⇒ 不盖
+ * @param resolveSeq - 「该会话最新事件号」查询（拿不到就只到会话级，不编造序号）
+ * @returns 可并入 EntryDraft 的 `evidenceRefs`；不盖时为 undefined
+ */
+export function evidenceRefsOfSessionId(
+  sessionId: string | undefined,
+  resolveSeq: (sessionId: string) => number | undefined,
+): string[] | undefined {
+  if (sessionId === undefined || sessionId === '') return undefined
+  const seq = resolveSeq(sessionId)
+  return [formatEvidenceRef({ kind: 'session', sessionId, ...(seq !== undefined ? { seq } : {}) })]
+}
 
 /** 记忆条目 zod schema（storage-domain 持久化校验边界，对齐 types.ts Entry） */
 /**
@@ -546,10 +567,27 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
   }
 
+  // 证据坐标（v0.25.0）：`ToolRunContext` 里没有事件号（2026-11-18 实测），
+  // seq 只能从会话火线观察 ⇒ 订阅一次，维护「每会话最新 seq」。
+  // 工具层写入时据此盖证据坐标（`tools.ts::evidenceStampOf`）；服务通道写入同样用它
+  // （v0.61，调用方显式传 `sessionId`）——**两处同源**，否则同一条库里的坐标精度会分叉。
+  // 精度说明见 `types.ts::EvidenceRef.seq`（答的是「写这条时对话进行到哪」，不是「这句出自哪条事件」）。
+  const lastSeqBySession = new Map<string, number>()
+  ctx.on('session/event', (session, event) => {
+    const seq = (event as { seq?: unknown }).seq
+    if (typeof seq === 'number') lastSeqBySession.set(session.id, seq)
+  })
+  const resolveEvidence: NonNullable<MemoryToolDeps['resolveEvidence']> = (sessionId) =>
+    lastSeqBySession.get(sessionId)
+
+  /** 服务通道的证据坐标（v0.61）：口径见模块级 {@link evidenceRefsOfSessionId} */
+  const evidenceRefsOfSession = (sessionId: string | undefined): string[] | undefined =>
+    evidenceRefsOfSessionId(sessionId, resolveEvidence)
+
   // 记忆回流服务提供（2026-09-06）：供 emotion/taskboard/evolution-core/skill-forge 注入消费。
   // 复用 store.remember（L1 key 覆盖 / L2/L3 指纹合并），容错返回 error 不抛。
   ctx.provide('memoryApi', {
-    async remember(input: { text: string; kind?: 'fact' | 'knowledge' | 'episodic'; tags?: string[]; key?: string; scope?: string; subject?: Subject; grounding?: Grounding; reviewAfter?: string; watchFor?: string[]; validAfter?: string }) {
+    async remember(input: { text: string; kind?: 'fact' | 'knowledge' | 'episodic'; tags?: string[]; key?: string; scope?: string; subject?: Subject; grounding?: Grounding; reviewAfter?: string; watchFor?: string[]; validAfter?: string; sessionId?: string }) {
       try {
         const text = (input.text ?? '').trim()
         if (text.length === 0) return { error: 'text 不能为空' }
@@ -570,7 +608,8 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
         const watchFor = normalizeWatchFor(input.watchFor)
         // 生效时间（v0.24.0）：同走**容错归一**——服务通道不为标注字段阻塞调用方。
         const validAfter = normalizeValidAfter(input.validAfter)
-        const r = await store.remember({ kind, key: input.key, title, body, tags: input.tags ?? [], scope, level: null, bucket: null, ...(subject !== undefined ? { subject } : {}), ...(grounding !== undefined ? { grounding } : {}), ...(reviewAfter !== undefined ? { reviewAfter } : {}), ...(watchFor !== undefined ? { watchFor } : {}), ...(validAfter !== undefined ? { validAfter } : {}) })
+        const evidenceRefs = evidenceRefsOfSession(input.sessionId)
+        const r = await store.remember({ kind, key: input.key, title, body, tags: input.tags ?? [], scope, level: null, bucket: null, ...(subject !== undefined ? { subject } : {}), ...(grounding !== undefined ? { grounding } : {}), ...(reviewAfter !== undefined ? { reviewAfter } : {}), ...(watchFor !== undefined ? { watchFor } : {}), ...(validAfter !== undefined ? { validAfter } : {}), ...(evidenceRefs !== undefined ? { evidenceRefs } : {}) })
         return { id: r.id, action: r.action }
       } catch (err) {
         return { error: 'memoryApi.remember 失败: ' + String(err) }
@@ -692,18 +731,6 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       return undefined
     }
   }
-
-  // 证据坐标（v0.25.0）：`ToolRunContext` 里没有事件号（2026-11-18 实测），
-  // seq 只能从会话火线观察 ⇒ 订阅一次，维护「每会话最新 seq」。
-  // 工具层写入时据此盖证据坐标；精度说明见 `types.ts::EvidenceRef.seq`
-  // （答的是「写这条时对话进行到哪」，不是「这句出自哪条事件」）。
-  const lastSeqBySession = new Map<string, number>()
-  ctx.on('session/event', (session, event) => {
-    const seq = (event as { seq?: unknown }).seq
-    if (typeof seq === 'number') lastSeqBySession.set(session.id, seq)
-  })
-  const resolveEvidence: NonNullable<MemoryToolDeps['resolveEvidence']> = (sessionId) =>
-    lastSeqBySession.get(sessionId)
 
   registerMemoryTools(ctx, { store, relations, concepts, entities, sources, loadConfig, compress, recompress, recordAccess, recordForget, recordAudit, readAudit, readAccess, readAccessSummary, readAccessRecords, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
 
