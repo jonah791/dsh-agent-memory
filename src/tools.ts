@@ -142,7 +142,7 @@ export interface MemoryToolDeps {
    * 侧车用量轨迹写入（v0.6；缺省不落盘）。
    * 实现方负责「只追加 / 吞错 / 按体积轮转」——工具层只负责把命中 id 交出去。
    */
-  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit' | 'browse'; role?: string; ids: string[]; includeArchive?: boolean }) => Promise<boolean> | void
+  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit' | 'browse'; role?: string; sessionId?: string; ids: string[]; includeArchive?: boolean }) => Promise<boolean> | void
   /**
    * 删除凭证（v0.36 · 方案 §10.4）：把一条 `ForgetCertificate` 追加进侧车。
    *
@@ -1340,10 +1340,17 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         // v0.46：记**最终生效的** `includeArchive`（不是调用方传参）——`status: ['archived']`
         // 会让它在 `args.includeArchive ?? wantsArchived` 里自动变成 true，而这类查询
         // 语义上就是「我要看归档的」。R7 靠这一格把「要求看归档」与「真误用」分开。
+        //
+        // v0.66：读取面的**会话归因**（方案 §11.4 第 5 条「哪个任务调用了记忆」）。
+        // 变更面的 `actor-audit` 早有 `actor.sessionId`，读取面此前只有 `role`——粗到无法
+        // 归属到一次会话。取不到就不给：**「不知道哪个会话」与「就是当前会话」必须可分辨**，
+        // 与 `viewerSessionId` 那条纪律同构（否则空值会被静默读成某个会话）。
+        const reader = sessionIdOf(exec as unknown as RoleCarrierLike)
         void deps.recordAccess({
           atMs: Date.now(),
           source: 'recall',
           role: view.role,
+          ...(reader !== undefined ? { sessionId: reader } : {}),
           ids: result.results.map((item) => item.id),
           includeArchive,
         })
@@ -2886,6 +2893,10 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
           atMs: Date.now(),
           source: 'browse',
           role: view.role,
+          // v0.66：会话归因（同 recall 侧；browse 的 ids 恒空，但「哪次会话翻了档案」仍要可查）
+          ...(sessionIdOf(exec as unknown as RoleCarrierLike) !== undefined
+            ? { sessionId: sessionIdOf(exec as unknown as RoleCarrierLike) }
+            : {}),
           ids: [],
           includeArchive,
         })

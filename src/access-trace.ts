@@ -45,6 +45,19 @@ export interface AccessRecord {
    * 历史记录，**不可分辨**（存量不回填，同 R1 事件级处理）。
    */
   includeArchive?: boolean
+  /**
+   * 读取这条的会话 id（v0.66 · 方案 §11.4 第 5 条「哪个任务调用了记忆」）。
+   *
+   * 为什么需要它：**变更面**的 `actor-audit` 早有 `actor.sessionId`（`findBursts` 正靠它按
+   * 会话分组做异常访问检测），而**读取面**此前只有 `role`——粗到无法归属到一次会话 ⇒
+   * 「谁在什么时候读了哪条」在读取侧答不了。方案第 5 条问的是「哪个任务」，任务是会话内的
+   * 概念，故 `sessionId` 就是这一格的正确载体（`taskId` 在读取面覆盖极低，用它会把
+   * 「没记」读成「没读」）。
+   *
+   * **可选、缺省不写**（与 `includeArchive` 同构的三态）：存量行没有这个字段，不回填不猜；
+   * 「取不到会话」与「就是当前会话」必须可分辨，否则空值会被静默读成某个会话。
+   */
+  sessionId?: string
 }
 
 /** 单行最多记多少个 id（防长文把轨迹撑爆） */
@@ -187,6 +200,10 @@ export async function appendAccessTrace(
     atMs: record.atMs,
     source: record.source,
     ...(record.role !== undefined && record.role.length > 0 ? { role: record.role } : {}),
+    // v0.66 会话归因：**这一格极易漏**——它是白名单裁剪，不在这里赋值的字段会被静默丢掉
+    // （调用方照常传、类型照样过、运行期直接消失）。这与 v0.63「加一档 source 要同改六处」
+    // 是同一形状：漏一处不报错，只是读数悄悄少一边。空串与缺失同处理，不写空值。
+    ...(record.sessionId !== undefined && record.sessionId.length > 0 ? { sessionId: record.sessionId } : {}),
     ...(record.includeArchive !== undefined ? { includeArchive: record.includeArchive } : {}),
     ids: record.ids.slice(0, MAX_IDS_PER_RECORD),
   }
@@ -215,7 +232,7 @@ export function parseAccessRecords(text: string): AccessRecord[] {
       continue
     }
     if (typeof record !== 'object' || record === null) continue
-    const r = record as { atMs?: unknown; source?: unknown; role?: unknown; ids?: unknown; includeArchive?: unknown }
+    const r = record as { atMs?: unknown; source?: unknown; role?: unknown; sessionId?: unknown; ids?: unknown; includeArchive?: unknown }
     if (!Array.isArray(r.ids)) continue
     const atMs = typeof r.atMs === 'number' && Number.isFinite(r.atMs) ? r.atMs : 0
     // 未知 source 归 'recall' 是既有容错（存量行没有 browse）。⚠ **新增一档必须同时改这里**：
@@ -228,6 +245,8 @@ export function parseAccessRecords(text: string): AccessRecord[] {
       atMs,
       source,
       ...(typeof r.role === 'string' && r.role.length > 0 ? { role: r.role } : {}),
+      // 会话归因（v0.66）：空串与缺失同处理——「取不到会话」不能被读成某个会话
+      ...(typeof r.sessionId === 'string' && r.sessionId.length > 0 ? { sessionId: r.sessionId } : {}),
       // 三态：只有真的是布尔才算「可分辨」——字符串 "true" 之类不猜
       ...(typeof r.includeArchive === 'boolean' ? { includeArchive: r.includeArchive } : {}),
       ids: r.ids.filter((id): id is string => typeof id === 'string' && id.length > 0),

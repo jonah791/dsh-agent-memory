@@ -257,3 +257,39 @@ test('B6b 没有拒绝时不写 permission 审计（只记异常面，不刷屏�
   assert.equal(auditRecords.filter((record) => record.action === 'permission').length, 0, '零拒绝 ⇒ 零审计记录')
   assert.equal(accessRecords.filter((record) => record.source === 'browse').length, 1, '但访问照记（分母与拒绝无关）')
 })
+
+test('B7 会话归因（v0.66 · 方案 §11.4 第 5 条）：有则读回，缺失与空串都不猜', () => {
+  const text = [
+    JSON.stringify({ atMs: 100, source: 'recall', sessionId: 'session-abc', ids: ['a'] }),
+    JSON.stringify({ atMs: 200, source: 'recall', ids: ['b'] }),
+    JSON.stringify({ atMs: 300, source: 'recall', sessionId: '', ids: ['c'] }),
+    JSON.stringify({ atMs: 400, source: 'auto', sessionId: 123, ids: ['d'] }),
+  ].join('\n')
+
+  const records = parseAccessRecords(text)
+  assert.equal(records.length, 4, '四种行都不得被丢（丢行会让审计面静默少证据）')
+  assert.equal(records[0].sessionId, 'session-abc', '正例：写进去的会话 id 要能读回')
+  assert.equal('sessionId' in records[1], false, '存量行：缺失就是缺失，不补空串——否则「不知道哪个会话」会被读成某个会话')
+  assert.equal('sessionId' in records[2], false, '空串与缺失同处理（取不到会话不该伪装成一个会话）')
+  assert.equal('sessionId' in records[3], false, '非字符串不猜（类型错了就是不知道）')
+
+  const summary = summarizeAccessRecords(text)
+  assert.equal(summary.lines, 4, '汇总照数')
+  assert.equal(
+    Object.keys(summary).some((k) => /session/i.test(k)),
+    false,
+    '汇总口径不该出现会话维度——会话归因是审计面的事，不是读数面；顺手加进去会让两个口径混成一处',
+  )
+})
+
+test('B8 写入侧的裁剪必须保留 sessionId（白名单裁剪是最容易漏的那一格）', async () => {
+  const p = tmpFile()
+  await appendAccessTrace(p, { atMs: 100, source: 'recall', role: 'main', sessionId: 'session-abc', ids: ['a'] }, 1_000_000)
+  const first = JSON.parse(readFileSync(p, 'utf8').trim().split('\n')[0])
+  assert.equal(first.sessionId, 'session-abc', 'appendAccessTrace 是白名单裁剪：调用方传了、类型也过了、不在这里赋值就运行期消失——B7 只测了读侧，漏了写侧')
+
+  // 空串不落盘（与 parse 侧、与 role 同纪律：不知道就不写，别伪装成一个值）
+  const p2 = tmpFile()
+  await appendAccessTrace(p2, { atMs: 100, source: 'recall', sessionId: '', ids: ['b'] }, 1_000_000)
+  assert.equal('sessionId' in JSON.parse(readFileSync(p2, 'utf8').trim().split('\n')[0]), false, '空串与缺失同处理')
+})
