@@ -20,8 +20,14 @@ import { appendFile, rename, stat, readFile } from 'node:fs/promises'
 /** 一行轨迹记录 */
 export interface AccessRecord {
   atMs: number
-  /** 来源：工具 recall / 自动注入 auto-recall */
-  source: 'recall' | 'auto' | 'audit'
+  /**
+   * 来源：工具 recall / 自动注入 auto-recall / 档案浏览 browse / 内部审计 audit。
+   *
+   * `browse` 是 v0.63 补的：此前 `memory_browse` 的**拒绝**进 `permission` 审计（分子），
+   * 它的**访问**却不进轨迹（分母）⇒ 「权限违规率」的分子分母不同口径、比率虚高。
+   * 补这一档是**修一处已经在错的读数**，不是扩张覆盖面。
+   */
+  source: 'recall' | 'auto' | 'audit' | 'browse'
   /** 调用者角色（v0.5；未知留空） */
   role?: string
   /** 命中条目 id（上限见 MAX_IDS_PER_RECORD） */
@@ -212,7 +218,12 @@ export function parseAccessRecords(text: string): AccessRecord[] {
     const r = record as { atMs?: unknown; source?: unknown; role?: unknown; ids?: unknown; includeArchive?: unknown }
     if (!Array.isArray(r.ids)) continue
     const atMs = typeof r.atMs === 'number' && Number.isFinite(r.atMs) ? r.atMs : 0
-    const source = r.source === 'auto' || r.source === 'audit' ? r.source : 'recall'
+    // 未知 source 归 'recall' 是既有容错（存量行没有 browse）。⚠ **新增一档必须同时改这里**：
+    // 写入侧写 `browse`、读取侧认不出而归成 `recall` ⇒ `recallCalls` 虚高、browse 踪迹消失，
+    // 两处读数一起错且都看起来正常（v0.63 改这一档时数出的第 2 个落点）。
+    const source = r.source === 'auto' || r.source === 'audit' || r.source === 'browse'
+      ? r.source
+      : 'recall'
     out.push({
       atMs,
       source,
@@ -235,6 +246,15 @@ export interface AccessSummary {
   autoCalls: number
   /** 主动检索次数 */
   recallCalls: number
+  /**
+   * 档案浏览次数（v0.63）。
+   *
+   * 单独成计而不并进 `recallCalls`：browse 是「按桶翻」，recall 是「按查询取」——前者必然
+   * 返回一大片、后者返回 top-N，命中语义不同；并进去会让「自动注入 / 主动检索」这个唯一
+   * 口径失去意义。它的用途是给**权限违规率**提供与 `permission` 审计里 `memory_browse`
+   * 拒因同口径的分母（此前分子有、分母无）。
+   */
+  browseCalls: number
   /** 去重后的命中条目数 */
   distinctIds: number
   /** 命中总次数（含重复命中） */
@@ -254,7 +274,7 @@ export interface AccessSummary {
 }
 
 export function summarizeAccessRecords(text: string): AccessSummary {
-  const out: AccessSummary = { autoCalls: 0, recallCalls: 0, distinctIds: 0, totalHits: 0, lastAtMs: 0, firstAtMs: 0, lines: 0 }
+  const out: AccessSummary = { autoCalls: 0, recallCalls: 0, browseCalls: 0, distinctIds: 0, totalHits: 0, lastAtMs: 0, firstAtMs: 0, lines: 0 }
   const ids = new Set<string>()
   for (const line of text.split('\n')) {
     const trimmed = line.trim()
@@ -273,6 +293,7 @@ export function summarizeAccessRecords(text: string): AccessSummary {
     if (atMs > 0 && (out.firstAtMs === 0 || atMs < out.firstAtMs)) out.firstAtMs = atMs
     if (r.source === 'auto') out.autoCalls += 1
     else if (r.source === 'recall') out.recallCalls += 1
+    else if (r.source === 'browse') out.browseCalls += 1
     if (!Array.isArray(r.ids)) continue
     for (const id of r.ids) {
       if (typeof id !== 'string' || id.length === 0) continue
@@ -289,7 +310,9 @@ export async function readAccessSummary(filePath: string): Promise<AccessSummary
   try {
     const text = await readFile(filePath, 'utf8')
     const summary = summarizeAccessRecords(text)
-    return summary.autoCalls + summary.recallCalls > 0 ? summary : undefined
+    // 三档任一见效即「有信号」——**只判 auto+recall 时**，一个只有 browse 访问的库会被判成
+    // 「从未检索过」。这与 v0.44「空结果恒 0.00%」同形：没记录被读成没发生（第 3 个落点）。
+    return summary.autoCalls + summary.recallCalls + summary.browseCalls > 0 ? summary : undefined
   } catch {
     return undefined
   }

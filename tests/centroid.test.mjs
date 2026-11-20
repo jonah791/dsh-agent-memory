@@ -157,19 +157,23 @@ test('A49 轨迹汇总：auto/recall 计数 + 去重命中 + 最近时刻；坏�
     '{ 坏行',
     JSON.stringify({ atMs: 300, source: 'recall', ids: ['b'] }),
     JSON.stringify({ atMs: 200, source: 'auto', ids: [] }),
+    JSON.stringify({ atMs: 400, source: 'browse', ids: [] }),
   ].join('\n')
   const s = summarizeAccessRecords(text)
   assert.equal(s.autoCalls, 2)
   assert.equal(s.recallCalls, 1)
+  // v0.63：browse 独立成计——解析侧若把它归成 recall，这一条会红（串档哨兵）
+  assert.equal(s.browseCalls, 1, 'browse 必须独立计数，不得归进 recall')
   assert.equal(s.distinctIds, 2)
   assert.equal(s.totalHits, 3)
-  assert.equal(s.lastAtMs, 300)
+  assert.equal(s.lastAtMs, 400)
   // v0.45 补：首条时刻是「从未被检索」这类读数的下界（390 行前它不存在，故此刻补断言）
   assert.equal(s.firstAtMs, 100, '首条必须是最早那条（300 是最后一条），否则「从未」没有下界')
-  assert.equal(s.lines, 3, '坏行不计数；空 ids 的行算有效记录（它是合法调用）')
+  assert.equal(s.lines, 4, '坏行不计数；空 ids 的行算有效记录（它是合法调用）')
   assert.deepEqual(summarizeAccessRecords(''), {
     autoCalls: 0,
     recallCalls: 0,
+    browseCalls: 0,
     distinctIds: 0,
     totalHits: 0,
     lastAtMs: 0,

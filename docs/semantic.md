@@ -286,7 +286,9 @@ usage   = 排序加权归因 Σ decay^pos（v0.12；无轨迹 ⇒ 恒 0，公式
 
 **输出形状**：`memory_audit({ scope?, role?, topN?, minChars?, includeArchive? })` → `{ summary: { total, chars, byBucket, charsByBucket }, groups: [{ key, kind/level/tag, count, chars, bucket }], candidates: [{ id, kind, title, bucket, score, reasons[], evidence }], notes[] }`。
 
-**逻辑轨迹（侧车，v0.6 起采集）**：`<DSH_HOME>/memory-access-trace.jsonl` —— 一行一次**检索调用**（v0.44 起含空结果）：`{atMs, source:'recall'|'auto', role, ids:[…]}`，`ids` **可以为空数组**。写入**只追加**（POSIX append，天然免锁）、**吞错**（失败即跳过，不影响 recall）、**按体积轮转**（超 `access_trace.max_bytes` 改名为 `.1` 重开），**绝不改条目**。审计器只读它，缺文件 ⇒ `usage=0`。
+**逻辑轨迹（侧车，v0.6 起采集）**：`<DSH_HOME>/memory-access-trace.jsonl` —— 一行一次**检索调用**（v0.44 起含空结果）：`{atMs, source:'recall'|'auto'|'audit'|'browse', role, ids:[…]}`，`ids` **可以为空数组**。写入**只追加**（POSIX append，天然免锁）、**吞错**（失败即跳过，不影响 recall）、**按体积轮转**（超 `access_trace.max_bytes` 改名为 `.1` 重开），**绝不改条目**。审计器只读它，缺文件 ⇒ `usage=0`。
+
+⚠ **`browse` 档的 `ids` 恒为空数组**（v0.63）：`memory_browse` 是「按桶翻全库」，一次能命中成百上千条；把前 30 条记成命中会让 `hits` / `attributed` 把「翻到过」算成「被检索命中」，污染整个用量归因。空数组只让**调用次数**这个分母变真。它存在的理由是方案 §11.4 的**分子分母同口径**：browse 的拒绝从 v0.37 起就进 `permission` 审计，而访问此前不进轨迹 ⇒ 比率虚高（详见 §5.30 与 `docs/design/aml-audit.md` §3）。
 
 ⚠ **「一行一次调用」而不是「一行一次命中」（v0.44 修）**：旧契约写的是「一行一次**读命中**」，实现据此在两条写入口都加了 `results.length > 0` / `hitIds.length > 0` 的过滤 ⇒ **空结果从不落盘**，侧车里 0 条失败样本，「检索失败原因」（方案 §16.3）因此结构性地无法计算。这是「读数层缺陷」的第五次同形，且**这次是契约措辞造成的**：措辞决定了实现边界，而不是实现漏了一步。⇒ 判据 A207。
 
@@ -952,6 +954,8 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 **最小化**：字段白名单（`sanitizeActorAuditRecord` 在**写入前**裁剪，不靠埋点自觉）；`target` 只有 `id` / `ids` / `count` / `scope`——**无正文、无标题、无查询词**；`code` 只放判据码或短枚举，用户给的 `reason` 归凭证与 `archivedReason`；`ids` 截断到 20 条而 `count` 不截断（数组截断只影响可读性，计数是汇总口径）。
 
 **只记异常面**：放行**不记**（放行是默认）；`forget({dryRun})` **不记**（没改变任何东西）；`memory_link` 幂等命中与 `memory_unlink` 二次退役**不记**。判据一句话——**审计的触发条件 = 状态确实变了，或确实被拒了**。权限拒绝的埋点只挂在主检索面（`recall` / `memory_browse`）：`gatherReadable` 被十五处共享，每处都记会让它变成没人读的洪水。
+
+⚠ **拒绝的分子必须配同范围的分母**（v0.63 · 判据 A239）：`permission` 记录的「拒绝条数」是**分子**，`access-trace` 的「调用次数」是**分母**。此前 `memory_browse` 只进分子不进分母 ⇒ 「权限违规率」虚高，而两个读数各自看起来都正常。修法是给轨迹加 `source='browse'` 一档。**这不是「覆盖窄（下界）」，是口径不一致**——下界只让数偏小，不一致让数直接错。三处派生取数（`stats` / `catalog` / `map` 等）仍不记拒绝：它们返回的是**读数**而非内容，分母本就只在可见面上算，被挡在外的条目不是「拒绝」而是分母口径本身。
 
 **三个零必须分清**：`wired=false`（未接线，读不到）· `wired=true, total=0`（接了线但还没有任何事件，**不是零违规**）· `total>0, rejected=0`（有动作、无拒绝）。三种在 `memory_trail` 的 render 与 `memory_stats.audit` 块里各有文案。
 
@@ -1794,6 +1798,7 @@ E3 与长度归一的关键区别：长度归一是**连续缩放**（对所有�
 | A236 | ★**注入速览带证据**（v0.59 · 方案 §8.5）：带 `evidenceRefs` 的条目行印 `⚓`，同会话省会话号、异会话/未给时印短号；**无坐标的条目行形状逐字不变**（尸体样本） | `tests/inject.test.mjs` I1–I3 | ✔ 已实测（单测；变异：写死印号 ⇒ 红 I1，写死省号 ⇒ 红 I2，无条件打标 ⇒ 红 I3） |
 | A237 | ★**自动召回面同一形状**（v0.59）：`buildAutoRecallDigest` 同样印 `⚓`（每条主人消息都跑的路径），无坐标不打 | `tests/auto-inject.test.mjs` I4–I5 | ✔ 已实测（单测；变异：不传 `currentSessionId` ⇒ 红 I4） |
 | A238 | ★**有效时间进注入面**（v0.59 · 方案 §8.5）：`validAfter` 有值时行尾印 `[自 <日期> 起成立]`，无值不印 | `tests/inject.test.mjs` I6 | ✔ 已实测（单测；变异：无条件印 ⇒ 红 I6 下半） |
+| A239 | ★**拒绝的分子配同范围的分母**（v0.63 · 方案 §11.4）：`memory_browse` 的拒绝进 `permission` 审计（`tool='memory_browse'`，计数为真）**且**同一次调用落一条 `source='browse'`、`ids` 恒空的轨迹；`browse` 行**不得**被解析归成 `recall`（否则 `recallCalls` 虚高而 browse 消失，两数一起错）：只有 browse 记录时 `readAccessSummary` 仍返回读数（≠ v0.44「空结果恒 0.00%」同形错误）；`access_trace.enabled=false` 时零写入。⚠ 未知 source 在**序列解析**里归 recall、在**汇总层**不进任何 calls——这个不对称是既有行为，用判据钉住防止「顺手统一」时静默改口径 | `tests/access-trace.test.mjs` B1–B6（8 条） | ✔ 已实测（单测，含反向断言；变异：解析侧不加 `browse` 分支 ⇒ 红 B2/B3；埋点不传 ⇒ 红 B1/B6；`ids` 记成真实命中 ⇒ 红 B1/B5） |
 | A223 | ★**批量合并去重取最短深度**（v0.54）：两个目标共享同一后代 ⇒ 清单按 id 去重、`depth` 取小、`derived` 面计数等于去重后条数（不是各目标计数之和） | 同文件「F5」 | ✔ 已实测 |
 | A163 | ★**载入边界不得剥掉 `revisions`**（v0.52 · 线上实调抓到的 v0.9 遗留缺陷）：`entrySchema.parse()` 后 `revisions`（含 `prevBody`）全部存活；同一条同时验证「未声明字段确实会被剥」这一机制仍在 ⇒ 判据不是假想。**为什么单测长期全绿**：它们直接调 `execute()`，绕过了写入/载入边界的 schema 校验这一跳 | 同文件「A163」 | ✔ 已实测（线上复验：补声明并重启后，老条目 `dca260c2` 从「不印」变为「印 `⟲修订1次`」） |
 | A205 | ★**分项相加 ≠ 净排除**：`excluded` 新增 `considered` 与 `net`；`net` 必须由「全量 − 分母」算，**不能**用四项相加——一条已归档的 summary 会同时进 `archived` 与 `summary`（线上实测重叠 **424** 条：净排除 1328 vs 四项相加 1752）。渲染并列四个分项时必须同时出现「不可相加」与「交集」 | `tests/catalog.test.mjs`「C1c」「C12」 | ✔ 已实测（单测；尸体：把 `net` 改成四项相加 ⇒ **只有 C1c 红**，C12 因样本无排除项而恒成立、不红——这条边界已写进判据注释，防止未来的我把它当成覆盖了自洽性） |

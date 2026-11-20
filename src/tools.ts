@@ -142,7 +142,7 @@ export interface MemoryToolDeps {
    * 侧车用量轨迹写入（v0.6；缺省不落盘）。
    * 实现方负责「只追加 / 吞错 / 按体积轮转」——工具层只负责把命中 id 交出去。
    */
-  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[]; includeArchive?: boolean }) => Promise<boolean> | void
+  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit' | 'browse'; role?: string; ids: string[]; includeArchive?: boolean }) => Promise<boolean> | void
   /**
    * 删除凭证（v0.36 · 方案 §10.4）：把一条 `ForgetCertificate` 追加进侧车。
    *
@@ -2861,6 +2861,23 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       const byId = new Map(entriesByExpiry.map((entry) => [entry.id, entry]))
       // 与 recall 同一个出口、同一条判据（v0.58 · §12.1）：两个界面同一事实不能长得不一样
       const viewer = sessionIdOf(exec as unknown as RoleCarrierLike)
+      // 侧车用量轨迹（v0.63 · 方案 §11.4）：**访问与拒绝必须同口径**——此前 browse 的拒绝
+      // 进 `permission` 审计（分子）而访问不进轨迹（分母），于是「权限违规率」的分子数得到、
+      // 分母数不到，比率虚高。补这一条是修一处已经在错的读数。
+      //
+      // ⚠ **`ids` 刻意留空**：browse 是「按桶翻全库」，一次能命中成百上千条；把前 30 条记成
+      // 命中会污染 `parseAccessTrace` 的用量归因（`hits` / `attributed` 是「被检索返回过几次」，
+      // 而 browse 的返回不是「这条被查到」）。空数组是合法记录（v0.44）——它让**调用次数**
+      // 这个分母变真，同时不动归因口径。
+      if (config.audit?.accessTrace?.enabled === true && deps.recordAccess !== undefined) {
+        void deps.recordAccess({
+          atMs: Date.now(),
+          source: 'browse',
+          role: view.role,
+          ids: [],
+          includeArchive,
+        })
+      }
       return {
         groups: result.groups.map((group) => ({
           ...group,
@@ -4517,6 +4534,7 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
           roleReason: { type: 'string', required: true },
           autoCalls: { type: 'integer', required: true },
           recallCalls: { type: 'integer', required: true },
+          browseCalls: { type: 'integer', required: true },
           distinctHits: { type: 'integer', required: true },
           lastAccessAt: { type: 'string', required: true },
           compressScans: { type: 'integer', required: true },
@@ -4530,7 +4548,7 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
       },
       render: (_args, value) => [{
         type: 'text',
-        text: `记忆插件健康：${value.ok ? '正常' : '异常'}（共 ${value.total} 条 / 归档 ${value.archiveCount}；注入 ${value.injectEnabled ? '开' : '关'}）｜角色 ${value.role}（${value.rolesEnabled ? '角色维度已启用' : '角色维度未启用→零过滤'}；判据：${value.roleReason}）｜命中率信号：注入 ${value.autoCalls} 次 / 主动检索 ${value.recallCalls} 次 / 命中条目 ${value.distinctHits} 条${value.lastAccessAt.length > 0 ? `（最近 ${value.lastAccessAt}）` : ''}｜压缩流水线：扫描 ${value.compressScans} 次 / 压缩 ${value.compressUnits} 单元 / 最近待压 ${value.compressPendingLast}${value.compressErrors > 0 ? ` / 错误 ${value.compressErrors}` : ''}${value.compressLastAt.length > 0 ? `（最近 ${value.compressLastAt}）` : ''}｜非待压判定：${value.compressSkippedText}${value.compressSampleText.length > 0 ? `\n候选样本（非待压）：${value.compressSampleText}` : ''}`,
+        text: `记忆插件健康：${value.ok ? '正常' : '异常'}（共 ${value.total} 条 / 归档 ${value.archiveCount}；注入 ${value.injectEnabled ? '开' : '关'}）｜角色 ${value.role}（${value.rolesEnabled ? '角色维度已启用' : '角色维度未启用→零过滤'}；判据：${value.roleReason}）｜命中率信号：注入 ${value.autoCalls} 次 / 主动检索 ${value.recallCalls} 次 / 档案浏览 ${value.browseCalls} 次 / 命中条目 ${value.distinctHits} 条${value.lastAccessAt.length > 0 ? `（最近 ${value.lastAccessAt}）` : ''}｜压缩流水线：扫描 ${value.compressScans} 次 / 压缩 ${value.compressUnits} 单元 / 最近待压 ${value.compressPendingLast}${value.compressErrors > 0 ? ` / 错误 ${value.compressErrors}` : ''}${value.compressLastAt.length > 0 ? `（最近 ${value.compressLastAt}）` : ''}｜非待压判定：${value.compressSkippedText}${value.compressSampleText.length > 0 ? `\n候选样本（非待压）：${value.compressSampleText}` : ''}`,
       }],
     },
     async execute(args, exec) {
@@ -4560,6 +4578,7 @@ function buildHealth(deps: MemoryToolDeps): ToolDefinition {
         roleReason: view.reason,
         autoCalls: summary?.autoCalls ?? 0,
         recallCalls: summary?.recallCalls ?? 0,
+        browseCalls: summary?.browseCalls ?? 0,
         distinctHits: summary?.distinctIds ?? 0,
         lastAccessAt: summary !== undefined && summary.lastAtMs > 0
           ? new Date(summary.lastAtMs).toISOString().slice(0, 19)

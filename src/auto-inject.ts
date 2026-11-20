@@ -52,7 +52,7 @@ export interface AutoRecallInjectDeps {
   store: MemoryStore
   loadConfig: (workspaceRoot: string) => Promise<MemoryConfig> | MemoryConfig
   /** 侧车用量轨迹写入（v0.6；缺省不落盘）。吞错由实现方负责——注入绝不能因它失败 */
-  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit'; role?: string; ids: string[]; includeArchive?: boolean }) => Promise<boolean> | void
+  recordAccess?: (record: { atMs: number; source: 'recall' | 'auto' | 'audit' | 'browse'; role?: string; ids: string[]; includeArchive?: boolean }) => Promise<boolean> | void
 }
 
 /** snippet 最大长度（字符） */
