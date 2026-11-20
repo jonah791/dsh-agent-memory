@@ -1024,6 +1024,11 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
         additionalProperties: false,
         properties: {
           total: { type: 'integer', required: true },
+          viewerSessionId: {
+            type: 'string',
+            description:
+              'v0.58 · 方案 §12.1：读这条时的会话 id（渲染层据此判断证据出处里**要不要印会话号**）。**一般不出现**——只有插件能从会话火线取到 id 时才带；缺它时证据标记一律印短号（不省），因为「不知道当前会话」与「就是当前会话」是两件事。',
+          },
           familyNote: {
             type: 'string',
             description:
@@ -1153,7 +1158,7 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
           const provenanceNote = provenanceTag(item.provenance)
           // 证据标记（v0.25.0）：`⚓会话@33847` = 这条能回到该会话的那个事件位置。
           // 放在权威簇里（紧邻 provenance）：provenance 答「谁说的」，它答「去哪核」。
-          const evidenceNote = evidenceTag(item.evidenceRefs)
+          const evidenceNote = evidenceTag(item.evidenceRefs, { currentSessionId: value.viewerSessionId })
           // 内容分类标记（v0.26.0）：`·语义` 拼进元数据方括号；未分类留空（标记要挑着打）
           const memTypeNote = memTypeTag(item.memType)
           // 归档标记（v0.21.0）：只在**结论已不能用**的原因上打（`[被证伪]` / `[被取代]` /
@@ -1333,8 +1338,13 @@ function buildRecall(deps: MemoryToolDeps): ToolDefinition {
       }
       // 扩展词只在真发生时出现（省略 ≠ 空数组：没开就是没开，不是「扩展了 0 个词」）
       const withExpanded = expandedTerms.length > 0 ? { ...audited, expandedTerms } : audited
+      // 读这条时的会话 id（v0.58 · 方案 §12.1）：屏幕上的证据标记靠它判断「要不要印会话号」。
+      // **给了才省**（同会话时省 8 字符）；取不到就不给，渲染层退化为「一律印短号」——
+      // 「不知道当前会话」与「就是当前会话」必须可分辨，否则省 id 会变成静默错读。
+      const viewer = sessionIdOf(exec as unknown as RoleCarrierLike)
+      const withViewer = viewer !== undefined ? { ...withExpanded, viewerSessionId: viewer } : withExpanded
       // 实体命中同理：没命中就不出现（省略 ≠ 空数组）
-      return matchedEntities.length > 0 ? { ...withExpanded, matchedEntities } : withExpanded
+      return matchedEntities.length > 0 ? { ...withViewer, matchedEntities } : withViewer
     },
   })
 }
@@ -2680,6 +2690,11 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
         type: 'object',
         additionalProperties: false,
         properties: {
+          viewerSessionId: {
+            type: 'string',
+            description:
+              'v0.58 · 方案 §12.1：同 recall——读这条时的会话 id（证据出处省略会话号的依据）。缺它时一律印短号。',
+          },
           groups: {
             type: 'array',
             required: true,
@@ -2746,7 +2761,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
               const provenanceNote = provenanceTag(item.provenance)
           // 证据标记（v0.25.0）：`⚓会话@33847` = 这条能回到该会话的那个事件位置。
           // 放在权威簇里（紧邻 provenance）：provenance 答「谁说的」，它答「去哪核」。
-          const evidenceNote = evidenceTag(item.evidenceRefs)
+          const evidenceNote = evidenceTag(item.evidenceRefs, { currentSessionId: value.viewerSessionId })
           // 内容分类标记（v0.26.0）：`·语义` 拼进元数据方括号；未分类留空（标记要挑着打）
           const memTypeNote = memTypeTag(item.memType)
               const archiveNote = archiveReasonTag(item.archivedReasonType)
@@ -2844,6 +2859,8 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
       // 结果里补 label；「谁能读这条」与 recall 同一出口、同一判据（v0.52 · §12.1）——
       // 两个界面同一事实不能长得不一样（渲染纪律：semantic.md「渲染纪律」段明列 browse 为触发点）。
       const byId = new Map(entriesByExpiry.map((entry) => [entry.id, entry]))
+      // 与 recall 同一个出口、同一条判据（v0.58 · §12.1）：两个界面同一事实不能长得不一样
+      const viewer = sessionIdOf(exec as unknown as RoleCarrierLike)
       return {
         groups: result.groups.map((group) => ({
           ...group,
@@ -2851,6 +2868,7 @@ function buildBrowse(deps: MemoryToolDeps): ToolDefinition {
           items: attachReadableBy(group.items, byId, config),
         })),
         total: result.total,
+        ...(viewer !== undefined ? { viewerSessionId: viewer } : {}),
       }
     },
   })
