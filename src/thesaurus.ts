@@ -35,7 +35,6 @@
  * 纯函数 + 单表存储，不依赖 Cordis / fs（离线可测：tests/thesaurus.test.mjs）。
  */
 
-import { randomUUID } from 'node:crypto'
 import type { Concept, ConceptRevision } from './types.ts'
 
 /** 每个概念保留的变更记录条数（全历史在提交里；存储只留最近几条解释「怎么变成现在这样」） */
@@ -240,6 +239,116 @@ export class ConceptStore {
   }
 
   /**
+   * 分配下一个可读 id（`CONCEPT-0001` 形态 · 方案 §6.3「统一资源标识符」）。
+   *
+   * 为什么不是 uuid：与 `ENTITY-0001` / `SOURCE-0001` 同一条理由——人要能口头引用
+   * 「把 CONCEPT-0007 的上位改掉」，而一串 uuid 不可口述、也不可肉眼比对。
+   *
+   * ## ⚠ 必须**全局唯一**，不是每 scope 归零
+   *
+   * 第一版写成「每 scope 各自从 0001 起」，**两条既有跨 scope 判据当场变红**
+   * （`thesaurus.test.mjs` T3 与 `entities.test.mjs` E7 的「引用不能跨 scope」不再拒绝）。
+   * 真因在解析层：`find(id)` 是**全局按 id 查**，`assertReferences` 再校验 `concept.scope === scope`——
+   * 若两个 scope 都有 `CONCEPT-0001`，find 返回哪一个取决于遍历顺序，跨 scope 校验就退化成
+   * 「碰巧撞对」。uuid 时代这条不变量是**免费**的（碰撞概率为零），换成可读号就必须**显式**保证。
+   *
+   * ⇒ 与 `EntityStore.nextId` 同一条路（扫全局 max + 防撞），而不是学 `SourceStore`。
+   * 我上一版注释批评 entities「编号不可复现」是错的：那是刻意的取舍——**可读 id 的可解析性
+   * 优先于号段整齐**。
+   */
+  private nextId(): string {
+    const taken = new Set<string>()
+    let max = 0
+    for (const concept of this.all()) {
+      taken.add(concept.id)
+      const matched = /^CONCEPT-(\d+)$/.exec(concept.id)
+      if (matched !== null) max = Math.max(max, Number(matched[1]))
+    }
+    let next = max + 1
+    let candidate = `CONCEPT-${String(next).padStart(4, '0')}`
+    while (taken.has(candidate)) {
+      next += 1
+      candidate = `CONCEPT-${String(next).padStart(4, '0')}`
+    }
+    return candidate
+  }
+
+  /**
+   * 把某 scope 内**非** `CONCEPT-nnnn` 形态的概念 id 改成可读 id（方案 §6.3 迁移路径）。
+   *
+   * ## 为什么单独一个方法，不走 `update`
+   *
+   * `update` 会跑 `assertReferences`（引用必须指向已存在的概念）——而迁移的过程中
+   * 「旧 id 已消失、新 id 刚出现」，任何一侧都暂时不满足，那条断言会正确地拒绝一次
+   * **必须发生**的改写。所以这是显式命名的原子迁移路径，同时改三类东西：
+   * ① 存储 key ② 概念自身 `id` ③ 本表内的 `broader` / `related` 引用。
+   *
+   * **跨表引用（实体的 `topics`）不在这里**：`ConceptStore` 不知道实体表，由调用方拿返回的
+   * 映射去 `EntityStore.rewriteTopicRefs`——两条都做完才叫「零悬空」。
+   *
+   * 分配的确定性：按 `createdAt`（并列按 id 字典序）升序编号，同一份数据重跑得同一结果；
+   * 已是可读 id 的**不动**（所以幂等：第二次跑返回 `{}`）。
+   *
+   * @param scope - 作用域（只迁移该 scope 的条目；**分配出的号全局唯一**，见 `nextId` 的理由）
+   * @returns 旧 id → 新 id 的映射（空对象 = 无需改动）
+   */
+  /**
+   * 只算不写：给出「若迁移，谁会被改成什么号」。迁移前必跑（破坏性操作先干跑）。
+   *
+   * 与 `renumberIds` 共用同一套分配规则 ⇒ 预览与实跑不可能给出不同映射。
+   * @param scope - 作用域
+   * @returns 旧 id → 新 id 的映射（空对象 = 无需改动）
+   */
+  planRenumber(scope: string): Record<string, string> {
+    const rows = this.byScope(scope).slice().sort((a, b) =>
+      a.createdAt === b.createdAt
+        ? (a.id < b.id ? -1 : 1)
+        : (a.createdAt < b.createdAt ? -1 : 1))
+    // 全局占位集：别的 scope 已有的 id 也要避开，否则迁移会造出跨 scope 同号（见 nextId 的教训）
+    const taken = new Set(this.all().map((concept) => concept.id))
+    const mapping: Record<string, string> = {}
+    let next = 1
+    const take = (): string => {
+      let candidate = `CONCEPT-${String(next).padStart(4, '0')}`
+      while (taken.has(candidate)) {
+        next += 1
+        candidate = `CONCEPT-${String(next).padStart(4, '0')}`
+      }
+      taken.add(candidate)
+      next += 1
+      return candidate
+    }
+    for (const concept of rows) {
+      if (/^CONCEPT-\d+$/.test(concept.id)) continue
+      mapping[concept.id] = take()
+    }
+    return mapping
+  }
+
+  /**
+   * 执行迁移（`planRenumber` 的写入侧）。
+   * @param scope - 作用域
+   * @returns 实际生效的映射（空对象 = 无事可做）
+   */
+  async renumberIds(scope: string): Promise<Record<string, string>> {
+    const mapping = this.planRenumber(scope)
+    if (Object.keys(mapping).length === 0) return {}
+    for (const concept of this.byScope(scope)) {
+      const newId = mapping[concept.id] ?? concept.id
+      const nextConcept: Concept = {
+        ...concept,
+        id: newId,
+        ...(concept.broader !== undefined ? { broader: concept.broader.map((id) => mapping[id] ?? id) } : {}),
+        ...(concept.related !== undefined ? { related: concept.related.map((id) => mapping[id] ?? id) } : {}),
+      }
+      // 先写新键、再删旧键：中途中断最坏是多一份副本（可发现），而不是丢掉一条概念（不可发现）
+      await this.kv.put(conceptKey(scope, newId), nextConcept)
+      if (newId !== concept.id) await this.kv.delete(conceptKey(scope, concept.id))
+    }
+    return mapping
+  }
+
+  /**
    * 建立概念（fail-loud：标签冲突 / 上位不存在 / 自引用 / 空首选名）。
    * @param draft - 概念草稿
    */
@@ -251,7 +360,7 @@ export class ConceptStore {
     this.assertReferences(draft.scope, draft.broader, draft.related, undefined)
     const now = new Date().toISOString()
     const concept: Concept = {
-      id: randomUUID(),
+      id: this.nextId(),
       scope: draft.scope,
       prefLabel,
       createdAt: now,

@@ -349,6 +349,45 @@ export class EntityStore {
   }
 
   /**
+   * 迁移专用：把 `topics` 里指向概念**旧 id** 的引用改写成新 id（方案 §6.3 概念 id 规范化）。
+   *
+   * ⚠ **为什么绕过 `update`**：`update` 走 `assertReferences`（topics 必须指向已存在的概念），
+   * 而迁移时旧 id 已从词表消失、新 id 刚出现——那条断言会正确地拒绝一次**必须发生**的改写。
+   * 所以这是一条显式命名的专用路径：只改 `topics`，其余字段逐字不动，每次真改留一条变更记录
+   * （`action: 'renumber-topics'`，所以事后能看出「这条实体的主题为什么换了写法」）。
+   *
+   * 幂等：mapping 里没有的 id 原样保留；再跑一次（旧 id 已不存在）⇒ 0 条改动。
+   *
+   * @param mapping - 旧概念 id → 新概念 id（来自 `ConceptStore.renumberIds`）
+   * @param options.dryRun - `true` 时只**数**会被改写的实体，不写盘（迁移前预览用）
+   * @returns 被改写的实体数（0 = 无需改动；dryRun 时是「将会被改写」的数）
+   */
+  async rewriteTopicRefs(mapping: Record<string, string>, options: { dryRun?: boolean } = {}): Promise<number> {
+    if (Object.keys(mapping).length === 0) return 0
+    const at = new Date().toISOString()
+    let changed = 0
+    for (const entity of this.all()) {
+      const topics = entity.topics ?? []
+      const nextTopics = topics.map((id) => mapping[id] ?? id)
+      if (nextTopics.every((id, index) => id === topics[index])) continue
+      changed += 1
+      if (options.dryRun === true) continue
+      const next: Entity = {
+        ...entity,
+        topics: nextTopics,
+        updatedAt: at,
+        revisions: pushRevision(entity.revisions, {
+          at,
+          action: 'renumber-topics',
+          detail: `topics：${topics.join(',')} → ${nextTopics.join(',')}`,
+        }),
+      }
+      await this.kv.put(entityKey(next.scope, next.id), next)
+    }
+    return changed
+  }
+
+  /**
    * 合并（旧档 → 存续档）：旧档的全部称呼并入存续档，旧档标 `merged` 并指向存续档。
    *
    * **不删除旧档**：历史记忆里提到的那个 id 仍要能解释成「它现在是 X」。

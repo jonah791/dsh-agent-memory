@@ -25,7 +25,7 @@
 
 26 个工具（均 `defineTool` 注册，名称与源码逐字一致）：
 
-> ⚠ 2026-11-17：本节曾写「14 个」而实测 15 个（`memory_dispose` 上线时未回填，**文档漂移**）；v0.24.0 加 `memory_supersede` ⇒ **16 个**；v0.28.0 加 `memory_link` / `memory_unlink` / `memory_relations` ⇒ 19；v0.29.0 加 `memory_concept` / `memory_thesaurus` ⇒ 21；v0.30.0 加 `memory_entity` / `memory_entities` ⇒ 23；v0.35.0 加 `memory_source` / `memory_sources` ⇒ 25；v0.37 加 `memory_trail` ⇒ 26；v0.40 `memory_catalog` ⇒ 27；v0.45 `memory_map` ⇒ 28；v0.46 `memory_misuse` ⇒ 29；v0.49 `memory_consolidate` ⇒ 30；v0.56 `memory_export` ⇒ **31 个**。⚠ **`memory_dispose`（v0.22）此前一直在表外**，本次补入 ⇒ 表内行数与工具面**逐名相等**。⚠ 别在这里手抄名单：工具名由 `tests/tools.test.ts` **从本表解析**后与工具面比对（双向互锁），`tests/audit.test.mjs` A42 另锁计数——加工具必须同一次改本表，否则两处同时红。
+> ⚠ 2026-11-17：本节曾写「14 个」而实测 15 个（`memory_dispose` 上线时未回填，**文档漂移**）；v0.24.0 加 `memory_supersede` ⇒ **16 个**；v0.28.0 加 `memory_link` / `memory_unlink` / `memory_relations` ⇒ 19；v0.29.0 加 `memory_concept` / `memory_thesaurus` ⇒ 21；v0.30.0 加 `memory_entity` / `memory_entities` ⇒ 23；v0.35.0 加 `memory_source` / `memory_sources` ⇒ 25；v0.37 加 `memory_trail` ⇒ 26；v0.40 `memory_catalog` ⇒ 27；v0.45 `memory_map` ⇒ 28；v0.46 `memory_misuse` ⇒ 29；v0.49 `memory_consolidate` ⇒ 30；v0.56 `memory_export` ⇒ 31；v0.57 `memory_concept_renumber` ⇒ **32 个**。⚠ **`memory_dispose`（v0.22）此前一直在表外**，本次补入 ⇒ 表内行数与工具面**逐名相等**。⚠ 别在这里手抄名单：工具名由 `tests/tools.test.ts` **从本表解析**后与工具面比对（双向互锁），`tests/audit.test.mjs` A42 另锁计数——加工具必须同一次改本表，否则两处同时红。
 
 | 工具 | 用途 |
 |------|------|
@@ -60,6 +60,7 @@
 | `memory_misuse` | **v0.46 失效误用的严格上限（只读 · 方案 §13.3）**：A 档（返回那一刻结论已不能用）/ B 档（已过复查死线，「到期≠作废」单列不算误用）/ 显式要求看归档（正常用法不计入分子）分开；三档上限 C1 自动注入通道**零容忍** · C2 累计率 ≤ 0.40% · C3 滑窗泊松（`λ<3` 不判）。⚠ **可分辨度**：只有 v0.46 起的记录带 `includeArchive` 标志，历史记录分不清「要求看归档」与「真误用」 |
 | `memory_consolidate` | **v0.49 知识提炼候选（只读 · 方案 §16.1）**：按标签聚簇报「证据量三要素」（条目数 / 时间跨度 / 已有 summary）+ 最新 3 条标题；默认阈值 20 条 × 30 天，日期形态的标签按形态排除。**不生成知识**（归纳是判断，归主体）、不改条目、不落库 |
 | `memory_export` | **v0.56 导出（方案 §1 第十项「用户控制」）**：把**可见**记忆面导出成可移植 JSON 快照并写文件——回执只给路径 / 字节 / 计数 / sha256 / 预览，**不回灌内容**（全库 MB 级，塞进返回会撑爆一轮上下文）。恒含归档条目（归档是「我决定不再用」，不是「不存在」）；`L2`/`L3` 敏感**缺省不导**（导出离开系统、此后准入不再生效 ⇒ 比 `recall` 更紧）；目标已存在即拒（导出常是唯一备份）。五张表全导（条目 / 概念 / 实体 / 来源 / 关系），侧车**不导**且在 `notExported` 里逐条点名。**不做导入** |
+| `memory_concept_renumber` | **v0.57 一次性迁移（方案 §6.3「统一资源标识符」）**：把某 scope 里 uuid 形态的概念 id 改成可读 id（`CONCEPT-0001` 形态），并**同步改写本表 `broader`/`related` 与实体档 `topics`**——两处都改完才叫「零悬空」。`dryRun:true` 只算不写（迁移前必跑）；幂等（第二次跑返回空映射）。**新概念从一开始就是可读 id**（`memory_concept` 新建即 `CONCEPT-0001`），本工具只处理存量。⚠ 可读 id **全局唯一**（不是每 scope 归零）：`find(id)` 是全局按 id 查的，同号跨 scope 会让跨 scope 校验退化成「碰巧撞对」。⚠ 必须走工具而非改库文件：库有进程内 KV 与磁盘 JSON 两个写者，盘上改完会被内存副本覆盖。 |
 
 行为侧（无工具面，自动发生）：
 

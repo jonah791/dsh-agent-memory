@@ -3419,6 +3419,91 @@ function buildConcept(deps: MemoryToolDeps): ToolDefinition {
 }
 
 /** 构建 memory_thesaurus 工具（v0.29.0 · 方案 §4.2）：查词表 / 看概念详情 / 导出 */
+/**
+ * 构建 memory_concept_renumber 工具（v0.57 · 方案 §6.3「统一资源标识符」的迁移路径）。
+ *
+ * ## 为什么必须是一个工具，而不是一个改库文件的脚本
+ *
+ * 库在两个写者手里：进程内 KV 与磁盘 JSON。在盘上直接改完，**内存副本会在下一次写入时
+ * 把它覆盖回去**——这是「改了但没生效」最经典的形态（本仓已踩过多次同族：单测绿而线上不动）。
+ * 走工具 ⇒ 同一进程、同一 KV、无竞争，且迁移结果能被审计与预览。
+ *
+ * ## 为什么单独一个工具，不塞进 memory_concept
+ *
+ * `memory_concept` 的契约是「操作**一个**概念」——迁移是**一个 scope 的批量动作**，
+ * 塞进去会把 required 字段（`id` / `prefLabel`）撑成占位符。宁可工具面多一件，
+ * 也不让一个工具同时服务两种对象粒度。
+ */
+function buildConceptRenumber(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_concept_renumber',
+    deferLoading: true,
+    description: '**一次性迁移**：把某 scope 里 uuid 形态的概念 id 改成可读 id（`CONCEPT-0001` 形态 · 方案 §6.3），并同步改写本表 `broader` / `related` 与实体档 `topics` 的引用——两处都改完才叫「零悬空」。幂等（第二次跑返回空映射）。`dryRun:true` 只算不写（迁移前必跑）。⚠ **为什么必须走工具而不改库文件**：库在两个写者手里（进程内 KV + 磁盘 JSON），盘上改完会被内存副本覆盖——那是「改了但没生效」的经典形态。⚠ 实体表未接线时**拒绝执行**（改了概念而没改 `topics` 会留下悬空引用，比不改更坏）。',
+    parameters: {
+      scope: { type: 'string', description: '作用域（缺省当前 workspace）' },
+      dryRun: { type: 'boolean', description: '`true` = 只返回映射与被改写的实体数，不写任何数据' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          scope: { type: 'string', required: true },
+          dryRun: { type: 'boolean', required: true },
+          total: { type: 'integer', required: true, description: '本次被迁移（或将迁移）的概念数' },
+          mapping: {
+            type: 'array',
+            required: true,
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                from: { type: 'string', required: true },
+                to: { type: 'string', required: true },
+              },
+            },
+          },
+          rewrittenEntities: { type: 'integer', required: true, description: '`topics` 被改写的实体数（dryRun 时为「将会被改写」）' },
+          truncated: { type: 'integer', description: '映射超过 50 条时被截掉的条数（缺省 = 未截断）' },
+        },
+      },
+      render: (_a, v) => {
+        if (v.total === 0) {
+          return [{ type: 'text', text: `概念 id 无需迁移（scope=${v.scope} 已全部是可读形态）。` }]
+        }
+        const head = v.mapping.slice(0, 8).map((row) => `${row.from.slice(0, 8)}… → ${row.to}`).join(' · ')
+        const tail = v.total > v.mapping.length ? `（另有 ${v.truncated ?? v.total - v.mapping.length} 条未列出）` : ''
+        const prefix = v.dryRun ? '【预览·未写入】' : '【已迁移】'
+        return [{
+          type: 'text',
+          text: `${prefix} ${v.total} 个概念 id → 可读形态，改写 ${v.rewrittenEntities} 个实体的 topics（scope=${v.scope}）\n${head}${tail}`,
+        }]
+      },
+    },
+    async execute(args, exec) {
+      const concepts = conceptStoreOf(deps)
+      const { config, cwd } = await resolveRuntime(exec, deps)
+      const { writeScope } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      // 先检查再动手：改了概念却没改 topics 会造出悬空引用，比不改更坏
+      if (deps.entities === undefined) {
+        throw new Error('memory_concept_renumber: 实体表未接线（deps.entities 缺失）——概念 id 改了而实体 topics 没改会留下悬空引用。先接线再迁移。')
+      }
+      const dryRun = args.dryRun === true
+      const mapping = dryRun ? concepts.planRenumber(writeScope) : await concepts.renumberIds(writeScope)
+      const rewrittenEntities = await deps.entities.rewriteTopicRefs(mapping, { dryRun })
+      const rows = Object.entries(mapping).map(([from, to]) => ({ from, to }))
+      return {
+        scope: writeScope,
+        dryRun,
+        total: rows.length,
+        mapping: rows.slice(0, 50),
+        rewrittenEntities,
+        ...(rows.length > 50 ? { truncated: rows.length - 50 } : {}),
+      }
+    },
+  })
+}
+
 function buildThesaurus(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_thesaurus',
@@ -6232,6 +6317,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildUnlink(deps),
     buildRelations(deps),
     buildConcept(deps),
+    buildConceptRenumber(deps),
     buildThesaurus(deps),
     buildEntity(deps),
     buildEntities(deps),
