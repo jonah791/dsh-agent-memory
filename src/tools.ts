@@ -455,6 +455,43 @@ function assertMutationAllowed(
   throw new Error(`${tool}: ${verb}被拒（${code}）——条目 ${entry.id} 归属「${entry.role ?? '共享'}」/ 空间「${entry.space ?? '未标注'}」不在角色「${view.role}」的 ${action} 白名单内。要么在自己能动的隔间里操作，要么配置 roles.policies.${view.role}.${action} 放行。`)
 }
 
+/**
+ * 跨空间迁移的**目标侧**准入（v0.67 · 方案 §11.1 行 1077「跨空间迁移需要检查来源权限及明确授权」）。
+ *
+ * `assertMutationAllowed` 判的是条目**现**空间（来源侧）。只判来源会留下一条缝：一条自己
+ * 能改的条目，可以被搬进一个自己**没有写权**的空间。于是「系统空间不放个人隐私」这类空间级
+ * 规则，一次 `update({ space })` 就绕过去了——改的是已有条目，写闸拦不到；能看见，读闸放行。
+ * 两闸之间正好是这条缝。
+ *
+ * 三条边界（刻意窄，判据见 tests/write-gate.test.mjs X 段）：
+ * - **只判「四空间值 → 另一个四空间值」**。清除回未标注（`space: ''`）不算迁移：它不进入任何
+ *   人的疆域，且会让条目对设了 `spaces` 的角色 fail-closed（自我降级，不是越权）；
+ *   拦它只会让「标错了想撤销」做不到。
+ * - **同值重设不判**：那不是迁移，是幂等。
+ * - 角色维度未启用 ⇒ 零判断（`view.enabled === false`），升级不改存量行为。
+ */
+function assertSpaceMigrationAllowed(
+  deps: MemoryToolDeps,
+  exec: ToolRunContext,
+  config: MemoryConfig,
+  view: RoleView,
+  entry: Pick<Entry, 'id' | 'space'>,
+  to: NonNullable<Entry['space']>,
+  tool: string,
+): void {
+  if (!view.enabled) return
+  // 只取空间分支：角色未经手（条目归属不变），传 role 会让这条拒绝读成「改不了这条」。
+  const code = rejectMutationReason(view.policy, view.role, 'update', { space: to })
+  if (code === undefined) return
+  audit(deps, exec, config, { action: 'permission', target: { count: 1 }, outcome: 'rejected', code, tool })
+  throw new Error(
+    `${tool}: 跨空间迁移被拒（${code}）——条目 ${entry.id} 从「${entry.space ?? '未标注'}」迁往「${to}」，`
+    + `而空间「${to}」不在角色「${view.role}」的 writeSpaces 白名单内。`
+    + `来源侧的改权已通过，缺的是**目标空间**的写权：要么迁进自己有权写的空间，`
+    + `要么配置 roles.policies.${view.role}.writeSpaces 放行「${to}」。`,
+  )
+}
+
 /** action → 中文文案（工具 render 用） */
 const ACTION_TEXT: Record<RememberResult['action'], string> = {
   created: '创建',
@@ -1612,7 +1649,14 @@ function buildUpdate(deps: MemoryToolDeps): ToolDefinition {
       // 空间归属 / 生命周期（v0.27.0）：三态同 memType——undefined 不动 / 空串清除 / 值设置。
       // `status: ''`（或 active）就是候选区的审核出口：清除回常态。
       if (args.space !== undefined) {
-        patch.space = parseSpaceArg(args.space, 'update.space') ?? null
+        const nextSpace = parseSpaceArg(args.space, 'update.space') ?? null
+        // 跨空间迁移判**两下**（方案 §11.1 行 1077）：来源侧已由上面的 `assertMutationAllowed`
+        // 判过（条目现空间必须在 writeSpaces 内），这里判目标空间。判据与三条边界见
+        // `assertSpaceMigrationAllowed`。
+        if (nextSpace !== null && nextSpace !== entry.space) {
+          assertSpaceMigrationAllowed(deps, exec, config, view, entry, nextSpace, 'update')
+        }
+        patch.space = nextSpace
       }
       if (args.status !== undefined) {
         patch.status = parseStatusArg(args.status, 'update.status') ?? null

@@ -312,3 +312,91 @@ test('M5 管拒绝也落审计（action=permission / code=M2-role / tool=forget�
   assert.ok(reject !== undefined)
   assert.equal(reject.code, 'M2-role')
 })
+
+// ---------- X 段：跨空间迁移（方案 §11.1 行 1077「跨空间迁移需要检查来源权限及明确授权」） ----------
+//
+// 判据形状：**来源侧过了、目标侧没过**——这是这条缝的全部。只判来源（`update` 已有的
+// `assertMutationAllowed` 判条目**现**空间）会留下一条路：一条自己能改的条目可以被搬进一个
+// 自己没有写权的空间，于是「系统空间不放个人隐私」这类空间级规则被一次 `update` 绕过。
+// 改的是已有条目 ⇒ 写闸拦不到；能看见 ⇒ 读闸放行。两闸之间正好是这条缝。
+
+test('X1 ★来源侧放行、目标空间不在白名单 ⇒ 拒 U1-space，且条目空间一格不动', async () => {
+  // 造一条 main 的 space=project；verifier 能改 main，writeSpaces 只含 project。
+  // ⇒ 改内容放行（来源侧过），搬进 system 必须拒（目标侧不过）。
+  const cfg = cfgWithVerifier({ read: ['main'], update: ['main'], writeSpaces: ['project'] })
+  const { byName, store } = setup({ config: cfg })
+  await rememberWith(byName, execOf(HUMAN), { space: 'project' })
+  const [entry] = store.list(WID, { includeArchive: false })
+  assert.equal(entry.space, 'project')
+
+  const verifier = execWithPreset(DERIVED, 'verify')
+  // 来源侧确实放行（否则下面的拒绝就分不清是来源拒还是目标拒）
+  await byName.get('update').execute({ id: entry.id, mode: 'append', text: '\n（验收方补注）' }, verifier)
+
+  await assert.rejects(
+    () => byName.get('update').execute({ id: entry.id, space: 'system' }, verifier),
+    (err) => {
+      assert.match(err.message, /U1-space/)
+      assert.match(err.message, /system/)
+      return true
+    },
+  )
+  // 拒绝必须发生在落库之前：空间还是 project，不许「拒了却已搬」
+  const after = store.list(WID, { includeArchive: false }).find((item) => item.id === entry.id)
+  assert.equal(after.space, 'project')
+})
+
+test('X2 目标空间在白名单 ⇒ 迁移放行并落库（两侧都测，否则闸门可能恒拒）', async () => {
+  const cfg = cfgWithVerifier({ read: ['main'], update: ['main'], writeSpaces: ['project', 'domain'] })
+  const { byName, store } = setup({ config: cfg })
+  await rememberWith(byName, execOf(HUMAN), { space: 'project' })
+  const [entry] = store.list(WID, { includeArchive: false })
+  await byName.get('update').execute({ id: entry.id, space: 'domain' }, execWithPreset(DERIVED, 'verify'))
+  const after = store.list(WID, { includeArchive: false }).find((item) => item.id === entry.id)
+  assert.equal(after.space, 'domain')
+})
+
+test('X3 同值重设不算迁移：写回现值不触发迁移闸', async () => {
+  // writeSpaces 只含 project，条目也正在 project ⇒ 写回 'project' 是幂等，不是迁移。
+  const cfg = cfgWithVerifier({ read: ['main'], update: ['main'], writeSpaces: ['project'] })
+  const { byName, store } = setup({ config: cfg })
+  await rememberWith(byName, execOf(HUMAN), { space: 'project' })
+  const [entry] = store.list(WID, { includeArchive: false })
+  await byName.get('update').execute({ id: entry.id, space: 'project' }, execWithPreset(DERIVED, 'verify'))
+  const after = store.list(WID, { includeArchive: false }).find((item) => item.id === entry.id)
+  assert.equal(after.space, 'project')
+})
+
+test('X4 清除回未标注不是迁移（窄边界）：不进入任何人的疆域，且对设了 spaces 的角色 fail-closed', async () => {
+  // 边界刻意窄：只拦「四空间值 → 另一个四空间值」。清除是自我降级不是越权
+  // （未标注条目对设了 `spaces` 的角色不放行），拦它只会让「标错了想撤销」做不到。
+  const cfg = cfgWithVerifier({ read: ['main'], update: ['main'], writeSpaces: ['project'] })
+  const { byName, store } = setup({ config: cfg })
+  await rememberWith(byName, execOf(HUMAN), { space: 'project' })
+  const [entry] = store.list(WID, { includeArchive: false })
+  await byName.get('update').execute({ id: entry.id, space: '' }, execWithPreset(DERIVED, 'verify'))
+  const after = store.list(WID, { includeArchive: false }).find((item) => item.id === entry.id)
+  assert.equal(after.space, undefined)
+})
+
+test('X5 迁移拒绝落审计（action=permission / code=U1-space / tool=update）', async () => {
+  // 与 M5 同一条纪律：拒绝必须留下可读事件，否则「违规率」没有分子。
+  const cfg = cfgWithVerifier({ read: ['main'], update: ['main'], writeSpaces: ['project'] })
+  const { byName, store, audits } = setup({ config: cfg })
+  await rememberWith(byName, execOf(HUMAN), { space: 'project' })
+  const [entry] = store.list(WID, { includeArchive: false })
+  await assert.rejects(() => byName.get('update').execute({ id: entry.id, space: 'system' }, execWithPreset(DERIVED, 'verify')))
+  const reject = audits.find((item) => item.action === 'permission' && item.code === 'U1-space' && item.tool === 'update')
+  assert.ok(reject !== undefined, '迁移拒绝必须落一条 permission 审计')
+  assert.equal(reject.outcome, 'rejected')
+})
+
+test('X6 角色维度未启用 ⇒ 迁移零判断（升级不改存量行为）', async () => {
+  // 向后兼容是硬约束（同 E5 / M4）：`roles.enabled=false` 时 update 的 space 行为必须逐字不变。
+  const { byName, store } = setup({ config: DEFAULT_CONFIG })
+  await rememberWith(byName, execOf(HUMAN), { space: 'project' })
+  const [entry] = store.list(WID, { includeArchive: false })
+  await byName.get('update').execute({ id: entry.id, space: 'system' }, execOf(DERIVED))
+  const after = store.list(WID, { includeArchive: false }).find((item) => item.id === entry.id)
+  assert.equal(after.space, 'system')
+})
