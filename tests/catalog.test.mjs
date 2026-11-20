@@ -14,7 +14,9 @@ import {
   catalogGaps,
   catalogReport,
   clusterByTag,
+  integrityReport,
   isCatalogable,
+  normalizeSessionId,
 } from '../lib/catalog.js'
 import { COLD_CHECKPOINT_TAG } from '../lib/types.js'
 import { retentionSummary } from '../lib/retention.js'
@@ -70,10 +72,10 @@ class MemoryKv {
   }
 }
 
-function setup() {
+function setup(extraDeps = {}) {
   const kv = new MemoryKv()
   const store = new MemoryStore(kv)
-  const tools = createMemoryTools({ store, loadConfig: async () => DEFAULT_CONFIG })
+  const tools = createMemoryTools({ store, loadConfig: async () => DEFAULT_CONFIG, ...extraDeps })
   const byName = new Map(tools.map((t) => [t.name, t]))
   const exec = {
     agent: { session: { id: SESSION, header: { id: SESSION, cwd: CWD } } },
@@ -445,4 +447,112 @@ test('W7 ★两段同窗：可信度分母必须跟着编目段走（同屏不�
   assert.equal(all.credibility.denominator, 2, '全库：两条都算')
   assert.equal(win.credibility.denominator, 1, '窗内可信度分母必须跟着窗——线上实测过「上面 29 条、下面全库 1800 条」的混合输出')
   assert.equal(win.credibility.denominator, win.denominator, 'schema 自己声明「与顶层 denominator 同一把尺子」')
+})
+
+// ---------- I 段 · 引用完整性（v0.65 · 方案 §10.2「日增量维护」第三项「失效引用」）----------
+//
+// 这一层守的不是「有没有悬空」（当前全库构造性为零），而是**三个会把假绿/假红做成结论的边界**：
+// ① 三档之和恒等于 total；② 判据池读不到 ≠ 池是空的；③ 「判不了」必须出现在人读的那一面上。
+
+const CELL_KEYS = ['checked', 'missing', 'unverifiable', 'total']
+
+function assertCellBalanced(cell, label) {
+  for (const k of CELL_KEYS) assert.equal(typeof cell[k], 'number', `${label}.${k} 必须是数`)
+  assert.equal(
+    cell.checked + cell.missing + cell.unverifiable,
+    cell.total,
+    `${label}：三档之和必须恒等于 total——这是本模块唯一的不变量`,
+  )
+}
+
+test('I1 ★三档之和恒等于 total（每条路径都不得破坏）', () => {
+  const r = integrityReport(
+    [entry({ id: 'a', evidenceRefs: ['session|session-x|1'], archiveRef: ['gone'], sourceIds: ['SOURCE-9'] })],
+    { entryIds: new Set(), sourceIds: new Set(), sessionIds: new Set(), relations: [] },
+  )
+  for (const key of ['evidenceSession', 'evidenceCompaction', 'archiveRef', 'sourceIds', 'relations']) {
+    assertCellBalanced(r[key], key)
+  }
+})
+
+test('I2 ★判据池读不到 ⇒ unverifiable，不得记 missing（假红与真红必须可分）', () => {
+  const es = [entry({ id: 'a', evidenceRefs: ['session|session-x|1', 'compaction|session-y|abc'] })]
+
+  const noPool = integrityReport(es, { entryIds: new Set(), relations: [] })
+  assert.equal(noPool.evidenceSession.missing, 0, '不知道就必须说不知道——记 missing 会让我去修一个不存在的悬空')
+  assert.equal(noPool.evidenceSession.unverifiable, 1)
+  assert.equal(noPool.evidenceCompaction.unverifiable, 1)
+  assertCellBalanced(noPool.evidenceSession, 'evidenceSession')
+
+  // 池给了、但会话不在 ⇒ 这才是真悬空
+  const withPool = integrityReport(es, { entryIds: new Set(), sessionIds: new Set(['other']) })
+  assert.equal(withPool.evidenceSession.missing, 1, '池可用且查不到 ⇒ 真悬空')
+  assert.equal(withPool.evidenceSession.unverifiable, 0)
+})
+
+test('I3 ★空集与未接线含义相反：空表 ⇒ 全悬空，未接线 ⇒ 全判不了', () => {
+  const es = [entry({ id: 'a', sourceIds: ['SOURCE-1'] })]
+
+  const unwired = integrityReport(es, { entryIds: new Set(), relations: [] })
+  assert.equal(unwired.sourceIds.unverifiable, 1, '来源表未装配 ⇒ 判不了')
+  assert.equal(unwired.sourceIds.missing, 0)
+
+  const emptyTable = integrityReport(es, { entryIds: new Set(), sourceIds: new Set(), relations: [] })
+  assert.equal(emptyTable.sourceIds.missing, 1, '来源表在、但表里没有它 ⇒ 真悬空')
+  assert.equal(emptyTable.sourceIds.unverifiable, 0)
+})
+
+test('I4 归档引用：目标在就 checked，不在就 missing 并给坐标样本（不给正文）', () => {
+  const r = integrityReport([entry({ id: 'sum', archiveRef: ['alive', 'gone'] })], {
+    entryIds: new Set(['alive']),
+    relations: [],
+  })
+  assert.equal(r.archiveRef.checked, 1)
+  assert.equal(r.archiveRef.missing, 1)
+  assert.equal(r.samples.length, 1)
+  assert.equal(r.samples[0].kind, 'archiveRef')
+  assert.equal(r.samples[0].ownerId, 'sum')
+  assert.equal(r.samples[0].ref, 'gone')
+  assert.ok(!('body' in r.samples[0]), '样本只给坐标，不带正文（与 actor-audit 同纪律）')
+})
+
+test('I5 关系边按 fromKind/toKind 取池；池未接线 ⇒ 该端判不了，不判悬空', () => {
+  const edges = [{ id: 'e1', from: 'a', to: 'c1', toKind: 'concept' }]
+
+  const wired = integrityReport([], { entryIds: new Set(['a']), conceptIds: new Set(), relations: edges })
+  assert.equal(wired.relations.checked, 1, 'from 在条目池里')
+  assert.equal(wired.relations.missing, 1, 'to 指向概念、概念表在但没有它 ⇒ 真悬空')
+
+  const noConceptTable = integrityReport([], { entryIds: new Set(['a']), relations: edges })
+  assert.equal(noConceptTable.relations.unverifiable, 1, '概念表未接线 ⇒ 判不了')
+  assert.equal(noConceptTable.relations.missing, 0)
+})
+
+test('I6 ★工具层：缺省不出现 / 池可用印真读数 / 池不可用时「判不了」必须出现在人读的那一面', async () => {
+  const ref = `session|${SESSION}|12`
+
+  // 池可用
+  const wired = setup({ listSessionIds: () => [SESSION] })
+  wired.kv.map.set(`${WID}:knowledge:k1`, entry({ id: 'k1', evidenceRefs: [ref] }))
+  const tool = wired.byName.get('memory_catalog')
+
+  const off = await tool.execute({}, wired.exec)
+  assert.equal(off.integrity, undefined, '缺省不出现 = 没量；与「量了但 0 悬空」必须可分')
+
+  const on = await tool.execute({ integrity: true }, wired.exec)
+  assert.ok(on.integrity !== undefined)
+  assert.equal(on.integrity.evidenceSession.checked, 1, '会话池里有它 ⇒ 已核')
+  assert.equal(on.integrity.evidenceSession.missing, 0)
+
+  // 池不可用（未注入）——同一份数据，读数必须变成「判不了」而不是「悬空」
+  const unwired = setup()
+  unwired.kv.map.set(`${WID}:knowledge:k1`, entry({ id: 'k1', evidenceRefs: [ref] }))
+  const blind = await unwired.byName.get('memory_catalog').execute({ integrity: true }, unwired.exec)
+  assert.equal(blind.integrity.evidenceSession.unverifiable, 1)
+  assert.equal(blind.integrity.evidenceSession.missing, 0, '未装配不得变成「引用全坏」')
+
+  const text = unwired.byName.get('memory_catalog').output.render({}, blind)[0].text
+  assert.ok(text.includes('引用完整性'), '这一段必须印出来')
+  assert.ok(text.includes('判不了'), '「判不了」必须出现在渲染里——只活在 JSON 里就等于没报（假绿）')
+  assert.ok(text.includes('合计悬空 **0**'), '真悬空是 0，而「判不了」不是悬空')
 })

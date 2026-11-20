@@ -199,6 +199,259 @@ export function catalogGaps(entries: readonly Entry[]): CatalogReport['gaps'] {
   }
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// 引用完整性（v0.65 · 方案 §10.2「日增量维护」第三项「失效引用」）
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * 一档引用计数的**三档互斥**读数。
+ *
+ * `checked + missing + unverifiable === total` 恒成立——这是本模块唯一的不变量，
+ * 理由见 `integrityReport` 的文档。
+ */
+export interface IntegrityCell {
+  /** 校验过且目标存在 */
+  readonly checked: number
+  /** 校验过且目标不存在（真悬空） */
+  readonly missing: number
+  /** **无法校验**（判据池不可得 / 只校验了引用的一部分）——不是「没有悬空」 */
+  readonly unverifiable: number
+  /** 三档之和 */
+  readonly total: number
+}
+
+/**
+ * 引用完整性需要的判据池（都是**全库**集合，不随窗口变化）。
+ *
+ * ⚠ 除 `entryIds` 外全部可选，且 `undefined` 与**空集**含义相反：
+ * - 空集 ⇒ 判据池可用但一个目标都没有 ⇒ 所有引用都是悬空（**真红**）
+ * - `undefined` ⇒ 该表未接线 / 读不到 ⇒ 该档记 `unverifiable`（**不是红**）
+ *
+ * 这条区分是本模块存在的一半理由：把「装配缺陷」静默成「引用都悬空」会让我去修一个
+ * 不存在的问题，而那个假问题看起来与真问题完全一样。
+ */
+export interface IntegrityInputs {
+  /** 条目 id（`store.list` 恒有，故必填）——`archiveRef` 的判据池 */
+  readonly entryIds: ReadonlySet<string>
+  /** 来源表；`undefined` ⇒ 来源引用档逐处记 unverifiable */
+  readonly sourceIds?: ReadonlySet<string>
+  /** 概念表；`undefined` ⇒ 关系边指向概念时该端记 unverifiable */
+  readonly conceptIds?: ReadonlySet<string>
+  /** 实体表；`undefined` ⇒ 关系边指向实体时该端记 unverifiable */
+  readonly entityIds?: ReadonlySet<string>
+  /**
+   * 磁盘上真实存在的会话 id（**归一化**：去掉 `session-` 前缀、转小写）。
+   * `undefined` ⇒ 调用方拿不到磁盘目录 ⇒ 会话类坐标全部记 `unverifiable`。
+   */
+  readonly sessionIds?: ReadonlySet<string>
+  /**
+   * 关系边（全库；边不按窗口切——两端不在窗内也照样要存在）。
+   * `undefined` ⇒ 关系层未接线，该档 `total` 为 0 并由 caveats 点名（**不是「没有边」**）。
+   */
+  readonly relations?: readonly {
+    readonly id: string
+    readonly from: string
+    readonly to: string
+    readonly fromKind?: string
+    readonly toKind?: string
+  }[]
+}
+
+/** 一条悬空样本（只给坐标，不给正文——与 actor-audit 的最小化同纪律） */
+export interface IntegritySample {
+  readonly kind: string
+  readonly ownerId: string
+  readonly ref: string
+}
+
+export interface IntegrityReport {
+  /** 证据坐标 · 会话类 */
+  readonly evidenceSession: IntegrityCell
+  /**
+   * 证据坐标 · 压缩类。
+   * ⚠ 只校验会话存在，**不校验第三段的 compaction id**（载体是会话日志内的事件）
+   * ⇒ 会话存在时记 `unverifiable`，这是**下界**。
+   */
+  readonly evidenceCompaction: IntegrityCell
+  /** 归档引用（概要 → 原料） */
+  readonly archiveRef: IntegrityCell
+  /** 来源实体引用 */
+  readonly sourceIds: IntegrityCell
+  /** 关系边两端 */
+  readonly relations: IntegrityCell
+  /** 悬空样本（最多 8 条） */
+  samples: IntegritySample[]
+  /** 本轮**没能覆盖**的面，逐条点名 */
+  caveats: string[]
+}
+
+const MAX_INTEGRITY_SAMPLES = 8
+
+function emptyCell(): { checked: number; missing: number; unverifiable: number; total: number } {
+  return { checked: 0, missing: 0, unverifiable: 0, total: 0 }
+}
+
+function asRefList(value: readonly string[] | string | undefined | null): string[] {
+  if (value === undefined || value === null) return []
+  return Array.isArray(value) ? [...value] : [value as string]
+}
+
+/** 归一化会话 id：去 `session-` 前缀、转小写（与磁盘目录名同一口径）。 */
+export function normalizeSessionId(value: string): string {
+  return String(value).replace(/^session-/, '').toLowerCase()
+}
+
+/**
+ * 量一遍引用完整性（**只读派生**，不改任何条目）。
+ *
+ * ## 这个 0 为什么是「构造性为零」而不是「维护得好」
+ *
+ * 来源 / 概念 / 实体在**写入时**就拒写悬空（`remember.sourceIds` 校验、
+ * `thesaurus.ts` 与 `entities.ts` 的引用完整性检查），归档引用与证据坐标又都从真实对象
+ * 生成 ⇒ 全库 585 处引用实测悬空 0（2026-11-20）。所以这一项的真形态是**哨兵**：
+ * 只有「目标在写入**之后**消失」才会破，而本库唯一会消失的目标是会话日志
+ * （磁盘清理 / 迁移）。这与「代理结构性不触发」不同——那不是没对象，是不可能触发；
+ * 这里是有对象、当前都健康。
+ *
+ * ## 为什么必须分三档
+ *
+ * 哨兵最怕**恒 0 的假绿**：若某天会话目录读不到，`missing` 仍是 0，而它看起来与
+ * 「全都好」一模一样。⇒ `unverifiable` 单列，且三档之和恒等于 `total`。
+ *
+ * ## 判据池与被检查集合是两件事
+ *
+ * `inputs` 里的四个 id 集合与 `relations` 是**全库**的判据池（「目标在不在」要问全库）；
+ * 被检查的条目由调用方按窗口切（日增量维护只看窗内新增）。⇒ `total` 是**窗内条目上
+ * 出现过的引用处数**，不是全库引用数。两者在返回值里各自可读，不混成一个数。
+ */
+export function integrityReport(
+  entries: readonly Entry[],
+  inputs: IntegrityInputs,
+): IntegrityReport {
+  const evidenceSession = emptyCell()
+  const evidenceCompaction = emptyCell()
+  const archiveRef = emptyCell()
+  const sourceIds = emptyCell()
+  const relations = emptyCell()
+  const samples: IntegritySample[] = []
+
+  const push = (kind: string, ownerId: string, ref: string): void => {
+    if (samples.length < MAX_INTEGRITY_SAMPLES) samples.push({ kind, ownerId, ref })
+  }
+
+  for (const entry of entries) {
+    for (const raw of asRefList(entry.evidenceRefs)) {
+      const [kind, scopeId] = String(raw).split('|')
+      if (kind === 'session') {
+        evidenceSession.total += 1
+        if (inputs.sessionIds === undefined || scopeId === undefined || scopeId === '') {
+          // 判据池不可得，或坐标本身解不出会话段（格式坏）：都不判悬空
+          evidenceSession.unverifiable += 1
+        } else if (inputs.sessionIds.has(normalizeSessionId(scopeId))) {
+          evidenceSession.checked += 1
+        } else {
+          evidenceSession.missing += 1
+          push('evidenceSession', entry.id, String(raw))
+        }
+      } else if (kind === 'compaction') {
+        evidenceCompaction.total += 1
+        if (inputs.sessionIds === undefined || scopeId === undefined || scopeId === '') {
+          evidenceCompaction.unverifiable += 1
+        } else if (inputs.sessionIds.has(normalizeSessionId(scopeId))) {
+          // 会话在，但 compaction id 本身未校验 ⇒ 下界
+          evidenceCompaction.unverifiable += 1
+        } else {
+          evidenceCompaction.missing += 1
+          push('evidenceCompaction', entry.id, String(raw))
+        }
+      } else {
+        // 未知前缀：不猜它指向什么，也不当悬空——记「无法校验」
+        evidenceSession.total += 1
+        evidenceSession.unverifiable += 1
+      }
+    }
+
+    for (const target of asRefList(entry.archiveRef)) {
+      archiveRef.total += 1
+      if (inputs.entryIds.has(target)) archiveRef.checked += 1
+      else {
+        archiveRef.missing += 1
+        push('archiveRef', entry.id, target)
+      }
+    }
+
+    for (const target of asRefList(entry.sourceIds)) {
+      sourceIds.total += 1
+      if (inputs.sourceIds === undefined) {
+        // 来源表未接线：引用处数照算，但判不了 ⇒ 记「无法校验」，**不记悬空**
+        sourceIds.unverifiable += 1
+      } else if (inputs.sourceIds.has(target)) {
+        sourceIds.checked += 1
+      } else {
+        sourceIds.missing += 1
+        push('sourceIds', entry.id, target)
+      }
+    }
+  }
+
+  /** 关系边两端的判据池：按 kind 取；池不可用返回 undefined（该端记 unverifiable）。 */
+  const poolOf = (kind: string | undefined): ReadonlySet<string> | undefined =>
+    kind === 'concept' ? inputs.conceptIds : kind === 'entity' ? inputs.entityIds : inputs.entryIds
+
+  for (const edge of inputs.relations ?? []) {
+    for (const [side, id, kind] of [
+      ['from', edge.from, edge.fromKind],
+      ['to', edge.to, edge.toKind],
+    ] as const) {
+      relations.total += 1
+      const pool = poolOf(kind)
+      if (pool === undefined) relations.unverifiable += 1
+      else if (pool.has(id)) relations.checked += 1
+      else {
+        relations.missing += 1
+        push('relations', edge.id, `${side}=${id}`)
+      }
+    }
+  }
+
+  const caveats: string[] = []
+  if (inputs.sessionIds === undefined) {
+    caveats.push('会话目录不可得（或未接线）⇒ 证据坐标全部记「无法校验」，**不是 0 悬空**')
+  } else {
+    caveats.push(
+      `压缩类坐标只校验所属会话存在（${evidenceCompaction.checked + evidenceCompaction.unverifiable} 处），第三段 compaction id 未校验 ⇒ 该项是下界`,
+    )
+  }
+  if (inputs.sourceIds === undefined) caveats.push('来源表未接线 ⇒ 来源引用逐处记「无法校验」，不是 0 悬空')
+  if (inputs.relations === undefined) caveats.push('关系层未接线 ⇒ 关系边一档**未测**（total 0 不代表没有边）')
+  if (inputs.conceptIds === undefined || inputs.entityIds === undefined) {
+    caveats.push('概念表或实体表未接线 ⇒ 指向它们的关系端点记「无法校验」')
+  }
+  caveats.push('来源引用与 credibility 段的悬空报告同源（同一判据池），两处不另算增量')
+
+  return {
+    evidenceSession: { ...evidenceSession },
+    evidenceCompaction: { ...evidenceCompaction },
+    archiveRef: { ...archiveRef },
+    sourceIds: { ...sourceIds },
+    relations: { ...relations },
+    samples,
+    caveats,
+  }
+}
+
+/** 把一个 cell 折成「有悬空吗」的单值，仅用于渲染与测试断言（不参与任何判断）。 */
+export function hasMissing(report: IntegrityReport): boolean {
+  return (
+    report.evidenceSession.missing +
+      report.evidenceCompaction.missing +
+      report.archiveRef.missing +
+      report.sourceIds.missing +
+      report.relations.missing >
+    0
+  )
+}
+
 export interface ClusterOptions {
   /** 最多出几个簇（缺省 12） */
   readonly maxClusters?: number

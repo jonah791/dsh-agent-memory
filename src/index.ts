@@ -34,6 +34,7 @@ import { appendDedupeTrace, readDedupeTrace as readDedupeTraceFromSidecar } from
 import { readActorAudit, sanitizeActorAuditRecord } from './actor-audit.ts'
 import { DEFAULT_AUDIT_CONFIG } from './audit.ts'
 import { join } from 'node:path'
+import { readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import type { Concept, Entity, Entry, Grounding, Relation, Source, Subject } from './types.ts'
 import { normalizeSubject } from './subject.ts'
@@ -570,6 +571,45 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     readDedupeTraceFromSidecar(dedupeTracePath)
 
   /**
+   * 磁盘会话 id 判据池（v0.65 · 方案 §10.2「日增量维护」第三项「失效引用」）。
+   *
+   * 为什么在这里而不是工具层：`sessions/` 落在 dshHome 下，工具层不该知道它在哪
+   * （与 `recordForget` / `recordAudit` 同一个决策点）。
+   *
+   * **三态**：读得到 ⇒ id 数组；根目录读不到 ⇒ `undefined`——**不是空数组**。
+   * 空数组会让每一处证据坐标都判成「悬空」，那是**假红**，而它看起来与真红一模一样。
+   *
+   * TTL 5 分钟：`sessions/` 下 800+ 个目录，不必每次 `memory_catalog({integrity:true})` 都重扫。
+   * 返回**原始目录名**（可能带 `session-` 前缀）；归一化归 `catalog.ts::normalizeSessionId`，
+   * 一处一份口径。
+   */
+  let sessionIdCache: { at: number; ids: string[] } | undefined
+  const listSessionIds: NonNullable<MemoryToolDeps['listSessionIds']> = () => {
+    const now = Date.now()
+    if (sessionIdCache !== undefined && now - sessionIdCache.at < 5 * 60_000) return sessionIdCache.ids
+    try {
+      const root = join(dshHome, 'sessions')
+      const ids: string[] = []
+      for (const workspace of readdirSync(root, { withFileTypes: true })) {
+        if (!workspace.isDirectory()) continue
+        let sessions
+        try {
+          sessions = readdirSync(join(root, workspace.name), { withFileTypes: true })
+        } catch {
+          continue // 单个工作区不可读 ⇒ 跳过它，不因此判整个池不可用
+        }
+        for (const session of sessions) {
+          if (session.isDirectory()) ids.push(session.name)
+        }
+      }
+      sessionIdCache = { at: now, ids }
+      return ids
+    } catch {
+      return undefined // 根目录都读不到 ⇒ 判不了（不是「一个都没有」）
+    }
+  }
+
+  /**
    * 压缩轨迹接收器工厂（v0.8）：**每个 workspace 自己的 `audit.compress_trace` 说了算**
    * （enabled=false ⇒ 返回 undefined，压缩器完全不落轨迹）。落盘吞错（§5.22 规则 3）。
    */
@@ -752,7 +792,7 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
     }
   }
 
-  registerMemoryTools(ctx, { store, relations, concepts, entities, sources, loadConfig, compress, recompress, recordAccess, recordForget, recordAudit, readAudit, readAccess, readAccessSummary, readAccessRecords, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, resolveProject, resolveEvidence })
+  registerMemoryTools(ctx, { store, relations, concepts, entities, sources, loadConfig, compress, recompress, recordAccess, recordForget, recordAudit, readAudit, readAccess, readAccessSummary, readAccessRecords, recordProposal, recordReviewMark, readReviewMarks, readCompressSummary, recordDedupeTrace, readDedupeTrace, listSessionIds, resolveProject, resolveEvidence })
 
   // 5. 启动注入（v0.2）：会话首 pre-step 注入记忆速览（目录化，预算约束）
   installMemoryInject(ctx, { store, loadConfig })

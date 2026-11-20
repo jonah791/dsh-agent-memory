@@ -48,7 +48,7 @@ import { assertExpiryOrder, countByExpiry, expiryTag, filterByExpiryState, occur
 import { filterBySuccession, parseSupersedesArg, parseSupersessionFilterArg, parseValidAfterArg, shortId, supersededByTag, supersedesTag, validAfterTag } from './succession.ts'
 import { auditMemory } from './audit.ts'
 import { retentionSummary } from './retention.ts'
-import { catalogReport, filterByWindow } from './catalog.ts'
+import { catalogReport, filterByWindow, integrityReport, normalizeSessionId, type IntegrityInputs } from './catalog.ts'
 import { mapReport } from './map.ts'
 import { CONSOLIDATION_DEFAULTS, findConsolidationCandidates } from './consolidate.ts'
 import {
@@ -185,6 +185,18 @@ export interface MemoryToolDeps {
    * 缺省 / 读失败 ⇒ `undefined` ⇒ `memory_misuse` 如实报「未接线」，**不报「零误用」**。
    */
   readAccessRecords?: () => Promise<AccessRecord[] | undefined>
+  /**
+   * 磁盘会话 id 判据池（v0.65 · 方案 §10.2「日增量维护」第三项「失效引用」）。
+   *
+   * 为什么由外部注入：同 `recordForget` —— `sessions/` 落在 dshHome 下，工具层不该知道它在哪。
+   *
+   * **三态语义（照 `readAccess` / `readAudit` 的纪律，且这里是硬要求）**：
+   * - 返回数组 ⇒ 判据池可用，悬空判定成立；
+   * - 返回 `undefined` ⇒ **读不到**（目录不可读 / 未装配）。⚠ 这时**不能退化成空数组**：
+   *   空池会让每一处证据坐标都判成「悬空」，那是**假红**，看起来与真红完全一样；
+   * - 缺省（未注入）⇒ 同 `undefined`。
+   */
+  listSessionIds?: () => readonly string[] | undefined
   /** 提案日志写入（v0.7：让提案有历史——audit 候选 + forget/update 动作同文件可 join；吞错） */
   recordProposal?: (record: unknown) => Promise<boolean> | void
   /**
@@ -5008,6 +5020,51 @@ function buildAudit(deps: MemoryToolDeps): ToolDefinition {
  * **不写库、不批量标注**：判断型字段的批量赋值＝机制替我判断，而判错比「未分类」更贵
  * （未分类是诚实的「不知道」）。
  */
+/** 引用完整性一档的 schema（v0.65）：三态之和恒等于 `total`，`unverifiable` 不是 0 悬空。 */
+const INTEGRITY_CELL_FIELDS = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    checked: { type: 'integer', required: true },
+    missing: { type: 'integer', required: true },
+    unverifiable: { type: 'integer', required: true },
+    total: { type: 'integer', required: true },
+  },
+} as const
+
+/**
+ * 组装引用完整性的判据池（v0.65 · 方案 §10.2「日增量维护」第三项）。
+ *
+ * ## 两个刻意的选择
+ *
+ * 1. **用 `deps.store.list` 直取，不复用调用方那份 `entries`**：那份已经过了角色视野
+ *    （`gatherReadable` 的 `view`），视野外存在的目标会被判成「悬空」——
+ *    那是把**准入**当成**完整性**，两个概念混一起会得出「我读不到的引用都坏了」。
+ * 2. **表未接线时给 `undefined` 而不是空集**：空集会让每一处引用都判悬空（假红）；
+ *    `undefined` 让那一档记「无法校验」。这条区分与 `readAccess` / `readAudit` 同纪律。
+ *
+ * 返回 `undefined` 的唯一情况是**一个条目都读不到**（判据池不可信）——那时宁可不报完整性，
+ * 也不报「全都悬空」。
+ */
+function buildIntegrityInputs(
+  deps: MemoryToolDeps,
+  readScopes: readonly string[],
+): IntegrityInputs | undefined {
+  const pool = readScopes.flatMap((scope) => deps.store.list(scope, { includeArchive: true }))
+  if (pool.length === 0) return undefined
+  const idSet = (rows: readonly { readonly id: string }[]): ReadonlySet<string> =>
+    new Set(rows.map((row) => row.id))
+  const sessionIds = deps.listSessionIds?.()
+  return {
+    entryIds: idSet(pool),
+    ...(deps.sources === undefined ? {} : { sourceIds: idSet(deps.sources.all()) }),
+    ...(deps.concepts === undefined ? {} : { conceptIds: idSet(deps.concepts.all()) }),
+    ...(deps.entities === undefined ? {} : { entityIds: idSet(deps.entities.all()) }),
+    ...(sessionIds === undefined ? {} : { sessionIds: new Set(sessionIds.map(normalizeSessionId)) }),
+    ...(deps.relations === undefined ? {} : { relations: deps.relations.all() }),
+  }
+}
+
 function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
     name: 'memory_catalog',
@@ -5019,6 +5076,11 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
       maxClusters: { type: 'integer', description: '最多出几个簇（缺省 12）——每多一个簇就多一次判断，12 是「一次能看完」的量级。' },
       minClusterSize: { type: 'integer', description: '一个标签至少覆盖多少条才成簇（缺省 8）。太小的簇是噪声：3 条以下的标签归类收益抵不上判断成本。' },
       sinceHours: { type: 'integer', description: '只看最近 N 小时内**新增**的条目（按 createdAt；方案 §10.2「日增量维护」）。缺省 = 全库。传 24 即「昨天那一批」——全库 10% 与近 7 天 85% 是两个口径，不加窗会把「刚打通的新写入」读成「存量很差」。按 createdAt 不按 updatedAt：后者会把被更新过的旧条目混进来。' },
+      integrity: {
+        type: 'boolean',
+        description:
+          '是否量**引用完整性**（v0.65 · 方案 §10.2「日增量维护」第三项「失效引用」）。缺省 false ⇒ 该段不出现（与「量了但 0 悬空」可区分）。量的是五类引用**目标还在不在**：证据坐标（会话/压缩）· 归档引用 · 来源引用 · 关系边两端。⚠ 每档分三态——`checked`（校验过且存在）/ `missing`（校验过且不存在）/ `unverifiable`（**判不了**：会话目录读不到、来源或关系层未接线、压缩 id 未校验），三档之和恒等于 `total`。**`unverifiable` 不是 0 悬空**：把装配缺陷读成「引用都悬空」会去修一个不存在的问题。被检查的条目随 `sinceHours` 走，判据池始终是全库。',
+      },
     },
     output: {
       schema: {
@@ -5032,6 +5094,43 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
             properties: {
               sinceHours: { type: 'integer', required: true },
               startIso: { type: 'string', required: true },
+            },
+          },
+          integrity: {
+            type: 'object',
+            additionalProperties: false,
+            description:
+              '引用完整性（v0.65 · 方案 §10.2「日增量维护」第三项「失效引用」）。**缺省不出现 = 没量**（与「量了但 0 悬空」可区分）。被检查的条目随 `sinceHours` 走，判据池始终全库。每档三态之和恒等于 `total`；`unverifiable` 是**判不了**（会话目录读不到 / 表未接线 / 压缩 id 未校验），把它读成 0 悬空会去修一个不存在的问题。',
+            properties: {
+              evidenceSession: {
+                ...INTEGRITY_CELL_FIELDS,
+                description: '证据坐标 · 会话类（第二段会话 id 在磁盘有对应目录）',
+              },
+              evidenceCompaction: {
+                ...INTEGRITY_CELL_FIELDS,
+                description: '证据坐标 · 压缩类。⚠ 只校验所属会话存在，第三段 compaction id 未校验 ⇒ 有会话时记 unverifiable，**该项是下界**',
+              },
+              archiveRef: { ...INTEGRITY_CELL_FIELDS, description: '归档引用（概要 → 原料条目）' },
+              sourceIds: { ...INTEGRITY_CELL_FIELDS, description: '来源实体引用' },
+              relations: { ...INTEGRITY_CELL_FIELDS, description: '关系边两端（按 fromKind/toKind 取判据池）' },
+              samples: {
+                type: 'array',
+                description: '悬空样本（最多 8 条，只给坐标不给正文）',
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    kind: { type: 'string', required: true },
+                    ownerId: { type: 'string', required: true },
+                    ref: { type: 'string', required: true },
+                  },
+                },
+              },
+              caveats: {
+                type: 'array',
+                description: '本轮**没能覆盖**的面，逐条点名（不覆盖不假装覆盖）',
+                items: { type: 'string' },
+              },
             },
           },
           denominator: { type: 'integer', required: true, description: '应编目分母（活跃、非压缩产物、非 summary；窗内读数的分母是**窗内**的）' },
@@ -5242,6 +5341,38 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
           lines.push(`  ⚠ ${d.label}（代理，需 ${d.needs.join(' + ')}）：${d.caveat}`)
         }
         lines.push('⚠ 建议是**提问不是答案**（标签可能同时指两类）；「覆盖不到」的那批是长尾，只能逐条判。本工具不改任何条目。')
+        // ── 引用完整性（v0.65）───────────────────────────────────────────────
+        if (value.integrity !== undefined) {
+          const scope = value.window === undefined ? '全库口径' : `窗内口径（近 ${value.window.sinceHours} 小时新增）`
+          const cell = (
+            label: string,
+            c: { checked?: number; missing?: number; unverifiable?: number; total?: number },
+          ): string => {
+            const checked = c.checked ?? 0
+            const missing = c.missing ?? 0
+            const unv = c.unverifiable ?? 0
+            const total = c.total ?? 0
+            const bad = missing > 0 ? `**悬空 ${missing}**` : '悬空 0'
+            return `${label} ${total} 处｜已核 ${checked} · ${bad}${unv > 0 ? ` · 判不了 ${unv}` : ''}`
+          }
+          const missingSum =
+            (value.integrity.evidenceSession?.missing ?? 0) +
+            (value.integrity.evidenceCompaction?.missing ?? 0) +
+            (value.integrity.archiveRef?.missing ?? 0) +
+            (value.integrity.sourceIds?.missing ?? 0) +
+            (value.integrity.relations?.missing ?? 0)
+          lines.push(`引用完整性（§10.2 日增量维护 · 第三项「失效引用」，${scope}；判据池为全库）：`)
+          lines.push(`  ${cell('证据坐标·会话', value.integrity.evidenceSession ?? {})}`)
+          lines.push(`  ${cell('证据坐标·压缩', value.integrity.evidenceCompaction ?? {})}`)
+          lines.push(`  ${cell('归档引用', value.integrity.archiveRef ?? {})}`)
+          lines.push(`  ${cell('来源引用', value.integrity.sourceIds ?? {})}`)
+          lines.push(`  ${cell('关系边两端', value.integrity.relations ?? {})}`)
+          lines.push(
+            `  合计悬空 **${missingSum}** 处。每档三态之和恒等于它的 total：「已核」与「悬空」判过，「判不了」是**没判**——把后者读成 0 悬空就会去修一个不存在的问题。`,
+          )
+          for (const s of value.integrity.samples ?? []) lines.push(`  · 悬空样本 ${s.kind}｜${s.ownerId} → ${s.ref}`)
+          for (const c of value.integrity.caveats ?? []) lines.push(`  ⚠ ${c}`)
+        }
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
@@ -5283,9 +5414,15 @@ function buildCatalog(deps: MemoryToolDeps): ToolDefinition {
       const scopedForCred = args.sinceHours === undefined
         ? entries
         : filterByWindow(entries, { sinceHours: args.sinceHours })
+      const integrityInputs = args.integrity === true ? buildIntegrityInputs(deps, readScopes) : undefined
       return {
         ...report,
         credibility: credibilityReport(scopedForCred, lookupSource === undefined ? {} : { lookupSource }),
+        // v0.65 · 方案 §10.2「日增量维护」第三项「失效引用」：被检查集合与上面**同一个窗**
+        // （= `scopedForCred`），判据池始终全库。两段同口径是 v0.64 定下的纪律。
+        ...(args.integrity === true && integrityInputs !== undefined
+          ? { integrity: integrityReport(scopedForCred, integrityInputs) }
+          : {}),
       }
     },
   })
