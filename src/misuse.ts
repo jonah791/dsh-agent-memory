@@ -92,8 +92,10 @@ export interface MisuseWindow {
   readonly resolvable: number
   /** 历史记录贡献的返回次数（不可分辨） */
   readonly unresolved: number
-  /** A 档：返回那一刻结论已不能用，且**未显式要求看归档** */
+  /** A 档：返回那一刻结论已不能用，且**未显式要求看归档**（**全量**口径，含不可分辨） */
   readonly tierA: number
+  /** A 档的**可分辨**子集（v0.60）：只有这部分参与 C3 判定 */
+  readonly tierAResolvable: number
   /** 显式要求看归档的返回（正常用法，**不进分子**） */
   readonly tierAExplicit: number
   /** B 档：返回时已过复查死线（设计上「到期不等于作废」，单列不算误用） */
@@ -106,16 +108,24 @@ export interface MisuseWindow {
   readonly autoReturns: number
   /** 自动注入通道的 A 档（零容忍） */
   readonly autoTierA: number
-  /** 真误用率 = tierA / returns */
+  /** 真误用率 = tierA / returns（**全量**口径，仅供对照） */
   readonly rate: number
+  /** 可分辨窗口的误用率 = tierAResolvable / resolvable（v0.60：**判定用这一格**） */
+  readonly rateResolvable: number
   /** A 档构成（原因 → 条数） */
   readonly byReason: Readonly<Record<string, number>>
-  /** 泊松期望 λ = returns × 基线 */
+  /** 泊松期望 λ = returns × 基线（**全量**口径，仅供对照） */
   readonly lambda: number
-  /** 黄线（k 达到即 warn） */
+  /** 全量黄线（k 达到即 warn）*/
   readonly warnAt: number | null
-  /** 红线（k 达到即 breach） */
+  /** 全量红线（k 达到即 breach）*/
   readonly breachAt: number | null
+  /** 可分辨窗口的 λ = resolvable × 基线（v0.60：**判定用这一格**） */
+  readonly lambdaResolvable: number
+  /** 可分辨窗口的黄线 */
+  readonly warnAtResolvable: number | null
+  /** 可分辨窗口的红线 */
+  readonly breachAtResolvable: number | null
   readonly verdict: MisuseVerdict
   /** 判定依据的一句话（越线时必须说清「该查什么」） */
   readonly verdictReason: string
@@ -265,6 +275,7 @@ interface Bucket {
   resolvable: number
   unresolved: number
   tierA: number
+  tierAResolvable: number
   tierAExplicit: number
   tierB: number
   afterReturn: number
@@ -280,6 +291,7 @@ function emptyBucket(): Bucket {
     resolvable: 0,
     unresolved: 0,
     tierA: 0,
+    tierAResolvable: 0,
     tierAExplicit: 0,
     tierB: 0,
     afterReturn: 0,
@@ -291,9 +303,27 @@ function emptyBucket(): Bucket {
 }
 
 function finalizeWindow(label: MisuseWindow['label'], sinceMs: number | null, bucket: Bucket): MisuseWindow {
+  // v0.60（2026-11-20 · 方案 §13.1「过时误用率」的可判性修正）：**判定基准改为可分辨子集**。
+  //
+  // 病（实测）：不可分辨的记录——v0.46 之前写的 trace 没有 `includeArchive` 标志，
+  // 分不清「调用方要求看归档」与「真误用」——此前照样计入分母与 A 档分子。
+  // 后果：一批历史批量返回就能把 7 天窗口推红。2026-11-20 实测：近 7 天 12 条 A 档
+  // **全部**落在不可分辨的 1435 条里，可分辨的 126 条 A 档为 0；而那 126 条的 λ=0.34
+  // 远低于 MIN_LAMBDA=3（按本模块自己的规则应当「不可判」，而不是红）。
+  //
+  // 判据**没有放松**：可分辨窗口自己出现误用时，λ+3σ 照样红（同一个 judgeByPoisson）；
+  // 全量读数并列保留（lambda / warnAt / breachAt / rate），不可分辨那堆继续涨也看得见。
   const rate = bucket.returns > 0 ? bucket.tierA / bucket.returns : 0
   const lambda = bucket.returns * R7_BASELINE_RATE
-  const judged = judgeByPoisson(bucket.tierA, lambda, rate)
+  const judgedAll = judgeByPoisson(bucket.tierA, lambda, rate)
+  const rateResolvable = bucket.resolvable > 0 ? bucket.tierAResolvable / bucket.resolvable : 0
+  const lambdaResolvable = bucket.resolvable * R7_BASELINE_RATE
+  // `all` 窗口用**全量**：它是「存量债」，对照物是冻结基线（同一口径），C2 已经管着它；
+  // C3 滑窗才是要抓「近期恶化」的那一格——而近期数据本身带标志，所以按可分辨判。
+  // ⇒ 两个窗口的 λ/k 取的子集不同，这是刻意的，不是不一致。
+  const judged = label === 'all'
+    ? judgeByPoisson(bucket.tierA, lambda, rate)
+    : judgeByPoisson(bucket.tierAResolvable, lambdaResolvable, rateResolvable)
   const byReason: Record<string, number> = {}
   for (const [reason, count] of bucket.byReason) byReason[reason] = count
 
@@ -312,17 +342,26 @@ function finalizeWindow(label: MisuseWindow['label'], sinceMs: number | null, bu
       gone: bucket.gone,
       autoReturns: bucket.autoReturns,
       autoTierA: bucket.autoTierA,
+      tierAResolvable: bucket.tierAResolvable,
       rate,
+      rateResolvable,
       byReason,
       lambda,
-      warnAt: judged.warnAt,
-      breachAt: judged.breachAt,
+      warnAt: judgedAll.warnAt,
+      breachAt: judgedAll.breachAt,
+      lambdaResolvable,
+      warnAtResolvable: judged.warnAt,
+      breachAtResolvable: judged.breachAt,
       verdict: 'breach',
       verdictReason: `自动注入通道出现 ${bucket.autoTierA} 条误用（容忍度 ${R7_AUTO_TOLERANCE}）——该路径不经过调用方判断，出现即机制 bug：查自动注入为什么产出归档条目`,
     }
   }
 
-  // C2 只对累计口径生效：它是「存量债天花板」，抓翻倍不抓波动
+  // C2 只对累计口径生效：它是「存量债天花板」，抓翻倍不抓波动。
+  // ⚠ **C2 刻意保持全量**（与 C3 不同）：它的对照物是**冻结基线**（38/14226，按全量算），
+  // 改成可分辨会让「与基线同口径」这件事不成立——试过一版，累计 0.26%（明明绿）被推成
+  // 「不可判」，那是把口径改歪而不是改准。C3 滑窗才需要可分辨（它要抓近期恶化，
+  // 而近期数据本身就带标志）。
   if (label === 'all' && rate > R7_CUMULATIVE_CAP) {
     return {
       label,
@@ -337,13 +376,18 @@ function finalizeWindow(label: MisuseWindow['label'], sinceMs: number | null, bu
       gone: bucket.gone,
       autoReturns: bucket.autoReturns,
       autoTierA: bucket.autoTierA,
+      tierAResolvable: bucket.tierAResolvable,
       rate,
+      rateResolvable,
       byReason,
       lambda,
-      warnAt: judged.warnAt,
-      breachAt: judged.breachAt,
+      warnAt: judgedAll.warnAt,
+      breachAt: judgedAll.breachAt,
+      lambdaResolvable,
+      warnAtResolvable: judged.warnAt,
+      breachAtResolvable: judged.breachAt,
       verdict: 'breach',
-      verdictReason: `累计率 ${(rate * 100).toFixed(2)}% > 上限 ${(R7_CUMULATIVE_CAP * 100).toFixed(2)}%（基线 ${(R7_BASELINE_RATE * 100).toFixed(2)}% 的 3σ 上界）——存量债超红线`,
+      verdictReason: `累计率 ${(rate * 100).toFixed(2)}% > 上限 ${(R7_CUMULATIVE_CAP * 100).toFixed(2)}%（基线 ${(R7_BASELINE_RATE * 100).toFixed(2)}% 的 3σ 上界，**同口径**）——存量债超红线`,
     }
   }
 
@@ -360,11 +404,16 @@ function finalizeWindow(label: MisuseWindow['label'], sinceMs: number | null, bu
     gone: bucket.gone,
     autoReturns: bucket.autoReturns,
     autoTierA: bucket.autoTierA,
+    tierAResolvable: bucket.tierAResolvable,
     rate,
+    rateResolvable,
     byReason,
     lambda,
-    warnAt: judged.warnAt,
-    breachAt: judged.breachAt,
+    warnAt: judgedAll.warnAt,
+    breachAt: judgedAll.breachAt,
+    lambdaResolvable,
+    warnAtResolvable: judged.warnAt,
+    breachAtResolvable: judged.breachAt,
     verdict: judged.verdict,
     verdictReason: judged.reason,
   }
@@ -415,6 +464,8 @@ export function misuseReport(input: MisuseInput): MisuseReport {
         switch (tier.kind) {
           case 'tierA':
             bucket.tierA += 1
+            // v0.60：只有**可分辨**的 A 档参与 C3 判定（病与理由见 finalizeWindow 头注）
+            if (resolvable) bucket.tierAResolvable += 1
             bucket.byReason.set(tier.reason, (bucket.byReason.get(tier.reason) ?? 0) + 1)
             break
           case 'explicit':

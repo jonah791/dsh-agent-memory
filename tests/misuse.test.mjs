@@ -330,3 +330,45 @@ test('E3 ★工具只读：跑前后存储逐字节不变；分层在工具层�
 function tool_render(tool, value) {
   return tool.output.render({}, value).map((c) => c.text).join('\n')
 }
+
+// ---------- v0.60：C3 判定基准改成「可分辨子集」（方案 §13.1 可判性修正）----------
+// 病：不可分辨的记录（v0.46 前的 trace 没有 includeArchive 标志）此前照样计入分母与
+// A 档分子 ⇒ 一批历史批量返回就能把窗口推红。实测 2026-11-20：近 7 天 12 条 A 档全在
+// 不可分辨的 1435 条里，可分辨的 126 条 A 档为 0。
+// 判据必须成对：**不可分辨的坏样本不许推红** ∧ **可分辨的坏样本仍要被看见**。
+
+test('C17 ★不可分辨的 A 档不进判定基准（v0.60）', () => {
+  // 10 条返回全部无 includeArchive ⇒ 不可分辨；命中的是一条早已归档的条目 ⇒ 全 tierA
+  const dead = entry({ id: 'dead', archived: true, updatedAt: new Date(NOW - 10 * DAY).toISOString() })
+  const recs = Array.from({ length: 10 }, () => ({ atMs: NOW - 1000, source: 'recall', ids: ['dead'] }))
+  const report = misuseReport({ entries: [dead], records: recs, now: NOW })
+  // ⚠ 判 C3 滑窗，不看 `all`：`all` 上还有 C2（累计率上限），而 C2 **刻意保持全量**
+  // ——它与冻结基线（38/14226，按全量算）必须同口径。所以「10 条不可分辨 A 档」
+  // 在 all 窗口仍会触发 C2 红，那是**保守设计**（分不清就算债），不是本判据要改的东西。
+  const w = report.windows.find((x) => x.label === '7d')
+  assert.ok(w)
+  assert.equal(w.tierA, 10, '全量口径仍照实报——不可分辨那堆不能被新口径藏起来')
+  assert.equal(w.tierAResolvable, 0, '可分辨子集为 0')
+  assert.equal(w.resolvable, 0)
+  assert.equal(w.verdict, 'inconclusive', 'C3 滑窗：不可分辨的坏样本不许推红（修前它就是红的）')
+
+  // 同一批，但**显式要求看归档** ⇒ 正常用法，连全量分子都不进
+  const explicit = recs.map((r) => ({ ...r, includeArchive: true }))
+  const report2 = misuseReport({ entries: [dead], records: explicit, now: NOW })
+  const w2 = report2.windows.find((x) => x.label === 'all')
+  assert.equal(w2.tierA, 0, '显式要求看归档 ⇒ 不计入误用')
+})
+
+test('C18 ★可分辨窗口的真误用仍必须被看见（判据没有放松）', () => {
+  const dead = entry({ id: 'dead2', archived: true, updatedAt: new Date(NOW - 10 * DAY).toISOString() })
+  const live = entry({ id: 'live', updatedAt: new Date(NOW - 1000).toISOString() })
+  // 30 条可分辨返回，其中 12 条命中已归档条目（40%）⇒ 小样本兜底应给出 warn
+  const recs = Array.from({ length: 30 }, (_, i) => ({
+    atMs: NOW - 1000, source: 'recall', ids: [i < 12 ? 'dead2' : 'live'], includeArchive: false,
+  }))
+  const report = misuseReport({ entries: [dead, live], records: recs, now: NOW })
+  const w = report.windows.find((x) => x.label === 'all')
+  assert.equal(w.tierAResolvable, 12, '可分辨的 A 档要被数出来')
+  assert.equal(w.resolvable, 30)
+  assert.notEqual(report.verdict, 'ok', '可分辨窗口出现 40% 误用时不许报绿（至少 warn/inconclusive）')
+})

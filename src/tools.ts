@@ -5764,17 +5764,22 @@ function buildMisuse(deps: MemoryToolDeps): ToolDefinition {
                 returns: { type: 'integer', required: true },
                 resolvable: { type: 'integer', required: true, description: '带 includeArchive 的返回条目·次' },
                 unresolved: { type: 'integer', required: true, description: '历史记录（不可分辨）' },
-                tierA: { type: 'integer', required: true, description: '真误用条数（未显式要求看归档）' },
+                tierA: { type: 'integer', required: true, description: '真误用条数（未显式要求看归档）——**全量**口径，含不可分辨' },
+                tierAResolvable: { type: 'integer', required: true, description: 'A 档的**可分辨**子集（v0.60）：只有这部分参与 C3 判定' },
                 tierAExplicit: { type: 'integer', required: true, description: '显式要求看归档的返回（不计入误用）' },
                 tierB: { type: 'integer', required: true },
                 afterReturn: { type: 'integer', required: true },
                 gone: { type: 'integer', required: true },
                 autoReturns: { type: 'integer', required: true },
                 autoTierA: { type: 'integer', required: true },
-                rate: { type: 'number', required: true },
-                lambda: { type: 'number', required: true, description: '泊松期望 = returns × 基线' },
-                warnAt: { type: 'number', description: '黄线（k 达到即 warn）；λ 不足时不出现' },
-                breachAt: { type: 'number', description: '红线；λ 不足时不出现' },
+                rate: { type: 'number', required: true, description: '全量误用率（仅供对照）' },
+                rateResolvable: { type: 'number', required: true, description: '可分辨窗口误用率（v0.60：判定用这一格）' },
+                lambda: { type: 'number', required: true, description: '全量泊松期望 = returns × 基线（仅供对照）' },
+                warnAt: { type: 'number', description: '全量黄线；λ 不足时不出现' },
+                breachAt: { type: 'number', description: '全量红线；λ 不足时不出现' },
+                lambdaResolvable: { type: 'number', required: true, description: '可分辨窗口 λ = resolvable × 基线（v0.60：判定用这一格）' },
+                warnAtResolvable: { type: 'number', description: '可分辨窗口黄线；λ 不足时不出现' },
+                breachAtResolvable: { type: 'number', description: '可分辨窗口红线；λ 不足时不出现' },
                 verdict: { type: 'string', required: true },
                 verdictReason: { type: 'string', required: true },
                 byReason: { type: 'object', additionalProperties: true, required: true },
@@ -5797,9 +5802,16 @@ function buildMisuse(deps: MemoryToolDeps): ToolDefinition {
         )
         for (const w of value.windows) {
           const name = w.label === 'all' ? '累计' : w.label === '7d' ? '近 7 天' : '近 30 天'
-          const lambdaPart = w.lambda >= 3 ? `λ=${w.lambda.toFixed(1)} 红线 ${(w.breachAt ?? 0).toFixed(1)}` : `λ=${w.lambda.toFixed(2)}（样本不足）`
+          // v0.60：判定基准是**可分辨子集**；全量并列一行供对照（不可分辨那堆不能被新口径藏起来）
+          const decidedPart = w.lambdaResolvable >= 3
+            ? `λ=${w.lambdaResolvable.toFixed(1)} 红线 ${(w.breachAtResolvable ?? 0).toFixed(1)}`
+            : `λ=${w.lambdaResolvable.toFixed(2)}（样本不足）`
           lines.push(
-            `${name}：A 档 ${w.tierA}/${w.returns} = ${(w.rate * 100).toFixed(2)}%（${lambdaPart}）→ ${mark(w.verdict)} · ${w.verdictReason}`,
+            `${name}：**可分辨** A 档 ${w.tierAResolvable}/${w.resolvable} = ${(w.rateResolvable * 100).toFixed(2)}%（${decidedPart}）→ ${mark(w.verdict)} · ${w.verdictReason}`,
+          )
+          lines.push(
+            `  └ 全量对照：A 档 ${w.tierA}/${w.returns} = ${(w.rate * 100).toFixed(2)}%`
+            + (w.unresolved > 0 ? `（其中 ${w.unresolved} 条**不可分辨**，不参与判定）` : ''),
           )
         }
         const auto = value.windows.find((w) => w.label === 'all')
@@ -5867,10 +5879,15 @@ function buildMisuse(deps: MemoryToolDeps): ToolDefinition {
           gone: window.gone,
           autoReturns: window.autoReturns,
           autoTierA: window.autoTierA,
+          tierAResolvable: window.tierAResolvable,
           rate: window.rate,
+          rateResolvable: window.rateResolvable,
           lambda: window.lambda,
           ...(window.warnAt !== null ? { warnAt: window.warnAt } : {}),
           ...(window.breachAt !== null ? { breachAt: window.breachAt } : {}),
+          lambdaResolvable: window.lambdaResolvable,
+          ...(window.warnAtResolvable !== null ? { warnAtResolvable: window.warnAtResolvable } : {}),
+          ...(window.breachAtResolvable !== null ? { breachAtResolvable: window.breachAtResolvable } : {}),
           verdict: window.verdict,
           verdictReason: window.verdictReason,
           byReason: { ...window.byReason },
