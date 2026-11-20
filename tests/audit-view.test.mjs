@@ -276,11 +276,18 @@ test('A165 渲染：有原因印「因为「…」」，没原因不印（挑着
   const recall = byName.get('recall')
   const text = recall.output.render({}, await recall.execute({}, MAIN_EXEC)).map((p) => p.text).join(NL)
   const lines = text.split(NL).filter((line) => line.startsWith('- ['))
-  // ⚠ 第三次同形：相关链后缀 `→ 关联: XX(id=…)` 会把另一条也带进同一行，
-  // 不切掉就只能命中先出现的那行。判据要落在**自己的段**上。
+  // ⚠ 第四次同形（2026-11-20 定位到的真因）：此前用标题 `带原因(id=` 定位自己的段，
+  // 而 `带原因` 是 `不带原因` 的**子串** ⇒ 当「不带原因」行排在前面时先命中它，
+  // 表现为「行在、但没原因」的**偶发**红（2000 次复现 1 次 · 全量 30 次复现 5 次）。
+  // 修法不是改标题（改了陷阱样本就没了），而是把定位键换成**唯一键**：条目 id。
+  // 相关链后缀 `→ 关联: XX(id=…)` 也会带进对方 id，故 ownPart 仍保留——两道一起用。
   const ownPart = (line) => line.split('→ 关联')[0]
-  const withLine = lines.find((line) => ownPart(line).includes('带原因(id='))
-  const withoutLine = lines.find((line) => ownPart(line).includes('不带原因(id='))
+  const segOf = (id) => `(id=${id})`
+  const withLine = lines.find((line) => ownPart(line).includes(segOf(withReason.id)))
+  const withoutLine = lines.find((line) => ownPart(line).includes(segOf(withoutReason.id)))
+  // 反向证明陷阱真实存在：旧键（纯标题）确实会在**错误的行**上命中
+  assert.ok(ownPart(withoutLine).includes('带原因(id='), '标题互为子串的陷阱仍成立——正因如此定位键必须是 id')
+  assert.ok(!ownPart(withoutLine).includes(segOf(withReason.id)), 'id 不串行：不带原因的行里不该出现对方 id')
   assert.ok(withLine.includes('因为「主人纠正了口径」'), '有原因必须印出来')
   assert.equal(withoutLine.includes('因为'), false, '没原因留空——缺省 = 不知道，不是「无理由」')
   assert.ok(withoutLine.includes('⟲修订1次'), '修订本身仍要印（与原因无关）')
