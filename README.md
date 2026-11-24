@@ -11,11 +11,20 @@
 # dsh-agent-memory
 
 <p align="center">
-  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.17.0-blue" alt="version"></a>
+  <a href="https://github.com/jonah791/dsh-agent-memory"><img src="https://img.shields.io/badge/version-0.32.0-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-387%20passed-brightgreen" alt="tests">
+  <!-- tests 徽章刻意不带数字：精确条数由 `npm test` 输出，写死在这里的数码第二天就过期，
+       而它无法被机械校验（测试自己数自己会自指）⇒ 不可核的数字不如说清「通过状态见 npm test」 -->
+  <img src="https://img.shields.io/badge/tests-passing-brightgreen" alt="tests">
 </p>
+
+<!-- 版本两轴（2026-11-24 定，取代原先「三处同步」的表述）：
+     ① 包语义版本 = `package.json` 的 version，是唯一真源；`dsh-plugin.json` 的 version 与上面
+        的 version 徽章都跟它，并由 `tests/version-consistency.test.mjs` 机械校验。
+     ② 能力编号 = `docs/semantic.md` 的能力编号（v0.NN），每加一批能力 +1，与包版本**刻意不相等**
+        （v0.32–v0.36 五个能力未单独发版）。两条轴正交，不要试图对齐。
+     运行时真源：`memory_version` 工具报的就是 ① 。 -->
 
 **一句话**：给 DSH 里的 agent 装上**跨会话的长期记忆**——把「经历过的事」结构化写入持久层，再在恰当的时机（会话启动、每条主人消息、时间桶结束、会话压缩完成）把它带回上下文，并允许 agent 检索、修订、归档、沿关系行走。
 
