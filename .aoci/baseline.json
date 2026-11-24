@@ -1,7 +1,7 @@
 {
   "version": 1,
   "created_at": "2026-11-20T05:57:09Z",
-  "updated_at": "2026-11-20T09:45:01Z",
+  "updated_at": "2026-11-20T11:03:44Z",
   "files": {
     ".gitattributes": {
       "role": "index",
@@ -47,9 +47,9 @@
     },
     "aoci.code.txt": {
       "role": "index",
-      "sha256": "57edec5026e8593b35236736a008b34669a0f875be742713dd3175707fa2fb97",
-      "size": 26768,
-      "normalized_sha256": "57edec5026e8593b35236736a008b34669a0f875be742713dd3175707fa2fb97"
+      "sha256": "edc91575a4642ed0cbaefe18ed6fd25cf694a0d9e70c9e06db255990a5a8611e",
+      "size": 26984,
+      "normalized_sha256": "edc91575a4642ed0cbaefe18ed6fd25cf694a0d9e70c9e06db255990a5a8611e"
     },
     "aoci.meta.txt": {
       "role": "index",
@@ -77,9 +77,9 @@
     },
     "docs/semantic.md": {
       "role": "index",
-      "sha256": "97ed34f35bdbd3933e098f805ee995ab077396ee3cd06eac8321584bb646b2a4",
-      "size": 451353,
-      "normalized_sha256": "97ed34f35bdbd3933e098f805ee995ab077396ee3cd06eac8321584bb646b2a4"
+      "sha256": "3c4c4e481a492cb8a0a325c16f6e1e6d5411f6104aac6110aeaf27dcb67e0e91",
+      "size": 456995,
+      "normalized_sha256": "3c4c4e481a492cb8a0a325c16f6e1e6d5411f6104aac6110aeaf27dcb67e0e91"
     },
     "dsh-plugin.json": {
       "role": "index",
@@ -443,9 +443,9 @@
     },
     "src/tools.ts": {
       "role": "index",
-      "sha256": "40f3001ec6016479874a0cee4cd9b1ae3aa0f2653a1db1e84bbb77a4c3e77b28",
-      "size": 447693,
-      "normalized_sha256": "40f3001ec6016479874a0cee4cd9b1ae3aa0f2653a1db1e84bbb77a4c3e77b28"
+      "sha256": "687bf335d8872f57e0f18b7947060a8cc4824dafe76dc5d6913a8261bb64ca54",
+      "size": 450342,
+      "normalized_sha256": "687bf335d8872f57e0f18b7947060a8cc4824dafe76dc5d6913a8261bb64ca54"
     },
     "src/types.ts": {
       "role": "index",
@@ -905,9 +905,9 @@
     },
     "tests/write-gate.test.mjs": {
       "role": "observe",
-      "sha256": "95d8c4c29f31dec8987d9c805b46b7bd2bd3b2c5dfe44de4c43cd332c6d89197",
-      "size": 13223,
-      "normalized_sha256": "95d8c4c29f31dec8987d9c805b46b7bd2bd3b2c5dfe44de4c43cd332c6d89197"
+      "sha256": "3730ca9484ce6a3e9796b193c72d34216dbf01ed3cb007088a38c39f66dbae3b",
+      "size": 18930,
+      "normalized_sha256": "3730ca9484ce6a3e9796b193c72d34216dbf01ed3cb007088a38c39f66dbae3b"
     },
     "tsconfig.json": {
       "role": "index",
