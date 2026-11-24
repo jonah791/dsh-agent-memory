@@ -22,7 +22,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { MemoryStore } from '../lib/store.js'
 import { ConceptStore } from '../lib/thesaurus.js'
-import { EntityStore, normalizeEntityName } from '../lib/entities.js'
+import { EntityStore, entityKey, normalizeEntityName } from '../lib/entities.js'
 import { createMemoryTools } from '../lib/tools.js'
 import { entitySchema } from '../lib/index.js'
 import { workspaceIdOf } from '../lib/scope.js'
@@ -104,6 +104,50 @@ test('E1 建立与读取：id 递增、按规范名/别名解析、归一生效�
 })
 
 // ---------- E2 撞名与消歧 ----------
+
+// ---------- E1b 跨 scope 的 id 语义（2026-11-24 补 · lh-7f0e5032 复现）----------
+//
+// ⚠ 这条钉的不是「功能」，是**不变量**：id 跨 scope **全局唯一**，不是「每 scope 各自递增」
+//（原 `nextId` 注释就是这么写的，实测与实现不符，已同步改注释）。
+//
+// 为什么必须钉住：工具层有多处按 id 解析而**不带 scope**（`entities.find(id)` 的唯一参数就是 id），
+// 它们能无歧义工作**完全依赖**这个不变量。若有人照旧注释去「修」成每 scope 各自递增，
+// 两个 scope 就会出现同一个 id，按 id 解析立刻退化成「碰运气命中哪个 scope」——
+// 而此前的测试**一条都不会红**（E1 只用了单 scope）。
+//
+// 代价也如实钉住：新 scope 的第一个实体**不从 0001 起**（实测 B 的首个是 ENTITY-0002）。
+
+test('E1b id 跨 scope 全局唯一：新 scope 首个实体接着全局水位（不是每 scope 各自递增）', async () => {
+  const entities = new EntityStore(new MemoryKv())
+
+  const a1 = await entities.create({ scope: 'scope-A', canonicalName: '甲', entityType: '项目' })
+  assert.equal(a1.id, 'ENTITY-0001')
+
+  // ★ 被钉住的读数：B 的首个实体是 0002、不是 0001
+  const b1 = await entities.create({ scope: 'scope-B', canonicalName: '乙', entityType: '项目' })
+  assert.equal(b1.id, 'ENTITY-0002', '全局唯一 ⇒ 新 scope 不从 0001 起；改成「每 scope 递增」会破坏按 id 解析')
+
+  // 同 scope 内继续递增——这条两种实现都会过，是对照组（证明上一条不是「什么都拦」）
+  const a2 = await entities.create({ scope: 'scope-A', canonicalName: '丙', entityType: '项目' })
+  assert.equal(a2.id, 'ENTITY-0003')
+
+  // ★ 真正要守的：不带 scope 的按 id 解析必须**唯一**命中它自己
+  for (const created of [a1, b1, a2]) {
+    const hit = entities.find(created.id)
+    assert.equal(hit?.scope, created.scope, `find(${created.id}) 必须唯一命中它自己那个 scope`)
+    assert.equal(hit?.canonicalName, created.canonicalName)
+  }
+
+  // 尸体样本：直接构造「跨 scope 重号」的世界，证明上面那些断言真有分辨力
+  // （若 id 不全局唯一，find 只能返回先遍历到的那个 ⇒ 解析歧义）
+  const kv = new MemoryKv()
+  const dup = new EntityStore(kv)
+  const x = await dup.create({ scope: 'scope-X', canonicalName: 'X', entityType: '项目' })
+  await kv.put(entityKey('scope-Y', x.id), { ...x, scope: 'scope-Y', canonicalName: 'Y' })
+  const sameId = dup.all().filter((e) => e.id === x.id)
+  assert.equal(sameId.length, 2, '尸体样本：重号世界里同一个 id 对应两个实体')
+  assert.equal(dup.find(x.id)?.scope, sameId[0].scope, '而 find 只能给出其中一个 ⇒ 这就是重号后的歧义')
+})
 
 test('E2 撞名：同名不同实体可并存，但没写 disambiguation 整笔拒绝；写了则两候选并存且 ambiguous', async () => {
   const { entities } = setup()
