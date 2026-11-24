@@ -7,9 +7,9 @@ AGENTS.md[SG7S]: F:AOCI 会话合同与仓库认知使用规则的托管区块 |
 DESIGN.md[SG7M]: F:v0.1 设计定稿：设计总纲（程序只是工具，决策归智能体）+ 分层、作用域路由、存储、压缩通道 | R:code:IMPLEMENTATION.md | A:- | S:总纲是最高原则，任何实现取舍与它冲突时它优先；本文件是设计意图，工程契约在 IMPLEMENTATION.md
 IMPLEMENTATION.md[SG6S]: F:v0.1 实现规格：接口、格式、验收的唯一工程契约 | R:code:DESIGN.md | A:- | S:标注「取证」处要求实现者查证源码后自定，不许照抄猜测；文件自称 v0.1 MVP 完成，实际能力编号已远超它
 LICENSE[ZG2T]: F:MIT 许可声明 | R:- | A:- | S:版权人写的是 jonah791，公开仓据此发布
-README.md[SG7M]: F:插件对外契约：用途、工具表、配置、生效判据、回退，加生态公约声明头 | R:code:docs/semantic.md,code:cordis.patch.yml,code:package.json | A:- | S:声明头里 tools 列表与 package.json 的 dsh 段是两处载体，加工具时两处都要改；README 反引号里写出的测试文件名由 readme-claim-verify 门禁核对存在性
+README.md[SG7M]: F:插件对外契约：用途、工具表、配置、生效判据、回退，加生态公约声明头 | R:code:docs/semantic.md,code:cordis.patch.yml,code:package.json | A:- | S:声明头里 tools 列表与 package.json 的 dsh 段是两处载体，加工具时两处都要改；README 反引号里的测试文件名由 readme-claim-verify 门禁核对存在性；version 徽章由 version-consistency.test.mjs 核对等于 package.json，tests 徽章刻意不带数字（测试自己数自己会自指，不可核的数字不如不写）
 cordis.patch.yml[FV6T]: F:bundle patch：把本插件与 storage 栈（storage→storage-json→storage-domain）挂进宿主组合 | R:code:package.json | A:- | S:包通过 package.json 的 dsh.bundle.patch 自挂载，宿主无需另行声明；storage-domain 的 root 用 dshHomePath('storages') 解析，改它会让既有库读不到
-dsh-plugin.json[FV3T]: F:社区插件清单：manifestVersion 0.1.0、id com.jonah791.agent-memory、宿主入口 lib/fabric.js | R:code:package.json | A:- | S:清单 version 0.24.0 落后包版本 0.32.0，不一致是既有状态
+dsh-plugin.json[FV3T]: F:社区插件清单：manifestVersion 0.1.0、id com.jonah791.agent-memory、宿主入口 lib/fabric.js | R:code:package.json | A:- | S:version=package.json（测试校验）；manifestVersion 独立
 package.json[FV6T]: F:包清单与 dsh bundle 入口；脚本、依赖、exports 声明 | R:code:cordis.patch.yml,code:README.md | A:- | S:version 0.32.0 是包语义版本，与 semantic.md 的能力编号 v0.61 不相等，引用能力时一律用能力编号；description 字段被当成变更日志逐版重写
 pnpm-workspace.yaml[FV4T]: F:禁止把 peerDependencies 装成真实副本（autoInstallPeers: false） | R:- | A:- | S:不能改用 .npmrc——pnpm 11.7 起不再从它读取该设置，两种写法实测均无效；被遮蔽的是宿主链接层，症状是新旧版本混搭
 tsconfig.json[FV4T]: F:TypeScript 编译配置：ES2022 加 NodeNext | R:- | A:- | S:module 与 moduleResolution 同为 NodeNext，改一个要一起改
