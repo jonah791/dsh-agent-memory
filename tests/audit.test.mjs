@@ -115,7 +115,7 @@ function seedRaw(kv, entries) {
 
 // ---------- A42 工具面 ----------
 
-test('A42 工具面：memory_audit 已注册（共 30 个工具）', () => {
+test('A42 工具面：memory_audit 已注册（共 33 个工具）', () => {
   const { byName } = setup()
   // 计数是有意硬编码的：工具面每变一次都必须显式确认一次，
   // 否则「少挂了一个工具」会静默通过（2026-10-29 加 memory_dispose 时它如期变红；
@@ -130,9 +130,11 @@ test('A42 工具面：memory_audit 已注册（共 30 个工具）', () => {
   // v0.46 加 memory_misuse（R7 严格上限 · 方案 §13.3）**第十次如期变红**；
   // v0.49 加 memory_consolidate（知识提炼候选 · 方案 §16.1）**第十一次如期变红**；
   // v0.56 加 memory_export（用户控制的「导出」· 方案 §1 第十项）**第十二次如期变红**；
-  // v0.57 加 memory_concept_renumber（概念可读 id 迁移 · 方案 §6.3）**第十三次如期变红**）。
-  assert.equal(byName.size, 32)
+  // v0.57 加 memory_concept_renumber（概念可读 id 迁移 · 方案 §6.3）**第十三次如期变红**；
+  // v0.68 加 memory_get（按 id 读单条全文——recall/browse 只给 snippet）**第十四次如期变红**）。
+  assert.equal(byName.size, 33)
   assert.ok(byName.has('memory_audit'))
+  assert.ok(byName.has('memory_get'))
   assert.ok(byName.has('memory_catalog'))
   assert.ok(byName.has('memory_map'))
   assert.ok(byName.has('memory_misuse'))

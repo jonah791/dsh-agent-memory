@@ -31,7 +31,7 @@ import { browseEntries, bucketLabel } from './search.ts'
 import { recallEntries, relatedOf, relateClosure } from './search.ts'
 import { findNearDuplicates, formatCandidate, parseSimilarDisposition, unresolvedCandidates } from './dedupe.ts'
 import type { DedupeTraceRecord, SimilarDisposition } from './dedupe.ts'
-import { filterRoleView, narrowReadScopes, readableRolesOf, rejectMutationReason, rejectWriteReason, roleViewOf, rolesOf, sessionHeaderOf, sessionIdOf, type MutationAction, type RoleView } from './role.ts'
+import { filterRoleView, narrowReadScopes, readableRolesOf, rejectMutationReason, rejectReason, rejectWriteReason, roleViewOf, rolesOf, sessionHeaderOf, sessionIdOf, type MutationAction, type RoleView } from './role.ts'
 import { ACTION_LABELS, ACTOR_AUDIT_ACTIONS, CODE_LABELS, OUTCOME_LABELS, filterActorAudit, findBursts, shortActorId, type ActorAuditAction, type ActorAuditRecord, type ActorAuditSummary, type ActorIdentity, type AuditTarget } from './actor-audit.ts'
 import { countBySubject, filterBySubject, normalizeSubject, parseSubjectArg, subjectLabel, subjectTag, UNSPECIFIED_SUBJECT } from './subject.ts'
 import { countByProject, executionTag, filterByExecution, normalizeProject, parseExecutionArgs, parseExecutionId } from './execution.ts'
@@ -4395,6 +4395,294 @@ function buildSources(deps: MemoryToolDeps): ToolDefinition {
   })
 }
 
+/** `memory_get` 的 id 最短前缀：4 位以下命中率过高，多义候选不是帮助是噪音 */
+const GET_MIN_PREFIX = 4
+
+/**
+ * 构建 `memory_get` 工具：按 id 读**单条记忆的完整正文**（v0.68）。
+ *
+ * 为什么需要它：`recall` / `memory_browse` 返回的是 `snippet`（片段——为了一次列几十条），
+ * `memory_relate` 只给目标条目的标题，`memory_export` 是把**全库**写成文件。于是
+ * 「手里有 id、想看清这条到底写了什么」此前**无路可走**——尤其压缩检查点（实测 27KB）
+ * 与含多段候选方案的结论。缺口形态是**知道 id 却读不到内容**，而它在
+ * 「先读一遍再决定改不改」的场景里每轮都会遇到。
+ *
+ * 两条与既有读工具**刻意不同**的缺省（都写在参数描述里，不靠调用方猜）：
+ * - **含归档**：`recall` 缺省不含，因为归档条目只会污染一次「找新增」的检索；
+ *   读全文的用途恰恰相反——回看一条已归档的结论，判断该不该恢复。
+ * - **不截断**：正文原样返回（`snippet` 是检索面的妥协，不是正文的性质）。
+ */
+function buildGet(deps: MemoryToolDeps): ToolDefinition {
+  return defineTool({
+    name: 'memory_get',
+    deferLoading: true,
+    description: '按 id 读**一条记忆的完整正文**（`body` 原样返回，不截断）。与 recall / memory_browse 的分工：那两个给 `snippet` 片段（为了一次列几十条），本工具给单条全文（为了一眼看完再决定改不改）。**id 支持完整 uuid 或 ≥4 位唯一前缀**；⚠ `⚓ace5876f@554` 那种是**证据坐标**（会话短号@事件序号），不是条目 id，别拿它当 id。缺省**含归档**（归档是「我决定不再用」，不是「不存在」）。四种「没拿到」分开报——`not-found`（库里没有）/ `out-of-scope`（在你看不见的作用域）/ `permission-denied`（角色准入拒，带判据码）/ `sensitive-blocked`（`L2`/`L3` 未放行）：把「无权看」冒充「不存在」是最贵的错。',
+    parameters: {
+      id: {
+        type: 'string',
+        required: true,
+        description: '条目 id：完整 uuid（`08b4f2e1-2cb3-4add-8e0f-2b1bdf4064d6`）或 ≥4 位唯一前缀（`08b4`）。多义前缀会返回候选列表而不是猜。',
+      },
+      maxChars: {
+        type: 'integer',
+        description: '正文最多取多少字符；**缺省 0 = 全文，不截断**。只有明确知道这条很大（压缩检查点可达 2.7 万字符）且只需看开头时才收窄——截断会在回执里点名原长与省略量，不静默。',
+      },
+      includeSensitive: {
+        type: 'boolean',
+        description: '为 true 才返回 `L2`/`L3` 敏感条目（缺省不含，与 recall / memory_browse 同一口径）。',
+      },
+      includeArchive: {
+        type: 'boolean',
+        description: '是否允许取归档条目；**缺省 true**（与 recall 相反——回看已归档的结论正是本工具的用途之一）。显式传 false 且该条已归档时，回执会点明「它已归档」而不是谎报不存在。',
+      },
+      scope: { type: 'string', description: '作用域覆盖（global 或 workspaceId）；缺省当前 workspace + global。' },
+      role: { type: 'string', description: '角色视角覆盖（缺省按调用者会话身份推导）。' },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ok: { type: 'boolean', required: true },
+          reason: {
+            type: 'string',
+            description: '失败判据码：`not-found` / `out-of-scope` / `permission-denied` / `sensitive-blocked` / `ambiguous` / `bad-id`。**只在 ok=false 时出现**。',
+          },
+          hint: { type: 'string', description: '人可读的下一步（失败时有）' },
+          matchedBy: { type: 'string', description: '`exact`（完整 id）或 `prefix`（前缀命中唯一）' },
+          candidates: {
+            type: 'array',
+            description: '前缀命中多条时的候选（最多 8 条，只给 id 与标题）',
+            items: {
+              type: 'object',
+              additionalProperties: false,
+              properties: {
+                id: { type: 'string', required: true },
+                title: { type: 'string', required: true },
+              },
+            },
+          },
+          entry: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              id: { type: 'string', required: true },
+              kind: { type: 'string', required: true },
+              title: { type: 'string', required: true },
+              body: { type: 'string', required: true },
+              scope: { type: 'string', required: true },
+              archived: { type: 'boolean', required: true },
+              createdAt: { type: 'string', required: true },
+              updatedAt: { type: 'string', required: true },
+              accessedAt: { type: 'string', required: true },
+              tags: { type: 'array', required: true, items: { type: 'string' } },
+              facts: {
+                type: 'array',
+                required: true,
+                items: { type: 'string' },
+                description: '其余元数据的人读行（维度 / 标签 / 别名 / 适用处境 / 观察条件 / 时效 / 归档 / 替代 / 层级 / 引用）。**不参与 schema 强类型**是刻意的：这些是给人看的旁注，不是程序消费字段。',
+              },
+            },
+          },
+          truncated: {
+            type: 'object',
+            description: '正文被截断时的读数（**只在真的截断时出现**——不出现 = 全文）',
+            additionalProperties: false,
+            properties: {
+              maxChars: { type: 'integer', required: true },
+              totalChars: { type: 'integer', required: true },
+              omittedChars: { type: 'integer', required: true },
+            },
+          },
+        },
+      },
+      render: (_args, v) => {
+        if (v.ok === false) {
+          const reason = String(v.reason ?? '')
+          const hint = v.hint !== undefined ? `\n${v.hint}` : ''
+          if (reason === 'ambiguous') {
+            const list = (v.candidates ?? []).map((c) => `  ${c.id}  ${c.title}`).join('\n')
+            return [{ type: 'text', text: `读取失败（前缀命中多条）：\n${list}${hint}` }]
+          }
+          const labels: Record<string, string> = {
+            'not-found': '库里没有这个 id（含归档）',
+            'out-of-scope': '这条记忆在你看不见的作用域里',
+            'permission-denied': '角色准入拒绝',
+            'sensitive-blocked': '这条标了敏感级，未放行',
+            'bad-id': 'id 不合法',
+          }
+          return [{ type: 'text', text: `读取失败：${labels[reason] ?? reason}${hint}` }]
+        }
+        const e = v.entry
+        if (e === undefined) return [{ type: 'text', text: '读取失败：回执缺 entry（实现缺陷）。' }]
+        const sub = [`id=${e.id}`, `${e.kind}@${e.scope}`]
+        if (e.archived) sub.push('已归档')
+        const parts = [`记忆全文：${e.title}`, sub.join(' · '), '────────', e.body, '────────']
+        for (const fact of e.facts) parts.push(fact)
+        if (v.truncated !== undefined) {
+          parts.push(`⚠ 正文已截断：原 ${v.truncated.totalChars} 字符，取前 ${v.truncated.maxChars}，省 ${v.truncated.omittedChars}。要看全文把 maxChars 去掉。`)
+        }
+        return [{ type: 'text', text: parts.join('\n') }]
+      },
+    },
+    async execute(args, exec) {
+      const { config, cwd, view } = await resolveRuntime(exec, deps, args.role)
+      const { readScopes } = resolveScopes({ configScope: config.scope, cwd, explicit: args.scope })
+      const includeArchive = args.includeArchive !== false
+      const rawId = typeof args.id === 'string' ? args.id.trim() : ''
+      if (rawId.length === 0) {
+        return { ok: false, reason: 'bad-id', hint: 'id 不能为空——从 recall / memory_browse / remember 的回执里取完整 id。' }
+      }
+
+      // 作用域收窄走既有单点（`narrowReadScopes`），不自己拼 scope 逻辑——两处收窄就是两个真相。
+      // 角色准入**不在这一步**：先要回答「它存在吗」，再回答「我看得到吗」（见下）。
+      const scopes = narrowReadScopes(readScopes, view, args.scope)
+      // 恒含归档取池：`includeArchive` 的缺省语义由本工具自己解释（见函数头），
+      // 而「已归档」这个事实必须能进判断，不能先被 `list()` 滤掉。
+      const pool = scopes.flatMap((scope) => deps.store.list(scope, { includeArchive: true }))
+
+      // 1) 精确定位；不成再退前缀（≥4 位），多命中就报候选，绝不猜
+      let matched = pool.filter((candidate) => candidate.id === rawId)
+      let matchedBy: 'exact' | 'prefix' = 'exact'
+      if (matched.length === 0) {
+        if (rawId.length < GET_MIN_PREFIX) {
+          return { ok: false, reason: 'bad-id', hint: `前缀至少 ${GET_MIN_PREFIX} 位（实际 ${rawId.length} 位）——太短会命中多条，枚举候选不是帮助。` }
+        }
+        matched = pool.filter((candidate) => candidate.id.startsWith(rawId))
+        matchedBy = 'prefix'
+      }
+      if (matched.length === 0) {
+        // 在别的作用域里存在吗？——「不在你的视野」与「不存在」必须分开报。
+        // `store.get` 是精确匹配 ⇒ 前缀天然为 false（不会误命中）；也不做跨 scope 的前缀扫
+        // （可能命中别 scope 的多条，语义模糊且代价大）。
+        const outside = deps.store.scopes().filter((scope) => !scopes.includes(scope))
+        const foundOutside = outside.some((scope) => deps.store.get(scope, rawId) !== undefined)
+        if (foundOutside) {
+          return {
+            ok: false,
+            reason: 'out-of-scope',
+            hint: `这条记忆存在于你没有视野的作用域里。当前可读作用域：${scopes.join(' / ')}——要读它得先有那个作用域的视野（角色策略或 scope 参数）。`,
+          }
+        }
+        return {
+          ok: false,
+          reason: 'not-found',
+          hint: '库里没有这个 id（含归档）——这不是权限问题。⚠ recall 打印的 `⚓xxxx@N` 是证据坐标（会话短号@事件序号），不是条目 id。',
+        }
+      }
+      if (matched.length > 1) {
+        return {
+          ok: false,
+          reason: 'ambiguous',
+          matchedBy,
+          candidates: matched.slice(0, 8).map((candidate) => ({ id: candidate.id, title: candidate.title })),
+          hint: `前缀「${rawId}」命中 ${matched.length} 条（只列前 ${Math.min(8, matched.length)} 条），给更长前缀或完整 id。`,
+        }
+      }
+
+      const found = matched[0]!
+      // 2) 显式不要归档时的诚实报法：说「它已归档」，不说「不存在」
+      if (found.archived && !includeArchive) {
+        return {
+          ok: false,
+          reason: 'not-found',
+          hint: `id=${found.id} 确实存在，但**已归档**——本工具缺省就含归档，是你显式传了 includeArchive:false。去掉它即可读全文。`,
+        }
+      }
+      // 3) 角色准入：单条判，报出判据码（R1-kind / R2-space / R3-shared / R4-read）
+      if (view.enabled) {
+        const code = rejectReason(view.policy, view.role, found)
+        if (code !== undefined) {
+          // 记审计：知道 id 却读不到，是最值得留痕的一类拒绝（与 recall/browse 同一动作面）
+          audit(deps, exec, config, { action: 'permission', target: { count: 1 }, outcome: 'rejected', code, tool: 'memory_get' })
+          return {
+            ok: false,
+            reason: 'permission-denied',
+            hint: `条目 ${found.id} 归属「${found.role ?? '共享'}」/ 空间「${found.space ?? '未标注'}」，不在角色「${view.role}」的读白名单内（${code}）。` +
+              '注意这条**存在**——是准入拒了，不是不存在。',
+          }
+        }
+      }
+      // 4) 敏感分级：与 recall / memory_browse 同一口径（未标注照常返回——「没判断过」≠「敏感」）
+      if (isSensitiveEntry(found) && args.includeSensitive !== true) {
+        return {
+          ok: false,
+          reason: 'sensitive-blocked',
+          hint: `条目 ${found.id} 标为 ${found.sensitivity}（敏感级）——要读传 includeSensitive:true。`,
+        }
+      }
+
+      // 5) 正文：缺省全文，只有显式给了正整数 maxChars 才截断，且截断必自报
+      const totalChars = found.body.length
+      const cap = typeof args.maxChars === 'number' && Number.isFinite(args.maxChars) && args.maxChars > 0
+        ? Math.floor(args.maxChars)
+        : 0
+      const body = cap > 0 && totalChars > cap ? found.body.slice(0, cap) : found.body
+      const truncated = cap > 0 && totalChars > cap
+        ? { maxChars: cap, totalChars, omittedChars: totalChars - cap }
+        : undefined
+
+      // 6) 其余元数据 → 人读行（不撑大 schema，不丢信息）
+      const facts: string[] = []
+      const dims: string[] = []
+      if (found.memType !== undefined) dims.push(`分类 ${found.memType}`)
+      if (found.space !== undefined) dims.push(`空间 ${found.space}`)
+      if (found.subject !== undefined) dims.push(`主体 ${found.subject}`)
+      if (found.grounding !== undefined) dims.push(`约定 ${found.grounding}`)
+      if (found.provenance !== undefined) dims.push(`来源 ${found.provenance}`)
+      if (found.sensitivity !== undefined) dims.push(`敏感 ${found.sensitivity}`)
+      if (found.role !== undefined) dims.push(`角色 ${found.role}`)
+      if (dims.length > 0) facts.push(`维度：${dims.join(' · ')}`)
+      if (found.key !== undefined) facts.push(`L1 键：${found.key}`)
+      if (found.tags.length > 0) facts.push(`标签：${found.tags.join(' / ')}`)
+      if (found.aliases !== undefined && found.aliases.length > 0) facts.push(`别名：${found.aliases.join(' / ')}`)
+      if (found.cue !== undefined && found.cue.length > 0) facts.push(`适用处境：${found.cue.join(' / ')}`)
+      if (found.watchFor !== undefined && found.watchFor.length > 0) facts.push(`观察条件：${found.watchFor.join(' / ')}`)
+      const temporal: string[] = []
+      if (found.reviewAfter !== undefined) temporal.push(`复查 ${found.reviewAfter}`)
+      if (found.expiry !== undefined) temporal.push(`失效 ${found.expiry}`)
+      if (found.validAfter !== undefined) temporal.push(`生效 ${found.validAfter}`)
+      if (found.occurredAt !== undefined) temporal.push(`事件 ${found.occurredAt}`)
+      if (temporal.length > 0) facts.push(`时效：${temporal.join(' · ')}`)
+      facts.push(`时间：建 ${found.createdAt} · 改 ${found.updatedAt} · 读 ${found.accessedAt}`)
+      if (found.archived) {
+        const reason = found.archivedReasonType !== undefined ? `（${found.archivedReasonType}）` : ''
+        const detail = found.archivedReason !== undefined ? ` · ${found.archivedReason}` : ''
+        facts.push(`已归档${reason}${detail}`)
+      }
+      if (found.supersededBy !== undefined) facts.push(`⚠ 已被 ${found.supersededBy} 替代`)
+      if (found.level !== null) facts.push(`压缩层级：${found.level}（桶 ${found.bucket ?? '—'}）`)
+      if (found.archiveRef !== undefined && found.archiveRef.length > 0) facts.push(`原料：${found.archiveRef.join(' / ')}`)
+      if (found.sourceIds !== undefined && found.sourceIds.length > 0) facts.push(`来源引用：${found.sourceIds.join(' / ')}`)
+      if (found.evidenceRefs !== undefined && found.evidenceRefs.length > 0) facts.push(`证据：${found.evidenceRefs.join(' / ')}`)
+      if (found.author !== undefined) {
+        const who = found.author.sessionId !== undefined ? found.author.sessionId : '—'
+        const preset = found.author.preset !== undefined ? `（${found.author.preset}）` : ''
+        facts.push(`写入者：${who}${preset}`)
+      }
+
+      return {
+        ok: true,
+        matchedBy,
+        entry: {
+          id: found.id,
+          kind: found.kind,
+          title: found.title,
+          body,
+          scope: found.scope,
+          archived: found.archived,
+          createdAt: found.createdAt,
+          updatedAt: found.updatedAt,
+          accessedAt: found.accessedAt,
+          tags: found.tags,
+          facts,
+        },
+        ...(truncated !== undefined ? { truncated } : {}),
+      }
+    },
+  })
+}
+
 /** 构建 memory_relate 工具：从单条记忆展开关联网络（联想导航，v0.3） */
 function buildRelate(deps: MemoryToolDeps): ToolDefinition {
   return defineTool({
@@ -6579,6 +6867,7 @@ export function createMemoryTools(deps: MemoryToolDeps): ToolDefinition[] {
     buildRemember(deps),
     buildRecall(deps),
     buildBrowse(deps),
+    buildGet(deps),
     buildRelate(deps),
     buildLink(deps),
     buildUnlink(deps),
